@@ -4988,8 +4988,10 @@ public class DrvnService {
 			return;
 		}
 
-		drvnMapper.disableGroupPumpCal(changeCal);
-		drvnMapper.enableGroupPumpCal(changeCal);
+		drvnMapper.disableGroupPumpCal(changeCal);	// 해당 조합 펌프 전체 N
+		drvnMapper.enableGroupPumpCal(changeCal);	// 해당 조합 펌프 대상 펌프 Y
+		
+		//drvnMapper.updatePumpComb(changeCal);	// 선택한 조합에 따라 (TB_PUMP_COMBINATION_INF 테이블) PUMP_COMB 업데이트
 
 	}
 

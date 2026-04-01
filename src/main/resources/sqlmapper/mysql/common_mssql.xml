@@ -452,4 +452,32 @@
 		AND
 		TS &gt; DATE_SUB(#{nowDate}, interval 15 minute)
 	</select>
+
+	<select id="selectLatestTagData" parameterType="hashMap" resultType="hashMap">
+		WITH tags AS (
+			<foreach item="item" index="index" collection="tagIds" separator=" UNION ALL ">
+				SELECT #{item} AS TAGNAME
+			</foreach>
+		),
+		latest AS (
+			SELECT
+				TAGNAME, VALUE, TS,
+				ROW_NUMBER() OVER(PARTITION BY TAGNAME ORDER BY TS DESC) as rn
+			FROM TB_RAWDATA
+			WHERE
+				TS &gt;= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+				AND TS &lt;= NOW()
+				AND TAGNAME IN (
+					<foreach item="item" index="index" collection="tagIds" separator=",">
+						#{item}
+					</foreach>
+				)
+		)
+		SELECT
+			T.TAGNAME,
+			NVL(ROUND(L.VALUE, 2), '-') AS VALUE,
+			DATE_FORMAT(L.TS, '%Y-%m-%d %H:%i:%s') AS TS
+		FROM tags T
+		LEFT JOIN latest L ON T.TAGNAME = L.TAGNAME AND L.rn = 1
+	</select>
 </mapper>

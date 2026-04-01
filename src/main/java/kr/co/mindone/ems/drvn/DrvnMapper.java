@@ -435,6 +435,8 @@ public interface DrvnMapper {
 
 	void enableGroupPumpCal(HashMap<String, Object> changeCal);
 
+	void updatePumpComb(HashMap<String,Object> changeCal);
+
 	List<HashMap<String, Object>> getGrpFlPreTag(int pump_grp);
 
 	List<HashMap<String, Object>> selectPumpCombList(HashMap<String, Object> params);
