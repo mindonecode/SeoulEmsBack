@@ -276,4 +276,13 @@ public class CommonService {
 	public String getLastRawDate(String nowDate) {
 		return commonMapper.getLastRawDate(nowDate);
 	}
+
+	/**
+	 * 대상 태그들의 15분내 가장 최신 데이터 조회
+	 * @param map 조회 파라미터
+	 * @return 태그 데이터
+	 */
+	public List<HashMap<String, Object>> selectLatestTagData(HashMap<String,Object> tagIds) {
+		return commonMapper.selectLatestTagData(tagIds);
+	}
 }

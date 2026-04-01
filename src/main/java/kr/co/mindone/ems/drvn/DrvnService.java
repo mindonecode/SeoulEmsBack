@@ -4988,8 +4988,10 @@ public class DrvnService {
 			return;
 		}
 
-		drvnMapper.disableGroupPumpCal(changeCal);
-		drvnMapper.enableGroupPumpCal(changeCal);
+		drvnMapper.disableGroupPumpCal(changeCal);	// 해당 조합 펌프 전체 N
+		drvnMapper.enableGroupPumpCal(changeCal);	// 해당 조합 펌프 대상 펌프 Y
+		
+		//drvnMapper.updatePumpComb(changeCal);	// 선택한 조합에 따라 (TB_PUMP_COMBINATION_INF 테이블) PUMP_COMB 업데이트
 
 	}
 
@@ -5027,6 +5029,18 @@ public class DrvnService {
 			drvnMapper.savePumpComb(map);
 		}
 	}
+	public Map<String, List<Map<String,Object>>> selectWaterLevel(){
+		List<HashMap<String,Object>> selectMapData = drvnMapper.selectWaterLevel();
+		Map<String, List<Map<String,Object>>> result = new HashMap<>();
+		for(Map<String,Object> row: selectMapData){
+			String tag = (String) row.get("TAGNAME");
+			Map<String, Object> point = new HashMap<>();
+			point.put("ts", row.get("TS"));
+			point.put("value", row.get("VALUE"));
+			result.computeIfAbsent(tag, k-> new ArrayList<>()).add(point);
+		}
+		return result;
+	}
 
 	public void updatePumpCombItem(HashMap<String, Object> map) {
 		drvnMapper.updatePumpCombItem(map);
@@ -5049,4 +5063,5 @@ public class DrvnService {
 	public void insertCombPwrUnit(List<HashMap<String, Object>> insertArr) {
 		drvnMapper.insertCombPwrUnit(insertArr);
 	}
+
 }
