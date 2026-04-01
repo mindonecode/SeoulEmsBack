@@ -40,6 +40,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 
 @Slf4j
@@ -487,4 +488,9 @@ public class DrvnController extends BaseController {
 		drvnService.setInsertPumpComn(); // 비동기이므로 바로 리턴됨
 		return ResponseEntity.ok("Pump schedule task triggered.");
 	}
+	@GetMapping("/selectWaterLevel")
+	public ResponseObject<Map<String, List<Map<String,Object>>>> selectWaterLevel(){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectWaterLevel());
+	}
+
 }

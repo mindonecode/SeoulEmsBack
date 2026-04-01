@@ -467,4 +467,6 @@ public interface DrvnMapper {
 	Double selectGsAllCurLinkFirst(HashMap<String, Object> param);
 
 	Double selectGsAllCurNodeFirst(HashMap<String, Object> param);
+	List<HashMap<String,Object>> selectWaterLevel();
+
 }
