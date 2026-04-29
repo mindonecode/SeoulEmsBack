@@ -250,6 +250,19 @@ public class AiController extends BaseController {
 		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, aiService.selectPumpList(map));
 	}
 	/**
+	 * 최대 피크 현황 호출
+	 * @return 최대 피크 현황
+	 */
+	@Operation(summary = "최대 피크 현황", description = "peakMax")
+	@GetMapping("/peakMax")
+	public ResponseObject < Map < String, Object >> selectPeakMax() {
+		Map < String, Object > returnMap = new HashMap < > ();
+
+		returnMap.put("peak_max", aiService.peak_max());
+
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, returnMap);
+	}
+	/**
 	 * 사용량 트렌드 목록 호출
 	 * @param map 시간 단위와 시작 및 종료 날짜에 대한 필터 조건
 	 * @return 사용량 트렌드 목록
@@ -266,13 +279,12 @@ public class AiController extends BaseController {
 	}
 	/**
 	 * 사용량 트렌드 목록 호출 (기간별 요금)
-	 * @param map 시간 범위와 요금 관련 필터 조건
 	 * @return 기간별 요금 데이터
 	 */
 	@Operation(summary = "사용량 트랜드 목록 - 기간별 요금", description = "selectUseTrandRangeCostList")
 	@GetMapping("/selectUseTrandRangeCostList")
-	public ResponseObject < List < HashMap < String, Object >>> selectUseTrandRangeCostList(@RequestParam HashMap < String, Object > map) {
-		Map < String, Object > returnMap = new HashMap < > ();
+	public ResponseObject < List < HashMap < String, Object >>> selectUseTrandRangeCostList() {
+		HashMap < String, Object > returnMap = new HashMap <> ();
 		List < HashMap < String, Object >> tempPwrSumList = new ArrayList < > ();
 		DecimalFormat df = new DecimalFormat("0.00");
 		double dayTcost = 0.0, monthTcost = 0.0, yearTcost = 0.0;
@@ -281,14 +293,14 @@ public class AiController extends BaseController {
 
 		//map.put("range","dayAgo");
 		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
-		map.put("range", "day");
-		tempPwrSumList.addAll(aiService.selectPwrSumList(map));
+		returnMap.put("range", "day");
+		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
 		//map.put("range","week");
 		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
-		map.put("range", "month");
-		tempPwrSumList.addAll(aiService.selectPwrSumList(map));
-		map.put("range", "year");
-		tempPwrSumList.addAll(aiService.selectPwrSumList(map));
+		returnMap.put("range", "month");
+		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
+		returnMap.put("range", "year");
+		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
 
 		for (HashMap < String, Object > item: tempPwrSumList) {
 			if (item.get("range").equals("day")) {

@@ -225,6 +225,7 @@ public interface AiMapper {
 	 * @return 전력 합계 리스트
 	 */
 	List<HashMap<String, Object>> selectPwrSumList(HashMap<String, Object> map);
+	List<HashMap<String, Object>> testSelectPwrSumList(HashMap<String, Object> map);
 
 	/**
 	 * 현재 AI 상태를 조회한다.
