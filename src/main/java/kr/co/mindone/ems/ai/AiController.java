@@ -1107,4 +1107,15 @@ public class AiController extends BaseController {
 	public ResponseObject<HashMap<String, Integer>> getAiModeCount(@RequestParam HashMap<String, Object> param){
 		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, aiService.getAiModeCount(param));
 	}
+
+	/**
+	 * AI 추천모드 펌프조합 변경 알람 조회.
+	 * 폴링용 엔드포인트. AI 추천모드일 때만 PUMP_GRP별 NewPumpComb/AgoPumpComb 비교 결과(변경된 항목만) 반환.
+	 * @return { isAiRecommend, items: [{ pump_grp, regstrTime, currentComb, recommendComb, currentFreq, recommendFreq }] }
+	 */
+	@Operation(summary = "AI 추천모드 펌프조합 변경 알람", description = "TB_MNL_CHN_LOG의 NewPumpComb/AgoPumpComb 비교 — 변경된 PUMP_GRP만 반환")
+	@GetMapping("/pumpRecommendAlarm")
+	public ResponseObject<HashMap<String, Object>> pumpRecommendAlarm() {
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, aiService.pumpRecommendAlarm());
+	}
 }

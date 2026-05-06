@@ -489,8 +489,27 @@ public class DrvnController extends BaseController {
 		return ResponseEntity.ok("Pump schedule task triggered.");
 	}
 	@GetMapping("/selectWaterLevel")
-	public ResponseObject<Map<String, List<Map<String,Object>>>> selectWaterLevel(){
-		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectWaterLevel());
+	public ResponseObject<Map<String, List<Map<String,Object>>>> selectWaterLevel(
+			@RequestParam(required = false) String nowDateTime){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectWaterLevel(nowDateTime));
+	}
+
+	@GetMapping("/selectPumpRunCountHistory/{pump_grp}")
+	public ResponseObject<List<HashMap<String,Object>>> selectPumpRunCountHistory(@PathVariable int pump_grp){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectPumpRunCountHistory(pump_grp));
+	}
+
+	/**
+	 * [GET] 전력 원단위 + 유량 차트 데이터 (정시 기준, t-6h ~ t+6h, 9개 시점).
+	 * @param pump_grp 펌프 계통
+	 * @param nowDateTime (옵션) "yyyy-MM-dd HH:mm" 또는 "yyyy-MM-dd HH:mm:ss" 형식. 미지정 시 현재 시각.
+	 * 응답: [{ts, pwrInterval, flow, pwrUnit, deltaHour, isPredict, runningPumps}]
+	 */
+	@GetMapping("/selectPwrUnitChartData/{pump_grp}")
+	public ResponseObject<List<HashMap<String, Object>>> selectPwrUnitChartData(
+			@PathVariable int pump_grp,
+			@RequestParam(required = false) String nowDateTime){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectPwrUnitChartData(pump_grp, nowDateTime));
 	}
 
 }

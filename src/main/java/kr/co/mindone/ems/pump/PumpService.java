@@ -1414,6 +1414,22 @@ public class PumpService {
      * @param pumpGrpStr 펌프 그룹 리스트
      */
     public void pumpCommand(List < String > pumpGrpStr) {
+        // [DEV/SEOUL] 추천모드 사용자 확인 흐름도 운영 SCADA/Kafka 의존을 우회.
+        // 변경된 펌프만 적재하지 않고, 그룹별 PUMP_IDX 1~N 전체의 최신 PUMP_YN 을
+        // PUMP_IDX DESC 순으로 TB_HMI_CTR_TAG 에 직접 적재 (0번 모드와 동일 동작).
+        String wppNorm = wpp_code == null ? "" : wpp_code.trim().toLowerCase();
+        System.out.println("[PumpService.pumpCommand] entry wpp_code=[" + wpp_code + "] norm=[" + wppNorm + "] pumpGrpStr=" + pumpGrpStr);
+        if ("dev".equals(wppNorm) || "seoul".equals(wppNorm)) {
+            System.out.println("[PumpService.pumpCommand] DEV/SEOUL bypass → devInsertHmiTagFromLatestPumpYn for groups=" + pumpGrpStr);
+            for (String grp : pumpGrpStr) {
+                try {
+                    devInsertHmiTagFromLatestPumpYn(Integer.parseInt(grp));
+                } catch (NumberFormatException e) {
+                    System.out.println("[DEV] pumpCommand: invalid PUMP_GRP=" + grp);
+                }
+            }
+            return;
+        }
         // 이전 명령 초기화 기능
         initCtrTag();
         System.out.println("pumpCommand Start:" + pumpGrpStr+ "/ isRunningStatusMin():" +isRunningStatusMin());
@@ -2573,8 +2589,22 @@ public class PumpService {
      * @param value 정수형 제어 값
      */
     private void insertPumpControlData(String opx_idx, String ctr_nm, String tag, String anlyCd, int value) {
-        //tempCtrItem.put("OPT_IDX", tempCtrItem.get("OPT_IDX").toString());
-        //System.out.println("tempCtrItem:"+tempCtrItem.toString());
+        // [dev/seoul 환경 단순화] WAIT / RUN_STATUS / STOP_STATUS 는 SCADA 통신용 보조 명령.
+        // SCADA 가 없는 dev/seoul 에서는 RUN/STOP 만 적재해도 충분 — 보조 명령은 INSERT 스킵.
+        if (("dev".equals(wpp_code) || "seoul".equals(wpp_code))
+                && ("WAIT".equals(anlyCd) || "RUN_STATUS".equals(anlyCd) || "STOP_STATUS".equals(anlyCd))) {
+            return;
+        }
+        // [dev/seoul] HMI_CTR_TAG ANLY_CD/VALUE를 RUN→"1"/1, STOP→"0"/0 으로 정규화 적재.
+        if ("dev".equals(wpp_code) || "seoul".equals(wpp_code)) {
+            if ("RUN".equals(anlyCd)) {
+                anlyCd = "1";
+                value = 1;
+            } else if ("STOP".equals(anlyCd)) {
+                anlyCd = "0";
+                value = 0;
+            }
+        }
         HashMap < String, Object > tempCtrItem = new HashMap < > ();
         tempCtrItem.put("OPT_IDX", opx_idx);
         tempCtrItem.put("CTR_NM", ctr_nm);
@@ -2585,6 +2615,77 @@ public class PumpService {
         tempCtrItem.put("FLAG", 0);
         tempCtrItem.put("AI_STATUS", getAiControlStatus());
         pumpMapper.insertHmiTag(tempCtrItem);
+    }
+
+    /**
+     * [DEV] 거리 계산 결과(TB_CTR_PUMPYN_RST의 가장 최신 OPT_IDX)의 PUMP_YN 값을 그대로
+     * RUN/STOP 명령으로 변환해 TB_HMI_CTR_TAG에 적재. 운영 흐름(SCADA/Kafka 의존) 우회용.
+     * @param pumpGrp 대상 펌프 그룹
+     * @return INSERT된 row 수
+     */
+    public int devInsertHmiTagFromLatestPumpYn(int pumpGrp) {
+        java.util.HashMap<String, Object> param = new java.util.HashMap<>();
+        param.put("PUMP_GRP", pumpGrp);
+        List<HashMap<String, Object>> latest = pumpMapper.selectLatestPumpYnByGrp(param);
+        if (latest == null || latest.isEmpty()) {
+            System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: no PUMP_YN row for PUMP_GRP=" + pumpGrp);
+            return 0;
+        }
+        // INSERT 순서 강제: PUMP_IDX DESC (9가 먼저, 1이 마지막). SQL ORDER BY 결과에 의존하지 않음.
+        latest = new java.util.ArrayList<>(latest);
+        latest.sort((a, b) -> {
+            int ai = (a == null || a.get("PUMP_IDX") == null) ? Integer.MIN_VALUE
+                    : Integer.parseInt(a.get("PUMP_IDX").toString());
+            int bi = (b == null || b.get("PUMP_IDX") == null) ? Integer.MIN_VALUE
+                    : Integer.parseInt(b.get("PUMP_IDX").toString());
+            return Integer.compare(bi, ai);
+        });
+
+        List<HashMap<String, Object>> pumpInfList = pumpMapper.selectPumpInfList();
+        java.util.Map<Integer, HashMap<String, Object>> pumpInfMap = new java.util.HashMap<>();
+        if (pumpInfList != null) {
+            for (HashMap<String, Object> inf : pumpInfList) {
+                if (inf == null || inf.get("PUMP_IDX") == null) continue;
+                pumpInfMap.put(Integer.parseInt(inf.get("PUMP_IDX").toString()), inf);
+            }
+        }
+
+        int inserted = 0;
+        String lastOptIdx = "";
+        for (HashMap<String, Object> row : latest) {
+            if (row == null || row.get("PUMP_IDX") == null) continue;
+            if (row.get("OPT_IDX") == null) {
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: missing OPT_IDX for PUMP_IDX=" + row.get("PUMP_IDX"));
+                continue;
+            }
+            String optIdx = row.get("OPT_IDX").toString();
+            lastOptIdx = optIdx;
+            int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
+            String pumpYn = String.valueOf(row.get("PUMP_YN"));
+            String anlyCd = "1".equals(pumpYn) ? "RUN" : "STOP";
+
+            HashMap<String, Object> pumpInf = pumpInfMap.get(pumpIdx);
+            if (pumpInf == null) {
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: no pump master for PUMP_IDX=" + pumpIdx);
+                continue;
+            }
+            Object pumpNmObj = pumpInf.get("PUMP_NM");
+            Object tagObj = "RUN".equals(anlyCd) ? pumpInf.get("CTR_AUTO_TAG") : pumpInf.get("CTR_AUTO_STOP_TAG");
+            if (pumpNmObj == null || tagObj == null) {
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: missing PUMP_NM or TAG for PUMP_IDX=" + pumpIdx + ", anlyCd=" + anlyCd);
+                continue;
+            }
+            String ctrNm = pumpNmObj.toString();
+            String tag = tagObj.toString();
+            if (tag.isEmpty()) {
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: empty TAG for PUMP_IDX=" + pumpIdx + ", anlyCd=" + anlyCd);
+                continue;
+            }
+            insertPumpControlData(optIdx, ctrNm, tag, anlyCd, 1);
+            inserted++;
+        }
+        System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn inserted " + inserted + " rows (OPT_IDX=" + lastOptIdx + ")");
+        return inserted;
     }
 
     /**
@@ -2864,8 +2965,11 @@ public class PumpService {
         int ctrLimit = 5;
         if (wpp_code.equals("ba") || wpp_code.equals("gr") || wpp_code.equals("gs") || wpp_code.equals("gu")) {
             ctrLimit = 20;
-        }else if(wpp_code.equals("wm")){
+        } else if (wpp_code.equals("wm")) {
             ctrLimit = 70;
+        } else if (wpp_code.equals("dev") || wpp_code.equals("seoul")) {
+            // dev/seoul 환경: 한 번에 9개 펌프(전체)까지 허용 — 안 그러면 6건 변경도 ctrLimit=5 초과로 result.clear() 됨
+            ctrLimit = 30;
         }
 
         if (wpp_code.equals("gs")) {
@@ -3696,18 +3800,19 @@ public class PumpService {
         List < HashMap < String, Object >> result = new ArrayList < > ();
         List < HashMap < String, Object >> useList = pumpMapper.nowRunAllPumpList();
         List < HashMap < String, Object >> priList = pumpMapper.nowRunAllPriPumpList();
+        if (useList == null) useList = new ArrayList < > ();
+        if (priList == null) priList = new ArrayList < > ();
         for (HashMap < String, Object > item: useList) {
-            //System.out.println("nowRunAllPumpList item :"+item.toString());
+            if (item == null || item.get("PUMP_IDX") == null) continue;
             for (HashMap < String, Object > subItem: priList) {
-                //System.out.println("nowRunAllPumpList subItem :"+subItem.toString());
-                //System.out.println("nowRunAllPumpList IF :"+subItem.toString());
+                if (subItem == null || subItem.get("PUMP_IDX") == null) continue;
                 if (item.get("PUMP_IDX").toString().equals(subItem.get("PUMP_IDX").toString())) {
-                    item.put("PRI", Double.parseDouble(subItem.get("PRI").toString()));
+                    Object pri = subItem.get("PRI");
+                    item.put("PRI", pri == null ? 0.0 : Double.parseDouble(pri.toString()));
                     result.add(item);
                 }
             }
         }
-        //System.out.println("nowRunAllPumpList result :"+result.toString());
         return removeDecimalPoint(result, "FREQ");
     }
 

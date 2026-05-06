@@ -3173,19 +3173,24 @@
 
 
 	<select id="pumpDrvnMinute" parameterType="hashmap" resultType="hashmap">
+		<!--
+		  주파수(FREQ) 의존성 제거:
+		    - SELECT 의 pre_freq/cur_freq 제거
+		    - rst 서브쿼리 FREQ_VALUES GROUP_CONCAT 제거
+		    - raw 서브쿼리 SPI_USE_RST GROUP_CONCAT 제거
+		    - raw 서브쿼리 JOIN 조건에서 SPI_TAG OR 절 제거 (PMB_TAG 만 사용)
+		  호출자(createPumpCombStatus) 는 cur_freq/pre_freq null 가드가 이미 있어 호환됨.
+		-->
 		SELECT
 		DATE_FORMAT(rst.RGSTR_TIME, '%Y-%m-%d %H:%i:%s') as rgstr_time,
 		rst.PUMP_YN_RST as 'pre_comb',
 		raw.PUMP_USE_RST as 'cur_comb',
-		rst.FREQ_VALUES as 'pre_freq',
-		raw.SPI_USE_RST as 'cur_freq',
 		rst.FLOW_CTR
 		FROM
 		(
 		SELECT
 		A.RGSTR_TIME,
 		GROUP_CONCAT(CASE WHEN A.PUMP_YN = 1 THEN A.PUMP_IDX END ORDER BY A.PUMP_IDX ASC) AS PUMP_YN_RST,
-		GROUP_CONCAT(CASE WHEN A.FREQ != 0 THEN ROUND(A.FREQ) END ORDER BY A.FREQ ASC) AS FREQ_VALUES,
 		A.FLOW_CTR
 		FROM (
 		SELECT
@@ -3193,7 +3198,6 @@
 		COALESCE(t2.PUMP_YN, t1.PUMP_YN) AS PUMP_YN,
 		COALESCE(t2.RGSTR_TIME, t1.RGSTR_TIME) AS RGSTR_TIME,
 		COALESCE(t2.RATE_CTGRY, 'None') AS RATE_CTGRY,
-		COALESCE(t2.FREQ, t1.FREQ) AS FREQ,
 		COALESCE(t2.FLOW_CTR, 'None') AS FLOW_CTR,
 		CASE
 		WHEN t2.OPT_IDX is not null THEN 1
@@ -3223,21 +3227,13 @@
 		(
 		SELECT
 		tr.TS as TS,
-		GROUP_CONCAT(CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END ORDER BY tc.PUMP_IDX ASC) AS PUMP_USE_RST,
-		GROUP_CONCAT(
-		CASE
-		WHEN tr.TAGNAME = tc.SPI_TAG AND ROUND(tr.VALUE) != 0 THEN ROUND(tr.VALUE)
-		END
-		ORDER BY tc.PUMP_IDX ASC SEPARATOR ','
-		) AS SPI_USE_RST
+		GROUP_CONCAT(CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END ORDER BY tc.PUMP_IDX ASC) AS PUMP_USE_RST
 		FROM
 		TB_RAWDATA tr
 		JOIN
 		TB_CTR_PRF_PUMPMST_INF tc
 		ON
 		tr.TAGNAME = tc.PMB_TAG
-		OR
-		tr.TAGNAME = tc.SPI_TAG
 		WHERE
 		tc.PUMP_GRP = #{pump_grp}
 		AND
@@ -3245,7 +3241,14 @@
 		GROUP BY
 		tr.TS
 		) raw
-		ON rst.RGSTR_TIME = raw.TS
+		<!--
+		  ON 1=1 (cross join):
+		    rst 는 TB_CTR_PUMPYN_RST 10분 단위, raw 는 TB_RAWDATA 1분 단위라
+		    두 시각이 정확히 일치하지 않을 때가 대부분.
+		    rst, raw 각각 1행만 반환하도록 max+GROUP BY 로 보장하므로
+		    1=1 결합으로도 결과 행이 폭주하지 않으며 cur_comb 항상 채워짐.
+		-->
+		ON 1 = 1
 		GROUP BY
 		rst.RGSTR_TIME
 		ORDER BY

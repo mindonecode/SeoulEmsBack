@@ -1019,6 +1019,19 @@
 		FUNC_TYP = 'PumpStatus'
 	</update>
 
+	<select id="selectLatestPumpYnByGrp" parameterType="map" resultType="hashMap">
+		<!-- [DEV/SEOUL] 그룹 내 모든 PUMP_IDX 의 가장 최신 PUMP_YN 한 행씩.
+		     ORDER BY PUMP_IDX DESC: 9 → 1 순으로 적재되어 9가 먼저 INSERT, 1이 마지막. -->
+		SELECT OPT_IDX, PUMP_IDX, PUMP_YN
+		FROM (
+			SELECT OPT_IDX, PUMP_IDX, PUMP_YN,
+			       ROW_NUMBER() OVER (PARTITION BY PUMP_IDX ORDER BY RGSTR_TIME DESC, OPT_IDX DESC) AS rn
+			FROM TB_CTR_PUMPYN_RST
+			WHERE PUMP_GRP = #{PUMP_GRP}
+		) t
+		WHERE rn = 1
+		ORDER BY PUMP_IDX DESC
+	</select>
 
 
 </mapper>

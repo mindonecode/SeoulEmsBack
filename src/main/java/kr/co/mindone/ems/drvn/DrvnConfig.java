@@ -290,12 +290,13 @@ public class DrvnConfig {
 	private double getCorrectedValue(List<HashMap<String, Object>> dataList, String dstrbId, String nowDateTime) {
 		// 기존 로직
 		if (dataList == null || dataList.isEmpty() || (float) dataList.get(0).get("value") == 0.0) {
-			log.warn("데이터가 없거나 0입니다. dstrbId: {}. 최근 10분간의 평균값으로 보정합니다.", dstrbId);
+			Object originalValue = (dataList == null || dataList.isEmpty()) ? "EMPTY" : dataList.get(0).get("value");
+			log.warn("데이터가 없거나 0입니다. dstrbId: {}, 원본값: {}. 최근 10분간의 평균값으로 보정합니다.", dstrbId, originalValue);
 
 			// nowDateTime을 추가 파라미터로 전달
 			Double recentAvg = drvnMapper.selectAverageValueLast10Minutes(dstrbId, nowDateTime);
 			if (recentAvg != null) {
-				log.info("보정된 값: {} -> {}", (float) dataList.get(0).get("value"), recentAvg);
+				log.info("보정된 값: {} -> {}", originalValue, recentAvg);
 				return recentAvg;
 			} else {
 				log.warn("최근 10분간 유효한 데이터가 없어 보정에 실패했습니다. dstrbId: {}", dstrbId);
@@ -645,6 +646,14 @@ public class DrvnConfig {
 		loadCheckLog.append("Final closestPointIndex: " + closestPointIndex + "#");
 		if (closestPointIndex != -1) {
 			loadCheckLog.append("Selected Pump Combination: " + collectData.get(closestPointIndex).get("pumpComb") + "#");
+			if (returnComb.isEmpty()) {
+				Object pc = collectData.get(closestPointIndex).get("pumpComb");
+				if (pc instanceof List) {
+					@SuppressWarnings("unchecked")
+					List<String> pcList = (List<String>) pc;
+					returnComb = new ArrayList<>(pcList);
+				}
+			}
 		}
 		loadCheckLog.append("--------------------#");
 		List<String> agoComb = new ArrayList<>();

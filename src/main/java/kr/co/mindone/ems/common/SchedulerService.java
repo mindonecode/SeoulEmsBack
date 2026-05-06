@@ -178,7 +178,7 @@ public class SchedulerService {
 //        String runDate = dateFormat.format(currentDate);
             String runDate = aiService.getAIPumpTime();
             if(wpp_code.equals("gs") || wpp_code.equals("ba") || wpp_code.equals("gu")
-                    || wpp_code.equals("wm") || wpp_code.equals("gr"))
+                    || wpp_code.equals("wm") || wpp_code.equals("gr")|| wpp_code.equals("dev") || wpp_code.equals("seoul"))
             {
                 List<HashMap<String, Object>> aiList = commonService.selectAiStatusAllgrp();
 

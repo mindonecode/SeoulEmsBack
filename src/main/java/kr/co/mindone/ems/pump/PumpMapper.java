@@ -27,6 +27,11 @@ interface PumpMapper {
     List < HashMap < String, Object >> nowRunAllPumpList();
 
     /**
+     * [DEV] TB_CTR_PUMPYN_RST의 최신 OPT_IDX 그룹의 PUMP_GRP/PUMP_IDX/PUMP_YN 조회 (dev 시연용)
+     */
+    List < HashMap < String, Object >> selectLatestPumpYnByGrp(java.util.Map < String, Object > param);
+
+    /**
      * 현재 작동 중인 주요 펌프 리스트 조회
      * @return 현재 작동 중인 주요 펌프의 정보를 담은 리스트
      */
