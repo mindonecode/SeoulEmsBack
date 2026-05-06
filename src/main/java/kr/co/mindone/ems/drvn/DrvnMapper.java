@@ -471,4 +471,37 @@ public interface DrvnMapper {
 	Double selectGsAllCurNodeFirst(HashMap<String, Object> param);
 	List<HashMap<String,Object>> selectWaterLevel();
 
+	List<HashMap<String,Object>> selectWaterLevelByRange(HashMap<String, Object> param);
+
+	List<HashMap<String,Object>> selectPumpRunHistoryByGrp(HashMap<String, Object> param);
+
+	/**
+	 * 다중 태그 × 다중 시점 실측값 조회 (TB_RAWDATA, 10분 정렬).
+	 * @param param tagList(List<String>), startDate(yyyy-MM-dd HH:mm:00), endDate(yyyy-MM-dd HH:mm:00)
+	 * @return [{tag, ts(yyyy-MM-dd HH:mm), value(Object)}]
+	 */
+	List<HashMap<String, Object>> selectMultiTagRawRange(HashMap<String, Object> param);
+
+	/**
+	 * 다중 태그 × 다중 PRDCT_TIME 예측값 조회 (TB_CTR_TNK_RST).
+	 * 각 (tag, prdctTime) 조합에 대해 nowDateTime 이하의 최신 RGSTR_TIME 행을 반환.
+	 * @param param tagList(List<String>), prdctTimeList(List<String>), nowDateTime
+	 * @return [{tag, ts(yyyy-MM-dd HH:mm), value(Object)}]
+	 */
+	List<HashMap<String, Object>> selectMultiTagPrdctRange(HashMap<String, Object> param);
+
+	/**
+	 * 시점별 펌프 가동 여부 실측 조회 (PMB_TAG via TB_RAWDATA).
+	 * @param param pumpGrp, startDate, endDate
+	 * @return [{ts, pumpIdx, pumpYn}]
+	 */
+	List<HashMap<String, Object>> selectMultiTimePumpYnRaw(HashMap<String, Object> param);
+
+	/**
+	 * 가장 최근 RGSTR_TIME 기준 펌프별 예측 가동 여부 (TB_CTR_PUMPYN_RST).
+	 * @param param pumpGrp, nowDateTime
+	 * @return [{pumpIdx, pumpYn}]
+	 */
+	List<HashMap<String, Object>> selectLatestPumpYnPrdct(HashMap<String, Object> param);
+
 }

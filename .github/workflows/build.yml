@@ -1,4 +1,4 @@
-name: Remote Script Execution
+name: sbd_back
 
 on:
   push:
@@ -20,5 +20,5 @@ jobs:
           port: ${{ secrets.port }}
           password: ${{ secrets.password }}
           script: |
-            cd /home/mindone/
-            ./emsBackAction.sh
+            cd /d D:\SBD_Proj\SeoulEmsBack
+            call sbdBackStart.bat

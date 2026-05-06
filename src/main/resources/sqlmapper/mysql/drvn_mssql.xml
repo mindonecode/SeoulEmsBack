@@ -7,8 +7,8 @@
 			DATE_SUB(MAX(RGSTR_TIME), INTERVAL 3 MINUTE)
 		from
 			TB_CTR_PUMPYN_RST
-<!--		WHERE-->
-<!--			RGSTR_TIME &lt;= DATE_ADD(#{nowDate}, INTERVAL 10 MINUTE)-->
+		WHERE
+			RGSTR_TIME &lt;= DATE_ADD(#{nowDate}, INTERVAL 10 MINUTE)
 <!--		AND-->
 <!--			RGSTR_TIME &gt; DATE_SUB(#{nowDate}, INTERVAL 1 DAY);-->
 	</select>
@@ -395,53 +395,56 @@
 		SELECT
 			tctr.DSTRB_ID as junction_id,
 			tctr.PRDCT_VALUE as value,
-			DATE_FORMAT(tctr.RGSTR_TIME, '%Y-%m-%d %H:%i') as ts
+			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts
 		from
 			TB_CTR_TNK_RST tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
 			and
+			tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 minute)
+			and
 		<if test="first == true">
-			RGSTR_TIME &lt;= DATE_ADD(#{startDate}, INTERVAL 1 minute)
-				and
-			RGSTR_TIME &gt; DATE_SUB(#{startDate}, INTERVAL 5 minute)
+			PRDCT_TIME &gt;= #{startDate}
 			order by
-				tctr.RGSTR_TIME desc limit 1
+				tctr.PRDCT_TIME asc limit 1
 		</if>
 		<if test="first != true">
 					<if test="intradotion == true">
-						tctr.RGSTR_TIME &lt;= #{startDate}
+						tctr.PRDCT_TIME &lt;= #{startDate}
 					</if>
 					<if test="intradotion != true">
-						tctr.RGSTR_TIME &lt;= #{startDate}
+						tctr.PRDCT_TIME &lt;= #{startDate}
 					</if>
 					and
-						tctr.RGSTR_TIME &gt;= DATE_SUB(#{startDate}, INTERVAL #{range} hour)
+						tctr.PRDCT_TIME &gt;= DATE_SUB(#{startDate}, INTERVAL #{range} hour)
 					and
-						MINUTE(tctr.RGSTR_TIME) % #{cycle} = 0
-				group by tctr.RGSTR_TIME
+						MINUTE(tctr.PRDCT_TIME) % #{cycle} = 0
+				group by tctr.PRDCT_TIME
 			order by
-				tctr.RGSTR_TIME
+				tctr.PRDCT_TIME
 		</if>
 		
 	</select>
 	
 	<select id="prdctFlowPressure" parameterType="hashmap" resultType="hashmap">
+		<!--
+		  10분 단위 예측: 가장 최근 RGSTR_TIME(수행 시점) 의 10분 후(PRDCT_TIME) 예측 행 1건만 반환.
+		  ts 는 PRDCT_TIME 기준 (예측 시점) 으로 표기.
+		-->
 		SELECT
 			tctr.PRDCT_VALUE as value,
-			DATE_FORMAT(tctr.RGSTR_TIME, '%Y-%m-%d %H:%i') as ts
+			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts
 		from
 			TB_CTR_TNK_RST tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
-			and
-				RGSTR_TIME &lt;= #{nowDateTime}
-				and
-				RGSTR_TIME &gt;= DATE_SUB(#{nowDateTime}, interval 10 minute)
-		group by
-			tctr.RGSTR_TIME
-		order by
-			tctr.RGSTR_TIME desc limit 1
+			and tctr.RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
+				 WHERE UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
+				   AND RGSTR_TIME &lt;= #{nowDateTime}
+			)
+			and tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 MINUTE)
+		limit 1
 	</select>
 	<select id="curFlowPressure" parameterType="hashmap" resultType="hashmap">
 		SELECT
@@ -795,16 +798,21 @@
 	</select>
 	
 	<select id="selectAverageValueLast10Minutes" resultType="double">
+		<!--
+		  EMPTY 보정용 fallback: 10분 차이(RGSTR_TIME→PRDCT_TIME = +10분) 예측 행 중
+		  최근 10건 PRDCT_VALUE 평균. 0/NULL 행은 제외.
+		-->
 		SELECT AVG(PRDCT_VALUE)
 		FROM (
-		SELECT PRDCT_VALUE
-		FROM TB_CTR_TNK_RST
-		WHERE DSTRB_ID = #{DSTRB_ID}
-		AND PRDCT_VALUE IS NOT NULL
-		AND PRDCT_VALUE != 0
-		AND RGSTR_TIME <![CDATA[ <= ]]> #{nowDateTime}
-		ORDER BY RGSTR_TIME DESC
-		LIMIT 10
+			SELECT PRDCT_VALUE
+			FROM TB_CTR_TNK_RST
+			WHERE DSTRB_ID = #{DSTRB_ID}
+			  AND PRDCT_VALUE IS NOT NULL
+			  AND PRDCT_VALUE != 0
+			  AND RGSTR_TIME <![CDATA[ <= ]]> #{nowDateTime}
+			  AND PRDCT_TIME = DATE_ADD(RGSTR_TIME, INTERVAL 10 MINUTE)
+			ORDER BY RGSTR_TIME DESC
+			LIMIT 10
 		) AS recent_data
 	</select>
 	
@@ -1310,10 +1318,14 @@
 			TB_CTR_PUMPYN_RST AS rst
 				LEFT JOIN
 			TB_CTR_PUMPYN_INQUIRY AS inquiry ON rst.OPT_IDX = inquiry.OPT_IDX AND rst.PUMP_IDX = inquiry.PUMP_IDX AND rst.PUMP_GRP = inquiry.PUMP_GRP
-		WHERE
-		<if test="first == true">
-			rst.RGSTR_TIME = (select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST where RGSTR_TIME &lt;= DATE_ADD(#{startDate}, interval 1 minute) and RGSTR_TIME &gt; DATE_SUB(#{startDate}, interval 10 minute))
-		</if>
+			WHERE
+			<if test="first == true">
+				rst.RGSTR_TIME = (
+					select min(RGSTR_TIME)
+					from TB_CTR_PUMPYN_RST
+					where DATE_ADD(RGSTR_TIME, interval 10 minute) &gt;= #{startDate}
+				)
+			</if>
 		<if test="first != true">
 			rst.RGSTR_TIME &lt;= #{startDate}
 				AND
@@ -1349,13 +1361,17 @@
 			TB_CTR_PUMPYN_RST AS rst
 		LEFT JOIN
 			TB_CTR_PUMPYN_INQUIRY AS inquiry ON rst.OPT_IDX = inquiry.OPT_IDX AND rst.PUMP_IDX = inquiry.PUMP_IDX and rst.PUMP_GRP = inquiry.PUMP_GRP
-		WHERE
-		<if test="pump_grp != 0">
-			rst.PUMP_GRP = #{pump_grp}
-			AND
-		</if>
-			rst.RGSTR_TIME = (select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST where RGSTR_TIME &lt;= DATE_ADD(#{startDate}, interval 1 minute) and RGSTR_TIME &gt; DATE_SUB(#{startDate}, interval 10 minute))
-		GROUP BY rst.PUMP_IDX
+			WHERE
+			<if test="pump_grp != 0">
+				rst.PUMP_GRP = #{pump_grp}
+				AND
+			</if>
+				rst.RGSTR_TIME = (
+					select min(RGSTR_TIME)
+					from TB_CTR_PUMPYN_RST
+					where DATE_ADD(RGSTR_TIME, interval 10 minute) &gt;= #{startDate}
+				)
+			GROUP BY rst.PUMP_IDX
 		ORDER BY
 			rst.RGSTR_TIME,
 			COALESCE(inquiry.PUMP_IDX, rst.PUMP_IDX) ASC;
@@ -2336,6 +2352,137 @@
 		'WS03Q0_P_WTDWLM011_ILE'
 		)
 		AND TS >= DATE_SUB(NOW(), INTERVAL 6 HOUR);
+	</select>
+
+	<!--
+	  수위 5개 태그를 정각 시점 리스트(tsList)로 조회.
+	  전력원단위 차트와 동일 시간 윈도우의 9개 정각 중 과거/현재 5개(t-6h, t-3h, t-2h, t-1h, t) 사용.
+	-->
+	<select id="selectWaterLevelByRange" parameterType="hashmap" resultType="HashMap">
+		SELECT TS, TAGNAME, VALUE
+		FROM TB_RAWDATA
+		WHERE TAGNAME IN (
+		'ZG01Q0_P_WTDWLM011_ILE',
+		'WB01Q0_P_WTDWLM021_ILE',
+		'WB02Q0_P_WTDWLM021_ILE',
+		'WJ55Q0_P_WTDWLE011_ILE',
+		'WS03Q0_P_WTDWLM011_ILE'
+		)
+		AND TS IN
+		<foreach item="ts" collection="tsList" open="(" separator="," close=")">
+			#{ts}
+		</foreach>
+		ORDER BY TS, TAGNAME
+	</select>
+
+	<select id="selectPumpRunHistoryByGrp" parameterType="hashmap" resultType="HashMap">
+		SELECT
+			rd.TS         AS TS,
+			rd.TAGNAME    AS TAGNAME,
+			rd.VALUE      AS VALUE,
+			cppi.PUMP_IDX AS PUMP_IDX
+		FROM TB_RAWDATA rd
+		JOIN TB_CTR_PRF_PUMPMST_INF cppi
+		  ON cppi.PMB_TAG = rd.TAGNAME
+		WHERE cppi.PUMP_GRP = #{PUMP_GRP}
+		  AND cppi.USE_YN = '1'
+		  AND rd.TS &gt;= DATE_SUB(NOW(), INTERVAL 6 HOUR)
+		ORDER BY rd.TS
+	</select>
+
+	<!--
+	  10분 단위 IWH/UFR 실측 조회 (TB_RAWDATA).
+	  - tagList: 조회할 태그명 리스트 (전력 9개 + 유량 1개 등)
+	  - startDate, endDate: TS 범위 (양 끝 포함)
+	  - 10분 정렬된 분 단위 값만 반환.
+	-->
+	<select id="selectMultiTagRawRange" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			TAGNAME as tag,
+			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') as ts,
+			VALUE as value
+		FROM TB_RAWDATA
+		WHERE TAGNAME IN
+			<foreach item="tag" collection="tagList" open="(" separator="," close=")">
+				#{tag}
+			</foreach>
+			AND TS &gt;= #{startDate}
+			AND TS &lt;= #{endDate}
+			AND MINUTE(TS) % 10 = 0
+			AND SECOND(TS) = 0
+		ORDER BY TS, TAGNAME
+	</select>
+
+	<!--
+	  10분 단위 펌프 가동 여부 실측 조회 (TB_RAWDATA + PMB_TAG).
+	  - pumpGrp: 펌프 계통
+	  - startDate, endDate: TS 범위
+	  반환: [{ts, pumpIdx, pumpYn(0/1)}]
+	-->
+	<select id="selectMultiTimePumpYnRaw" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') as ts,
+			tcppi.PUMP_IDX as pumpIdx,
+			tr.VALUE as pumpYn
+		FROM TB_CTR_PRF_PUMPMST_INF tcppi
+		JOIN TB_RAWDATA tr ON tr.TAGNAME = tcppi.PMB_TAG
+		WHERE tcppi.PUMP_GRP = #{pumpGrp}
+			AND tr.TS &gt;= #{startDate}
+			AND tr.TS &lt;= #{endDate}
+			AND MINUTE(tr.TS) % 10 = 0
+			AND SECOND(tr.TS) = 0
+		ORDER BY tr.TS, tcppi.PUMP_IDX
+	</select>
+
+	<!--
+	  가장 최근 RGSTR_TIME 기준 펌프별 예측 가동 여부 조회.
+	  TB_CTR_PUMPYN_RST 에 PRDCT_TIME 컬럼이 없어 시점별 분리는 불가 — 가장 최근 RGSTR_TIME 의 가동 조합을 미래 시점 전체에 적용.
+	  반환: [{pumpIdx, pumpYn}]
+	-->
+	<select id="selectLatestPumpYnPrdct" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			PUMP_IDX as pumpIdx,
+			PUMP_YN as pumpYn
+		FROM TB_CTR_PUMPYN_RST
+		WHERE PUMP_GRP = #{pumpGrp}
+			AND RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_PUMPYN_RST
+				WHERE PUMP_GRP = #{pumpGrp}
+					AND RGSTR_TIME &lt;= #{nowDateTime}
+			)
+	</select>
+
+	<!--
+	  10분 단위 IWH/UFR 예측 조회 (TB_CTR_TNK_RST).
+	  - tagList: DSTRB_ID 리스트
+	  - prdctTimeList: 미래 PRDCT_TIME 리스트 (예: ["2026-05-06 13:50","2026-05-06 14:00",...])
+	  - nowDateTime: 현재 시각. 이 시각 이하의 RGSTR_TIME 중 가장 최근 행을 사용.
+	  태그×시점 조합별로 가장 최근 RGSTR_TIME 의 PRDCT_VALUE 1건을 반환.
+	-->
+	<select id="selectMultiTagPrdctRange" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			t.DSTRB_ID as tag,
+			DATE_FORMAT(t.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts,
+			t.PRDCT_VALUE as value
+		FROM TB_CTR_TNK_RST t
+		JOIN (
+			SELECT DSTRB_ID, PRDCT_TIME, MAX(RGSTR_TIME) as MAX_RGSTR
+			FROM TB_CTR_TNK_RST
+			WHERE DSTRB_ID IN
+				<foreach item="tag" collection="tagList" open="(" separator="," close=")">
+					#{tag}
+				</foreach>
+				AND PRDCT_TIME IN
+				<foreach item="ptime" collection="prdctTimeList" open="(" separator="," close=")">
+					#{ptime}
+				</foreach>
+				AND RGSTR_TIME &lt;= #{nowDateTime}
+			GROUP BY DSTRB_ID, PRDCT_TIME
+		) m
+			ON t.DSTRB_ID = m.DSTRB_ID
+			AND t.PRDCT_TIME = m.PRDCT_TIME
+			AND t.RGSTR_TIME = m.MAX_RGSTR
+		ORDER BY t.PRDCT_TIME, t.DSTRB_ID
 	</select>
 
 </mapper>

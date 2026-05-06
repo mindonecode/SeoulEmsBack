@@ -367,7 +367,8 @@ public class AiService {
      * @return 전력 합계 리스트
      */
     List < HashMap < String, Object >> selectPwrSumList(HashMap < String, Object > map) {
-        return aiMapper.selectPwrSumList(map);
+        return aiMapper.testSelectPwrSumList(map);
+        // return aiMapper.selectPwrSumList(map);
     }
 
     /**
@@ -709,7 +710,7 @@ public class AiService {
         DateTimeFormatter onlyHourFormatter = DateTimeFormatter.ofPattern("HH:00");
         String nowDate = now.format(formatter);
         List < HashMap < String, Object >> tempPrdctPumpList = new ArrayList < > ();
-        if (wpp_code.equals("hy") || wpp_code.equals("ji") || wpp_code.equals("ss") || wpp_code.equals("dev") || wpp_code.equals("ba")) {
+        if (wpp_code.equals("hy") || wpp_code.equals("ji") || wpp_code.equals("ss") || wpp_code.equals("dev") || wpp_code.equals("seoul") || wpp_code.equals("ba")) {
             HashMap < String, Object > usageItem = new HashMap < > ();
             usageItem.put("PUMP_GRP", 1);
             usageItem.put("PUMP_GRP_DSC", "none");
@@ -746,7 +747,7 @@ public class AiService {
 
         List < HashMap < String, Object >> tempPwrPrdctCalHourList = new ArrayList < > ();
         //System.out.println("wpp_code:"+wpp_code);
-        if (wpp_code.equals("hy") || wpp_code.equals("ji") || wpp_code.equals("ss") || wpp_code.equals("dev")) {
+        if (wpp_code.equals("hy") || wpp_code.equals("ji") || wpp_code.equals("ss") || wpp_code.equals("dev") || wpp_code.equals("seoul")) {
             tempPwrPrdctCalHourList.add(pumpPrdctPwrSumMap);
         } else {
             //selectHourPwrList
@@ -1845,7 +1846,7 @@ public class AiService {
         System.out.println("checkAiModeStr:" + checkAiModeStr);
 
         if (!pumpGrpList.isEmpty() && checkAiModeStr) {
-            if (wpp_code.equals("gr") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("dev")) {
+            if (wpp_code.equals("gr") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("dev") || wpp_code.equals("seoul")) {
                 pumpService.pumpCommand(pumpGrpList);
             } else if (wpp_code.equals("wm")) {
                 pumpService.pumpCommandWM(pumpGrpList);
@@ -1872,7 +1873,7 @@ public class AiService {
         System.out.println("pumpCommandAI checkAiModeStr:" + checkAiModeStr);
 
         if (!pumpGrpList.isEmpty() && checkAiModeStr) {
-            if (wpp_code.equals("gr") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("dev")) {
+            if (wpp_code.equals("gr") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("dev") || wpp_code.equals("seoul")) {
                 pumpService.pumpCommand(pumpGrpList);
             } else if (wpp_code.equals("wm")) {
                 pumpService.pumpCommandWM(pumpGrpList);
@@ -1890,7 +1891,7 @@ public class AiService {
         List < String > pumpGrpList = pumpService.selectAiPumpGrpListStr(PumpService.AI_RECOMMEND);
 
         if (!pumpGrpList.isEmpty()) {
-            if (wpp_code.equals("gs") || wpp_code.equals("gr") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("dev")) {
+            if (wpp_code.equals("gs") || wpp_code.equals("gr") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("dev") || wpp_code.equals("seoul")) {
                 return pumpService.pumpCommandStatus(pumpService.selectAiPumpGrpListStr(PumpService.AI_RECOMMEND));
             } else {
                 return pumpService.pumpCommandStatus(pumpService.selectAiPumpGrpListStr(PumpService.AI_RECOMMEND));
@@ -2680,6 +2681,66 @@ public class AiService {
         }
 
         return countMap;
+    }
+
+    /**
+     * AI 모드 펌프조합 변경 알람 조회.
+     * - 추천모드(AI_STATUS=1) 와 AI운전모드(AI_STATUS=0) 둘 다 처리하여 단일 items 로 반환
+     * - 각 항목에 mode='recommend'|'control' 표식
+     *   · recommend: 사용자 확인 후 /ai/pumpCommand 호출 필요 (수동)
+     *   · control:   PumpScheduler 가 이미 자동 적재 중이므로 정보용 알람 (닫기만)
+     * - 변경 비교: cur_comb (TB_RAWDATA × PMB_TAG) vs pre_comb (TB_CTR_PUMPYN_RST + INQUIRY)
+     *   서로 다른 PUMP_GRP 만 items 에 포함
+     * @return { isAiRecommend, isAiControl, items: [...] }
+     */
+    public HashMap<String, Object> pumpRecommendAlarm() {
+        HashMap<String, Object> result = new HashMap<>();
+        boolean isAiRecommend = aiRecommendStatus();
+        boolean isAiControl   = aiControlStatus();
+        result.put("isAiRecommend", isAiRecommend);
+        result.put("isAiControl",   isAiControl);
+
+        List<HashMap<String, Object>> items = new ArrayList<>();
+        if (isAiRecommend) {
+            collectAlarmItems(items, PumpService.AI_RECOMMEND, "recommend");
+        }
+        if (isAiControl) {
+            collectAlarmItems(items, PumpService.AI_CONTROL, "control");
+        }
+        result.put("items", items);
+        return result;
+    }
+
+    /**
+     * 특정 AI 모드(AI_RECOMMEND=1 / AI_CONTROL=0) 의 PUMP_GRP 들에 대해
+     * pumpDrvnMinute 결과에서 변경된 조합만 items 에 누적.
+     */
+    private void collectAlarmItems(List<HashMap<String, Object>> items, int aiMode, String modeLabel) {
+        List<String> pumpGrpList = pumpService.selectAiPumpGrpListStr(aiMode);
+        String nowDate = pumpService.nowStringDate();
+        for (String pumpGrp : pumpGrpList) {
+            HashMap<String, String> drvnParam = new HashMap<>();
+            drvnParam.put("nowDate", nowDate);
+            drvnParam.put("pump_grp", pumpGrp);
+
+            HashMap<String, String> pumpDrvnMap = aiMapper.pumpDrvnMinute(drvnParam);
+            if (pumpDrvnMap == null || pumpDrvnMap.isEmpty()) continue;
+
+            String curComb = pumpDrvnMap.get("cur_comb");
+            String preComb = pumpDrvnMap.get("pre_comb");
+            if (preComb == null || preComb.trim().isEmpty()) continue;
+            String curNorm = curComb == null ? "" : curComb.trim();
+            String preNorm = preComb.trim();
+            if (curNorm.equals(preNorm)) continue;
+
+            HashMap<String, Object> item = new HashMap<>();
+            item.put("pump_grp", pumpGrp);
+            item.put("regstrTime", pumpDrvnMap.get("rgstr_time"));
+            item.put("currentComb", curComb);
+            item.put("recommendComb", preComb);
+            item.put("mode", modeLabel);
+            items.add(item);
+        }
     }
 
 }

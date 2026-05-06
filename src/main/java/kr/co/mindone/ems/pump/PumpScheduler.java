@@ -35,7 +35,7 @@ import static kr.co.mindone.ems.common.SavingService.RANGE_DAY;
 import static kr.co.mindone.ems.common.SavingService.RANGE_YEAR;
 
 @Service
-@Profile("!dev && !gm & !hp & !ji & !hy & !ss & !gm2 & !hp2 & !ji2 & !hy2")
+@Profile("!gm & !hp & !ji & !hy & !ss & !gm2 & !hp2 & !ji2 & !hy2")
 @PropertySource("classpath:application-${spring.profiles.active}.properties")
 public class PumpScheduler {
 
@@ -62,7 +62,7 @@ public class PumpScheduler {
         //AI추천 모드일때 펌프 조합이 변경되었는지 체크함
         System.out.println("pumpTask - " + wpp_code + "-" + pumpService.checkTestMode());
         if ((wpp_code.equals("gs") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("wm") ||
-                wpp_code.equals("gr") || wpp_code.equals("ss") || wpp_code.equals("dev")) && pumpService.checkTestMode()) {
+                wpp_code.equals("gr") || wpp_code.equals("ss") || wpp_code.equals("dev") || wpp_code.equals("seoul")) && pumpService.checkTestMode()) {
             printDateTime("pumpTask");
 
             boolean aiRecommendStatus = aiService.aiRecommendStatus();
@@ -76,9 +76,10 @@ public class PumpScheduler {
                 List < HashMap < String, Object >> ctrRunningList = pumpService.selectCtrTagList(map);
                 //진행중인 프로세스가 있는 경우 다음 동작을 확인하지 않음
                 System.out.println("#pumpTask-Recommend: " + ctrReadyList.size() + " / " + ctrRunningList.size() + " = " + pumpService.checkCtrTestMode());
+                // [추천모드] 자동 실행 제거 — 사용자가 모달에서 [적용] 클릭 시 /ai/pumpCommand API 통해 수동 실행
+                // 기존: pumpService.pumpCommandTask(ctrReadyList);
                 if (!ctrReadyList.isEmpty() && ctrRunningList.isEmpty() && pumpService.checkCtrTestMode()) {
-                    System.out.println("#Start aiRecommend pumpCommandTask");
-                    pumpService.pumpCommandTask(ctrReadyList);
+                    System.out.println("#aiRecommend pumpCommandTask SKIPPED (manual confirm required)");
                 }
                 //pumpStatusTask
             }
@@ -111,7 +112,7 @@ public class PumpScheduler {
      * AI 운전을 위한 펌프 조합생성
      */
     //@Scheduled(cron = "20 * * * * *") // 실제 1분 20초 마다
-    @Scheduled(cron = "20 */5 * * * *") // 실제 5분마다
+    @Scheduled(cron = "20 * * * * *") // [DEV] 1분 (원래 "20 */5 * * * *" 5분)
     //@Scheduled(cron = "0 * * * * *") //테스트 1분
     public void pumpAiControlTask() {
         //AI운전 모드일때만 동작
@@ -122,7 +123,7 @@ public class PumpScheduler {
 
         //System.out.println("pumpAiControlTask Start -"+formattedDateTime);
 
-        if ((wpp_code.equals("gs") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("wm") || wpp_code.equals("gr")) && pumpService.checkTestMode()) {
+        if ((wpp_code.equals("gs") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("wm") || wpp_code.equals("gr") || wpp_code.equals("dev") || wpp_code.equals("seoul")) && pumpService.checkTestMode()) {
             if (pumpService.aiControlStatus()) {
                 List < String > pumpGrpStr = pumpService.selectAiPumpGrpListStr(PumpService.AI_CONTROL);
 
@@ -143,6 +144,11 @@ public class PumpScheduler {
                 HashMap < String, Object > pumpStatus = pumpService.pumpCommandStatusMin(pumpGrpStr);
                 //HashMap < String, Object > pumpStatus = pumpService.pumpCommandStatus(pumpGrpStr);
                 System.out.println("#pumpAiControlTask pumpStatus:" + pumpStatus.get("isChange").toString()+"/"+ pumpRunningStatus+ ", pumpGrpStr:" + pumpGrpStr);
+                // [DEV/SEOUL] dev/seoul 에서는 거리 계산 결과(PUMP_YN_RST) → TB_HMI_CTR_TAG 직접 INSERT (운영 SCADA/Kafka 흐름 우회)
+                if ("dev".equals(wpp_code) || "seoul".equals(wpp_code)) {
+                    pumpService.devInsertHmiTagFromLatestPumpYn(1);
+                    return;
+                }
                 if (Boolean.parseBoolean(pumpStatus.get("isChange").toString()) && pumpRunningStatus) {
                     //changePumpList(false)
                     //HashMap < String, Object > map = new HashMap < > ();
@@ -184,7 +190,7 @@ public class PumpScheduler {
     public void pumpStatusTask() {
         //펌프 토출밸브 on/off 체크, 펌프 가동상태 확인
         if ((wpp_code.equals("gs") || wpp_code.equals("gu") || wpp_code.equals("gr") || wpp_code.equals("wm") ||
-                wpp_code.equals("ss") || wpp_code.equals("ba") || wpp_code.equals("dev")) && pumpService.checkTestMode()) {
+                wpp_code.equals("ss") || wpp_code.equals("ba") || wpp_code.equals("dev") || wpp_code.equals("seoul")) && pumpService.checkTestMode()) {
             if (aiService.aiRecommendStatus() || aiService.aiControlStatus()) {
                 printDateTime("pumpStatusTask");
                 HashMap < String, Object > map = new HashMap < > ();
