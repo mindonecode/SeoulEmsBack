@@ -42,3 +42,8 @@ out/
 
 # Local Docker temp artifact
 .docker_temp_*
+
+# bkit / Claude Code local artifacts
+.bkit/
+.claude/
+CLAUDE.md
