@@ -2208,6 +2208,12 @@
 		AND
 		PUMP_PRIORITY = #{PUMP_PRIORITY};
 	</insert>
+
+	<update id="updatePumpComb">
+		UPDATE
+		TB_PUMP_CAL
+		SET PUMP_COMB = #{pumpComb}
+	</update>
 	
 	<select id="selectPumpCombList" resultType="hashmap" parameterType="hashmap">
 		SELECT

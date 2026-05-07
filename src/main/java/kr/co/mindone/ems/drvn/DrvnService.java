@@ -5051,10 +5051,22 @@ public class DrvnService {
 	List<HashMap<String, Object>> selectPumpCombList(HashMap<String, Object> map) { return drvnMapper.selectPumpCombList(map); }
 
 	public void savePumpComb(List<HashMap<String, Object>> listMap) {
-		for(HashMap<String, Object> map:listMap){
+		StringBuilder pumpIDX = new StringBuilder();
+
+		for(HashMap<String, Object> map:listMap) {
 			drvnMapper.savePumpComb(map);
+
+			if(Integer.parseInt(String.valueOf(map.get("PUMP_YN"))) == 1) { //사용 중인 펌프면
+				int idx =  Integer.parseInt(String.valueOf(map.get("PUMP_IDX")));
+				pumpIDX.append(idx).append(",");
+			}
+		}
+		if(pumpIDX.length() > 0) {
+			pumpIDX.deleteCharAt(pumpIDX.length()-1);
+			drvnMapper.updatePumpComb(pumpIDX.toString());
 		}
 	}
+
 	public Map<String, List<Map<String,Object>>> selectWaterLevel(){
 		return selectWaterLevel(null);
 	}
