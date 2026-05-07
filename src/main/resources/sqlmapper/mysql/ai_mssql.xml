@@ -2029,7 +2029,7 @@
 		ORDER BY peak_date
 	</select>
 
-	<select id="testSelectPwrSumList" parameterType="hashMap" resultType="hashMap">
+	<!-- <select id="testSelectPwrSumList" parameterType="hashMap" resultType="hashMap">
 		SELECT
 		round(sum(rdh.value * pti.PWQ_UNIT_VALUE), 2) AS value,
 		<if test='range == "dayAgo"'>
@@ -2075,7 +2075,7 @@
 		</if>
 		GROUP BY
 		rri.TIMEZONE
-	</select>
+	</select> -->
 	<select id="selectPwrSumList" parameterType="hashMap" resultType="hashMap">
 		SELECT
 		round(sum(rdh.value * pti.PWQ_UNIT_VALUE), 2) AS value,
