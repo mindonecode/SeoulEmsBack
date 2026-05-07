@@ -2213,6 +2213,7 @@
 		UPDATE
 		TB_PUMP_CAL
 		SET PUMP_COMB = #{pumpComb}
+		WHERE PUMP_COUNT = #{pumpCount}
 	</update>
 	
 	<select id="selectPumpCombList" resultType="hashmap" parameterType="hashmap">
