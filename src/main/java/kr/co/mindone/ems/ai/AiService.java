@@ -367,8 +367,8 @@ public class AiService {
      * @return 전력 합계 리스트
      */
     List < HashMap < String, Object >> selectPwrSumList(HashMap < String, Object > map) {
-        return aiMapper.testSelectPwrSumList(map);
-        // return aiMapper.selectPwrSumList(map);
+        // return aiMapper.testSelectPwrSumList(map);
+        return aiMapper.selectPwrSumList(map);
     }
 
     /**
