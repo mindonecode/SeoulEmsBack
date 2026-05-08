@@ -304,10 +304,10 @@ public class SettingController extends BaseController {
      * @param ssn 계절 정보 (예: 겨울철)
      * @return 계절에 따른 부하 요금제 및 시간대 부하 정보
      */
-    @Operation(summary = "선택 계절 부하 요금제 및 시간대 부하 출력", description = "selectRateSeason?ssn=겨울철")
+    @Operation(summary = "선택 계절 부하 요금제 및 시간대 부하 출력", description = "selectRateSeason?ssn=겨울철&mnth=01")
     @GetMapping("/selectRateSeason")
-    public ResponseObject<HashMap<String, Object>> selectRateSeason(@RequestParam String ssn){
-        return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, settingService.selectRateSeason(ssn));
+    public ResponseObject<HashMap<String, Object>> selectRateSeason(@RequestParam String ssn, @RequestParam String mnth){
+        return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, settingService.selectRateSeason(ssn, mnth));
     }
     /**
      * 계절 시간대 부하 업데이트

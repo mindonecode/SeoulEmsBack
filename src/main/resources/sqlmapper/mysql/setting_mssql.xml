@@ -889,7 +889,7 @@
 		GROUP BY TIMEZONE
 	</select>
 	
-	<select id="selectSeasonLoad" parameterType="String" resultType="hashMap">
+	<select id="selectSeasonLoad" parameterType="hashMap" resultType="hashMap">
 		SELECT
 			SSN,
 			STN_TM,
@@ -900,7 +900,8 @@
 				SSN = #{ssn}
 			AND
 				RATE_IDX = '1'
-		GROUP BY STN_TM
+			AND
+				MNTH = #{mnth}
 		ORDER BY CONVERT(STN_TM, SIGNED) ASC
 	</select>
 	
@@ -915,6 +916,8 @@
 				SSN = #{ssn}
 			AND
 				RATE_IDX = '1'
+			AND
+				MNTH = #{mnth}
 	</update>
 	
 	<select id="selectPumpList" resultType="hashmap" parameterType="int">

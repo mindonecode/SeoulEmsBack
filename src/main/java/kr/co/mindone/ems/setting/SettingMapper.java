@@ -233,7 +233,7 @@ public interface SettingMapper {
      * @param ssn 계절 정보
      * @return 부하 정보 목록
      */
-    List<HashMap<String, Object>> selectSeasonLoad(String ssn);
+    List<HashMap<String, Object>> selectSeasonLoad(HashMap<String, Object> params);
 
     /**
      * 계절 부하 설정
