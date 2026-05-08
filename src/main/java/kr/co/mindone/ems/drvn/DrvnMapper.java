@@ -443,7 +443,7 @@ public interface DrvnMapper {
 
 	void savePumpComb (HashMap<String, Object> params);
 
-	void updatePumpComb(@Param("pumpComb") String pumpComb, @Param("pumpCount") double pumpCount);
+	void updatePumpComb(@Param("pumpComb") String pumpComb, @Param("countIdx") int countIdx);
 
 	void updatePumpCombItem (HashMap<String, Object> params);
 
