@@ -2992,6 +2992,55 @@ public class DrvnConfig {
 			grpFlowPressureMap.put("flow", flow);
 			grpFlowPressureMap.put("pressure", pressure);
 			grpFlowPressure.put(pump_grp, grpFlowPressureMap);
+
+			// === [Seoul] 시간대별 단순 단계 조정 ============================================
+			// 정책 (강북정수장 부하시간대.png 기준):
+			//   - 경부하(L)   : 기준 단계 +1   (증가운영)
+			//   - 중간부하(M) : 기준 단계 −1   (감소운영)
+			//   - 최대부하(H) : 기준 단계 그대로 (변경 없음)
+			// 경계 클램프:
+			//   - 첫 조합(index 0) 에서 −1 → 0 으로 유지 (감소운영해도 첫 조합 유지)
+			//   - 마지막 조합(index size-1) 에서 +1 → size-1 로 유지 (증가운영해도 마지막 조합 유지)
+			// 토/일/공휴일 보정: 기존 reduceMap 보정 로직과 동일 (HolidayChecker 사용).
+			// Seoul 인버터 미보유 → freqMap = null.
+			if ("seoul".equals(wpp_code) && closestPointIndex >= 0
+					&& collectData != null && !collectData.isEmpty()) {
+				String seoulLoad = reduceMap.get(dateTime.getMonthValue()).get(dateTime.getHour());
+				HolidayChecker seoulHolidayChecker = new HolidayChecker();
+				boolean seoulIsHoliday = seoulHolidayChecker.isPassDay(ts);
+				int seoulWeek = dateTime.getDayOfWeek().getValue();
+				if (seoulWeek == 7 || seoulIsHoliday) {
+					seoulLoad = "L";                          // 일요일/공휴일 → 경부하
+				} else if (seoulWeek == 6 && "H".equals(seoulLoad)) {
+					seoulLoad = "M";                          // 토요일 H → 중간부하
+				}
+
+				int seoulSizeMax = collectData.size() - 1;
+				int seoulAdjustedIndex;
+				if ("L".equals(seoulLoad)) {
+					seoulAdjustedIndex = Math.min(closestPointIndex + 1, seoulSizeMax);  // +1 (sizeMax 클램프)
+				} else if ("M".equals(seoulLoad)) {
+					seoulAdjustedIndex = Math.max(closestPointIndex - 1, 0);             // -1 (0 클램프)
+				} else {
+					seoulAdjustedIndex = closestPointIndex;                              // H 또는 그 외 → 그대로
+				}
+
+				Object seoulPc = collectData.get(seoulAdjustedIndex).get("pumpComb");
+				if (seoulPc instanceof List) {
+					@SuppressWarnings("unchecked")
+					List<String> seoulPcList = (List<String>) seoulPc;
+					returnComb = new ArrayList<>(seoulPcList);
+				}
+				freqMap = null;  // Seoul 인버터 없음 → 주파수 맵 사용 안 함
+
+				loadCheckLog.append("[SEOUL] load=" + seoulLoad
+						+ ", baseIdx=" + closestPointIndex
+						+ ", adjustedIdx=" + seoulAdjustedIndex
+						+ ", sizeMax=" + seoulSizeMax
+						+ ", returnComb=" + returnComb + "#");
+			}
+			// === [Seoul] 단계 조정 끝 ========================================================
+
 			grpPrdctPwr = allPumpGrpPwrPrdct(returnComb, grpFlowPressure, freqMap);
 
 		}

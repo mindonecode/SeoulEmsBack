@@ -17,6 +17,7 @@ import kr.co.mindone.ems.common.CommonService;
 import kr.co.mindone.ems.config.base.BaseController;
 import kr.co.mindone.ems.config.response.ResponseMessage;
 import kr.co.mindone.ems.config.response.ResponseObject;
+import kr.co.mindone.ems.drvn.DrvnService;
 import kr.co.mindone.ems.energy.EnerSpendService;
 import kr.co.mindone.ems.setting.SettingService;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +26,8 @@ import org.apache.ibatis.annotations.DeleteProvider;
 import org.apache.ibatis.annotations.Param;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.UnsupportedEncodingException;
@@ -55,6 +58,9 @@ public class AiController extends BaseController {
 
 	@Autowired
 	private CommonService commonService;
+
+	@Autowired
+	private DrvnService drvnService;
 
 	private final AtomicBoolean isRunning = new AtomicBoolean(false);
 
@@ -760,21 +766,52 @@ public class AiController extends BaseController {
 	 * @return 명령 전송 성공 여부
 	 */
 	@GetMapping("/pumpCommand")
-	public ResponseObject < String > pumpCommand(@RequestParam HashMap < String, Object > map) {
-		//System.out.println("pumpCommand map:"+map.toString());
+	public ResponseEntity<ResponseObject<String>> pumpCommand(@RequestParam HashMap < String, Object > map) {
 		if (wpp_code.equals("ba")) {
 			if (map.containsKey("pump_grp")) {
 				String str = map.get("pump_grp").toString();
-				//System.out.println("str:"+str);
 				if (str.contains("4")) {
 					str += ",5";
 					map.put("pump_grp", str);
 				}
 			}
 		}
-		//System.out.println("map:"+map.toString());
+
+		// 30분 throttle: 같은 pump_grp 에 직전 제어 명령 후 30분 이내 재명령 차단.
+		// 기존 DrvnController.pumpManualOperation 패턴과 동일하게 TB_MNL_CHN_LOG 기반.
+		final int THROTTLE_MIN = 30;
+		String pumpGrpStr = map.containsKey("pump_grp") ? map.get("pump_grp").toString() : "";
+		String[] grpArr = pumpGrpStr.isEmpty() ? new String[0] : pumpGrpStr.split(",");
+		String serverTime = drvnService.getPumpCombLogTime();
+		for (String g : grpArr) {
+			HashMap<String, Object> checkLogParam = new HashMap<>();
+			checkLogParam.put("serverTime", serverTime);
+			checkLogParam.put("interval", THROTTLE_MIN);
+			checkLogParam.put("pump_grp", g.trim());
+			if (drvnService.checkManualOperLog(checkLogParam) != 0) {
+				String msg = "마지막 제어 후 " + THROTTLE_MIN + "분이 지나지 않았습니다.";
+				ResponseObject<String> blocked = makeSuccessObj(400, msg, msg);
+				return new ResponseEntity<>(blocked, HttpStatus.BAD_REQUEST);
+			}
+		}
+
 		aiService.pumpCommand(map);
-		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, "펌프 제어 명령 전송 성공");
+
+		// 다음 throttle 카운트 기준이 되도록 TB_MNL_CHN_LOG 적재.
+		for (String g : grpArr) {
+			HashMap<String, Object> logParam = new HashMap<>();
+			logParam.put("nowDate", serverTime);
+			logParam.put("oper", "ai_recommend");
+			logParam.put("pump_grp", g.trim());
+			logParam.put("newPumpComb", "");
+			logParam.put("newPumpFreq", "");
+			logParam.put("agoPumpComb", "");
+			logParam.put("agoPumpFreq", "");
+			drvnService.insertManualOperLogNew(logParam);
+		}
+
+		ResponseObject<String> ok = makeSuccessObj(ResponseMessage.SELECT_SUCCESS, "펌프 제어 명령 전송 성공");
+		return new ResponseEntity<>(ok, HttpStatus.OK);
 	}
 
 	@GetMapping("/pumpCommandAI")
