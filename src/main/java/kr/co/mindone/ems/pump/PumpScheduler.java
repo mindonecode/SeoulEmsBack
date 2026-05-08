@@ -146,7 +146,18 @@ public class PumpScheduler {
                 System.out.println("#pumpAiControlTask pumpStatus:" + pumpStatus.get("isChange").toString()+"/"+ pumpRunningStatus+ ", pumpGrpStr:" + pumpGrpStr);
                 // [DEV/SEOUL] dev/seoul 에서는 거리 계산 결과(PUMP_YN_RST) → TB_HMI_CTR_TAG 직접 INSERT (운영 SCADA/Kafka 흐름 우회)
                 if ("dev".equals(wpp_code) || "seoul".equals(wpp_code)) {
-                    pumpService.devInsertHmiTagFromLatestPumpYn(1);
+                    final int pumpGrpFixed = 1;
+                    HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(pumpGrpFixed);
+                    if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+                        System.out.println("[pumpAiControlTask] LOCKED pumpGrp=" + pumpGrpFixed
+                                + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime")
+                                + " → skip auto control");
+                        return;
+                    }
+                    int inserted = pumpService.devInsertHmiTagFromLatestPumpYn(pumpGrpFixed);
+                    if (inserted > 0) {
+                        pumpService.recordControlCommand(pumpGrpFixed, "ai_auto");
+                    }
                     return;
                 }
                 if (Boolean.parseBoolean(pumpStatus.get("isChange").toString()) && pumpRunningStatus) {

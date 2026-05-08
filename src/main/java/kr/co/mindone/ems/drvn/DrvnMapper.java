@@ -395,6 +395,14 @@ public interface DrvnMapper {
 
 	void insertManualOperLog(HashMap<String, Object> logInsParma);
 
+	/**
+	 * PUMP_GRP 별 가장 최근 제어 명령 시각 조회 (TB_MNL_CHN_LOG).
+	 * AI 자동/AI 추천/수동 모든 제어 명령 발사 후 기록되는 통합 lock 시각.
+	 * @param param pump_grp
+	 * @return 'yyyy-MM-dd HH:mm' 또는 null
+	 */
+	String selectLastCtrlTime(HashMap<String, Object> param);
+
 	String getPumpCombLogTime();
 
 	Set<Integer> inverterPumpFreqCheck(HashMap<String, Object> pumpMap);

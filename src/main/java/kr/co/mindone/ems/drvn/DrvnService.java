@@ -5083,14 +5083,16 @@ public class DrvnService {
 			now = LocalDateTime.now();
 		}
 		now = now.withSecond(0).withNano(0);
-		LocalDateTime t0 = now.withMinute(0);
+		// 예측이 10분마다 생성되므로 t0 를 직전 10분 경계로 floor.
+		// 예: 18:50~18:59 → t0 = 18:50, 18:40~18:49 → t0 = 18:40.
+		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
 
 		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:00");
 		DateTimeFormatter shortFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-		// 1. 실측 (t-6h ~ t, 1분 단위 raw 그대로)
+		// 1. 실측 (t-6h ~ now, 1분 단위 raw 그대로). 끝점은 분 단위 now 까지 포함.
 		String rawStartStr = fmt.format(t0.minusHours(6));
-		String rawEndStr = fmt.format(t0);
+		String rawEndStr = fmt.format(now);
 		HashMap<String, Object> rawParam = new HashMap<>();
 		rawParam.put("startDate", rawStartStr);
 		rawParam.put("endDate", rawEndStr);
@@ -5105,12 +5107,16 @@ public class DrvnService {
 			result.computeIfAbsent(tag, k-> new ArrayList<>()).add(point);
 		}
 
-		// 2. 예측 (t+1h/+2h/+3h/+6h) — 매핑이 있고 비어있지 않은 경우만
+		// 2. 예측 (t+10min/+1h/+2h/+3h/+6h) — 매핑이 있고 비어있지 않은 경우만
 		if (waterLevelPrdctTagMap == null || waterLevelPrdctTagMap.isEmpty()) {
 			return result;
 		}
 		List<LocalDateTime> prdctTimes = Arrays.asList(
-			t0.plusHours(1), t0.plusHours(2), t0.plusHours(3), t0.plusHours(6)
+			t0.plusMinutes(10),
+			t0.plusHours(1),
+			t0.plusHours(2),
+			t0.plusHours(3),
+			t0.plusHours(6)
 		);
 		List<String> prdctTimeStrs = prdctTimes.stream().map(fmt::format).collect(Collectors.toList());
 
@@ -5128,6 +5134,32 @@ public class DrvnService {
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", now.format(fmt));
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
+
+		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.
+		// 예: 19:00 호출 시 19:00 batch 가 아직 없으면 18:50 batch 의 [19:00,19:50,20:50,21:50,0:50] 사용.
+		if (prdctRows == null || prdctRows.isEmpty()) {
+			LocalDateTime t0Prev = t0.minusMinutes(10);
+			List<LocalDateTime> prdctTimesFb = new ArrayList<>();
+			for (LocalDateTime cand : Arrays.asList(
+					t0Prev.plusMinutes(10),
+					t0Prev.plusHours(1),
+					t0Prev.plusHours(2),
+					t0Prev.plusHours(3),
+					t0Prev.plusHours(6))) {
+				if (cand.isAfter(now)) prdctTimesFb.add(cand);
+			}
+			if (!prdctTimesFb.isEmpty()) {
+				List<String> prdctTimeStrsFb = prdctTimesFb.stream().map(fmt::format).collect(Collectors.toList());
+				prdctParam.put("prdctTimeList", prdctTimeStrsFb);
+				List<HashMap<String, Object>> fbRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
+				if (fbRows != null && !fbRows.isEmpty()) {
+					log.info("selectWaterLevel: t0={} batch 미등록 → t0Prev={} fallback ({}건)",
+							t0.format(shortFmt), t0Prev.format(shortFmt), fbRows.size());
+					prdctRows = fbRows;
+					prdctTimes = prdctTimesFb;
+				}
+			}
+		}
 
 		// {ts(short) -> {dstrb_id -> value}}
 		Map<String, Map<String, Double>> prdctTsTag = new TreeMap<>();
@@ -5305,8 +5337,9 @@ public class DrvnService {
 			now = LocalDateTime.now();
 		}
 		now = now.withSecond(0).withNano(0);
-		// 정시(분=0) 기준. 14:30 → 14:00
-		LocalDateTime t0 = now.withMinute(0);
+		// 예측이 10분마다 생성되므로 t0 를 직전 10분 경계로 floor.
+		// 예: 14:30~14:39 → t0 = 14:30, 14:55 → t0 = 14:50.
+		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
 
 		// 실측 시점: [t-6h-1min: 보조 prev, 결과 미포함] + t-6h ~ t (1분 간격, 총 361 row).
 		// 첫 시점은 prev 보조용. 마지막 시점 t 는 결과에 포함됨.
@@ -5315,8 +5348,9 @@ public class DrvnService {
 		for (LocalDateTime t = auxStart; !t.isAfter(t0); t = t.plusMinutes(1)) {
 			rawTimes.add(t);
 		}
-		// 예측 시점: t+1h, t+2h, t+3h, t+6h (4점, 정시)
+		// 예측 시점: t+10min, t+1h, t+2h, t+3h, t+6h (5점, t0 분 단위 기준)
 		List<LocalDateTime> prdctTimes = Arrays.asList(
+			t0.plusMinutes(10),
 			t0.plusHours(1),
 			t0.plusHours(2),
 			t0.plusHours(3),
@@ -5344,6 +5378,32 @@ public class DrvnService {
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", nowDateTimeStr);
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
+
+		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.
+		// 예: 19:00 호출 시 19:00 batch 가 아직 없으면 18:50 batch 의 [19:00,19:50,20:50,21:50,0:50] 사용.
+		if (prdctRows == null || prdctRows.isEmpty()) {
+			LocalDateTime t0Prev = t0.minusMinutes(10);
+			List<LocalDateTime> prdctTimesFb = new ArrayList<>();
+			for (LocalDateTime cand : Arrays.asList(
+					t0Prev.plusMinutes(10),
+					t0Prev.plusHours(1),
+					t0Prev.plusHours(2),
+					t0Prev.plusHours(3),
+					t0Prev.plusHours(6))) {
+				if (cand.isAfter(now)) prdctTimesFb.add(cand);
+			}
+			if (!prdctTimesFb.isEmpty()) {
+				List<String> prdctTimeStrsFb = prdctTimesFb.stream().map(fmt::format).collect(Collectors.toList());
+				prdctParam.put("prdctTimeList", prdctTimeStrsFb);
+				List<HashMap<String, Object>> fbRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
+				if (fbRows != null && !fbRows.isEmpty()) {
+					log.info("selectPwrUnitChartData: t0={} batch 미등록 → t0Prev={} fallback ({}건)",
+							t0.format(shortFmt), t0Prev.format(shortFmt), fbRows.size());
+					prdctRows = fbRows;
+					prdctTimes = prdctTimesFb;
+				}
+			}
+		}
 
 		Map<String, Map<String, Double>> tsTagValue = new TreeMap<>();
 		mergeTagValueRows(tsTagValue, rawRows);

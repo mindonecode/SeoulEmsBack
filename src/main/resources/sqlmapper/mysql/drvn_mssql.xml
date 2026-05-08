@@ -2047,6 +2047,19 @@
 			#{pump_grp}
 		);
 	</insert>
+
+	<!--
+	  PUMP_GRP 별 가장 최근 제어 명령 시각 (TB_MNL_CHN_LOG 의 가장 최근 RGSTR_TIME).
+	  AI 자동/AI 추천/수동 모든 제어 명령 발사 후 기록되는 통합 lock 시각.
+	-->
+	<select id="selectLastCtrlTime" parameterType="hashmap" resultType="String">
+		SELECT
+			DATE_FORMAT(MAX(RGSTR_TIME), '%Y-%m-%d %H:%i') AS LAST_CTRL_TIME
+		FROM
+			TB_MNL_CHN_LOG
+		WHERE
+			PUMP_GRP = #{pump_grp}
+	</select>
 	<insert id="insertManualOperLogNew" parameterType="hashmap">
 		INSERT INTO TB_MNL_CHN_LOG
 			(RGSTR_TIME, OPER, PUMP_GRP, NewPumpComb, NewPumpFreq, AgoPumpComb, AgoPumpFreq)
