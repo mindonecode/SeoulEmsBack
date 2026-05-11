@@ -2060,6 +2060,20 @@
 		WHERE
 			PUMP_GRP = #{pump_grp}
 	</select>
+
+	<!--
+	  TB_HMI_CTR_TAG 의 가장 최근 실제 명령 발사 시각 (ANLY_CD IN RUN/STOP/FREQ).
+	  멀티 인스턴스(여러 로컬 백엔드가 동일 DB 공유) 환경에서 노드 간 공유 가능한 단일 진실 원천.
+	  PUMP_GRP 컬럼이 TB_HMI_CTR_TAG 에 없어 그룹 무관 전체 락 의도.
+	-->
+	<select id="selectLastHmiCtrTime" resultType="String">
+		SELECT
+			DATE_FORMAT(MAX(RGSTR_TIME), '%Y-%m-%d %H:%i:%s') AS LAST_HMI_CTR_TIME
+		FROM
+			TB_HMI_CTR_TAG
+		WHERE
+			ANLY_CD IN ('RUN', 'STOP', 'FREQ')
+	</select>
 	<insert id="insertManualOperLogNew" parameterType="hashmap">
 		INSERT INTO TB_MNL_CHN_LOG
 			(RGSTR_TIME, OPER, PUMP_GRP, NewPumpComb, NewPumpFreq, AgoPumpComb, AgoPumpFreq)

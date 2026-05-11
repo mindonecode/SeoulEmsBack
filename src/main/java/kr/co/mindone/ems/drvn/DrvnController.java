@@ -14,6 +14,7 @@ import io.swagger.annotations.Api;
 import io.swagger.v3.oas.annotations.Operation;
 import kr.co.mindone.ems.common.ExcelService;
 import kr.co.mindone.ems.common.holiday.HolidayChecker;
+import kr.co.mindone.ems.pump.PumpService;
 import kr.co.mindone.ems.config.base.BaseController;
 import kr.co.mindone.ems.config.response.ResponseMessage;
 import kr.co.mindone.ems.config.response.ResponseObject;
@@ -53,6 +54,8 @@ public class DrvnController extends BaseController {
 	private DrvnService drvnService;
 	@Autowired
 	private ExcelService excelService;
+	@Autowired
+	private PumpService pumpService;
 	@Value("${spring.profiles.active}")
 	private String wpp_code;
 
@@ -312,6 +315,21 @@ public class DrvnController extends BaseController {
 			ResponseObject<String> responseObject = makeSuccessObj(400, "마지막 제어 후 "+errMinute+"분이 지나지 않았습니다.", "마지막 제어 후 "+errMinute+"분이 지나지 않았습니다.");
 			return new ResponseEntity<>(responseObject, HttpStatus.BAD_REQUEST); // 400 상태 코드를 사용
 		}
+
+		// 통합 30분 throttle 이중 가드: AI 자동/추천/pumpCommand 와 동일한 정책(now() 기반) 으로 한 번 더 확인.
+		// 기존 serverTime(=pumpCombLogTime) 기반 가드와 now() 기반 가드가 시각 차이를 가질 수 있어 둘 다 통과해야 발사.
+		// gs 환경은 기존 가드가 pump_grp=0 (전체 그룹 한 락) 이라 통합 가드는 인자 그룹만 추가 점검.
+		HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(pump_grp);
+		if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+			int remainingMin = lockStatus.get("remainingMinutes") instanceof Integer
+					? (Integer) lockStatus.get("remainingMinutes") : 0;
+			int lockMin = lockStatus.get("lockMinutes") instanceof Integer
+					? (Integer) lockStatus.get("lockMinutes") : 30;
+			String msg = "마지막 제어 후 " + lockMin + "분이 지나지 않았습니다. " + remainingMin + "분 후에 다시 시도하세요.";
+			ResponseObject<String> blocked = makeSuccessObj(400, msg, msg);
+			return new ResponseEntity<>(blocked, HttpStatus.BAD_REQUEST);
+		}
+
 		String returnMessage = drvnService.pumpManualOperation(serverTime, pump_grp, oper);
 		if(returnMessage.equals("success")){
 			ResponseObject<String> successResponse = makeSuccessObj(ResponseMessage.INSERT_SUCCESS, "적용되었습니다.");
@@ -331,14 +349,23 @@ public class DrvnController extends BaseController {
 	}
 	@GetMapping("pumpManualOperFreq/{pump_grp}/{freq}")
 	public ResponseEntity<ResponseObject<String>> pumpManualOperFreq(@PathVariable int pump_grp, @PathVariable double freq) {
-		String serverTime = drvnService.getPumpCombLogTime();
+		// 통합 30분 throttle 가드 (이전에는 가드 없음 - AI 자동/추천/수동 과 동일 정책으로 일원화).
+		HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(pump_grp);
+		if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+			int remainingMin = lockStatus.get("remainingMinutes") instanceof Integer
+					? (Integer) lockStatus.get("remainingMinutes") : 0;
+			int lockMin = lockStatus.get("lockMinutes") instanceof Integer
+					? (Integer) lockStatus.get("lockMinutes") : 30;
+			String msg = "마지막 제어 후 " + lockMin + "분이 지나지 않았습니다. " + remainingMin + "분 후에 다시 시도하세요.";
+			ResponseObject<String> blocked = makeSuccessObj(400, msg, msg);
+			return new ResponseEntity<>(blocked, HttpStatus.BAD_REQUEST);
+		}
 
+		String serverTime = drvnService.getPumpCombLogTime();
 		String returnMessage = drvnService.pumpManualOperFreq(serverTime, pump_grp, freq);
 
-
-			ResponseObject<String> successResponse = makeSuccessObj(ResponseMessage.INSERT_SUCCESS, "적용되었습니다.");
-			return new ResponseEntity<>(successResponse, HttpStatus.OK); // 성공 시 200 반환
-
+		ResponseObject<String> successResponse = makeSuccessObj(ResponseMessage.INSERT_SUCCESS, "적용되었습니다.");
+		return new ResponseEntity<>(successResponse, HttpStatus.OK); // 성공 시 200 반환
 	}
 
 	@GetMapping("grOptLevel")
