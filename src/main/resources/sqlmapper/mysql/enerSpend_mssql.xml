@@ -475,6 +475,8 @@
 			TB_RT_RATE_INF
 		WHERE
 			RATE_IDX IN (1,2,3)
+		ORDER BY
+			RATE_IDX, MNTH, CAST(STN_TM AS UNSIGNED)
 	</select>
 
 	<select id="peakFac" resultType="hashMap" parameterType="string">
