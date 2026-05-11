@@ -251,7 +251,6 @@ public class LoginController {
         String url1 = "";
         String url2 = "";
         if(wpp_code.equals("gs")){
-            url = "10.103.11.112";
             url1 = "10.103.11.113";
             url2 = "10.103.11.114";
         }else if(wpp_code.equals("gu")){

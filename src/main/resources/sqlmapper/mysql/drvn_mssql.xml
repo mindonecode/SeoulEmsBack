@@ -2448,23 +2448,34 @@
 
 	<!--
 	  1분 단위 IWH/UFR 실측 조회 (TB_RAWDATA).
-	  selectMultiTagRawRange 과 동일하되 MINUTE(TS) % 10 = 0 필터 제거.
-	  분 정각 (SECOND=0) 만 반환.
+	  selectMultiTagRawRange 와 달리 MINUTE % 10 / SECOND=0 필터 없이 ts 를 분 단위로 그룹화.
+	  → 적재 SECOND 가 0이 아닌 경우(예: 14:38:23)도 14:38 키로 정상 집계.
+	  같은 (TAG, 분) 에 여러 row 가 있으면 가장 늦은 초의 값을 채택.
 	-->
 	<select id="selectMultiTagRawRangeMinutely" parameterType="hashmap" resultType="hashmap">
 		SELECT
-			TAGNAME as tag,
-			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') as ts,
-			VALUE as value
-		FROM TB_RAWDATA
-		WHERE TAGNAME IN
-			<foreach item="tag" collection="tagList" open="(" separator="," close=")">
-				#{tag}
-			</foreach>
-			AND TS &gt;= #{startDate}
-			AND TS &lt;= #{endDate}
-			AND SECOND(TS) = 0
-		ORDER BY TS, TAGNAME
+			tag,
+			ts,
+			value
+		FROM (
+			SELECT
+				TAGNAME as tag,
+				DATE_FORMAT(TS, '%Y-%m-%d %H:%i') as ts,
+				VALUE as value,
+				ROW_NUMBER() OVER (
+					PARTITION BY TAGNAME, DATE_FORMAT(TS, '%Y-%m-%d %H:%i')
+					ORDER BY TS DESC
+				) as rn
+			FROM TB_RAWDATA
+			WHERE TAGNAME IN
+				<foreach item="tag" collection="tagList" open="(" separator="," close=")">
+					#{tag}
+				</foreach>
+				AND TS &gt;= #{startDate}
+				AND TS &lt;= #{endDate}
+		) t
+		WHERE rn = 1
+		ORDER BY ts, tag
 	</select>
 
 	<!--
@@ -2490,20 +2501,31 @@
 
 	<!--
 	  1분 단위 펌프 가동 여부 실측 조회 (TB_RAWDATA + PMB_TAG).
-	  selectMultiTimePumpYnRaw 와 동일하되 MINUTE % 10 = 0 필터 제거.
+	  selectMultiTimePumpYnRaw 와 달리 MINUTE % 10 / SECOND=0 필터 없이 분 단위 그룹화.
+	  같은 (PUMP_IDX, 분) 에 여러 row 가 있으면 가장 늦은 초의 값을 채택.
 	-->
 	<select id="selectMultiTimePumpYnRawMinutely" parameterType="hashmap" resultType="hashmap">
 		SELECT
-			DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') as ts,
-			tcppi.PUMP_IDX as pumpIdx,
-			tr.VALUE as pumpYn
-		FROM TB_CTR_PRF_PUMPMST_INF tcppi
-		JOIN TB_RAWDATA tr ON tr.TAGNAME = tcppi.PMB_TAG
-		WHERE tcppi.PUMP_GRP = #{pumpGrp}
-			AND tr.TS &gt;= #{startDate}
-			AND tr.TS &lt;= #{endDate}
-			AND SECOND(tr.TS) = 0
-		ORDER BY tr.TS, tcppi.PUMP_IDX
+			ts,
+			pumpIdx,
+			pumpYn
+		FROM (
+			SELECT
+				DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') as ts,
+				tcppi.PUMP_IDX as pumpIdx,
+				tr.VALUE as pumpYn,
+				ROW_NUMBER() OVER (
+					PARTITION BY tcppi.PUMP_IDX, DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i')
+					ORDER BY tr.TS DESC
+				) as rn
+			FROM TB_CTR_PRF_PUMPMST_INF tcppi
+			JOIN TB_RAWDATA tr ON tr.TAGNAME = tcppi.PMB_TAG
+			WHERE tcppi.PUMP_GRP = #{pumpGrp}
+				AND tr.TS &gt;= #{startDate}
+				AND tr.TS &lt;= #{endDate}
+		) t
+		WHERE rn = 1
+		ORDER BY ts, pumpIdx
 	</select>
 
 	<!--
