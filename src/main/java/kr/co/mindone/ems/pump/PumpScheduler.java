@@ -146,6 +146,12 @@ public class PumpScheduler {
                 System.out.println("#pumpAiControlTask pumpStatus:" + pumpStatus.get("isChange").toString()+"/"+ pumpRunningStatus+ ", pumpGrpStr:" + pumpGrpStr);
                 // [DEV/SEOUL] dev/seoul 에서는 거리 계산 결과(PUMP_YN_RST) → TB_HMI_CTR_TAG 직접 INSERT (운영 SCADA/Kafka 흐름 우회)
                 if ("dev".equals(wpp_code) || "seoul".equals(wpp_code)) {
+                    // dev 인스턴스가 같은 DB 에 자동제어 명령을 INSERT 하면 운영(seoul) 결과를 덮어쓰는 멀티 인스턴스 충돌.
+                    // seoul.control.dispatch.enabled=false (dev 기본) 이면 자동 dispatch 전체 skip.
+                    if (!pumpService.isControlDispatchEnabled()) {
+                        System.out.println("[pumpAiControlTask] DISPATCH DISABLED (seoul.control.dispatch.enabled=false) → skip auto control");
+                        return;
+                    }
                     final int pumpGrpFixed = 1;
                     HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(pumpGrpFixed);
                     if (Boolean.TRUE.equals(lockStatus.get("locked"))) {

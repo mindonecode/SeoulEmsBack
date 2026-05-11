@@ -90,6 +90,18 @@ public class PumpService {
     private String wpp_code;
 
     /**
+     * 자동/추천 제어 명령 발사 활성화 여부. dev 환경에서는 false 로 설정하여
+     * 여러 개발자 로컬 백엔드가 동시에 같은 DB 에 제어 명령을 INSERT 하는 충돌을 방지.
+     * 수동 API (DrvnController.pumpManualOper*) 는 사용자 명시 의도라 본 토글 영향 받지 않음.
+     */
+    @Value("${seoul.control.dispatch.enabled:true}")
+    private boolean controlDispatchEnabled;
+
+    public boolean isControlDispatchEnabled() {
+        return controlDispatchEnabled;
+    }
+
+    /**
      * In-memory fallback lock 시각 (PUMP_GRP 별 마지막 제어 발사 시각).
      * DB INSERT (TB_MNL_CHN_LOG) 가 어떤 이유로 실패해도 JVM 메모리 안에서 30분 카운트가 끊기지 않도록 함.
      * 운영 중 1분마다 자동제어가 들어가던 현상의 직접 원인: insertManualOperLog 가 실패 → DB MAX 시각 안 갱신 → 가드 풀려 매분 발사.
@@ -1569,6 +1581,12 @@ public class PumpService {
         String wppNorm = wpp_code == null ? "" : wpp_code.trim().toLowerCase();
         System.out.println("[PumpService.pumpCommand] entry wpp_code=[" + wpp_code + "] norm=[" + wppNorm + "] pumpGrpStr=" + pumpGrpStr);
         if ("dev".equals(wppNorm) || "seoul".equals(wppNorm)) {
+            // dev 인스턴스가 같은 DB 에 명령을 INSERT 하면 운영(seoul) 결과를 덮어쓰는 멀티 인스턴스 충돌 발생.
+            // seoul.control.dispatch.enabled=false (dev 기본) 면 전체 dispatch skip.
+            if (!controlDispatchEnabled) {
+                System.out.println("[PumpService.pumpCommand] DISPATCH DISABLED (seoul.control.dispatch.enabled=false) → skip for groups=" + pumpGrpStr);
+                return;
+            }
             System.out.println("[PumpService.pumpCommand] DEV/SEOUL bypass → devInsertHmiTagFromLatestPumpYn for groups=" + pumpGrpStr);
             for (String grp : pumpGrpStr) {
                 int pumpGrpInt;
