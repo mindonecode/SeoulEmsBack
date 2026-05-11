@@ -2739,6 +2739,21 @@ public class AiService {
             item.put("currentComb", curComb);
             item.put("recommendComb", preComb);
             item.put("mode", modeLabel);
+
+            // AI 자동 모드(control) 항목에는 30분 락 상태를 첨부 → 프론트가 안내 문구를 동적으로 표시.
+            if ("control".equals(modeLabel)) {
+                try {
+                    int pumpGrpInt = Integer.parseInt(pumpGrp.trim());
+                    HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(pumpGrpInt);
+                    item.put("blocked", Boolean.TRUE.equals(lockStatus.get("locked")));
+                    item.put("lastCtrlTime", lockStatus.get("lastCtrlTime"));
+                    item.put("remainingMinutes", lockStatus.get("remainingMinutes"));
+                    item.put("lockMinutes", lockStatus.get("lockMinutes"));
+                } catch (NumberFormatException e) {
+                    item.put("blocked", false);
+                }
+            }
+
             items.add(item);
         }
     }

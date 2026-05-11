@@ -62,6 +62,9 @@ public class AiController extends BaseController {
 	@Autowired
 	private DrvnService drvnService;
 
+	@Autowired
+	private kr.co.mindone.ems.pump.PumpService pumpService;
+
 	private final AtomicBoolean isRunning = new AtomicBoolean(false);
 
 	@Value("${spring.profiles.active}")
@@ -777,19 +780,25 @@ public class AiController extends BaseController {
 			}
 		}
 
-		// 30분 throttle: 같은 pump_grp 에 직전 제어 명령 후 30분 이내 재명령 차단.
-		// 기존 DrvnController.pumpManualOperation 패턴과 동일하게 TB_MNL_CHN_LOG 기반.
-		final int THROTTLE_MIN = 30;
+		// 통합 30분 throttle: AI 자동/AI 추천/수동 모든 제어가 같은 lock 테이블 사용.
+		// 차단 시 남은 시간(분) 도 메시지에 포함. PumpService.checkControlLockStatus 가 정책 일원화.
 		String pumpGrpStr = map.containsKey("pump_grp") ? map.get("pump_grp").toString() : "";
 		String[] grpArr = pumpGrpStr.isEmpty() ? new String[0] : pumpGrpStr.split(",");
-		String serverTime = drvnService.getPumpCombLogTime();
+		java.util.List<Integer> grpInts = new java.util.ArrayList<>();
 		for (String g : grpArr) {
-			HashMap<String, Object> checkLogParam = new HashMap<>();
-			checkLogParam.put("serverTime", serverTime);
-			checkLogParam.put("interval", THROTTLE_MIN);
-			checkLogParam.put("pump_grp", g.trim());
-			if (drvnService.checkManualOperLog(checkLogParam) != 0) {
-				String msg = "마지막 제어 후 " + THROTTLE_MIN + "분이 지나지 않았습니다.";
+			try {
+				grpInts.add(Integer.parseInt(g.trim()));
+			} catch (NumberFormatException ignore) { }
+		}
+		for (int grpInt : grpInts) {
+			HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(grpInt);
+			if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+				int remaining = lockStatus.get("remainingMinutes") instanceof Integer
+						? (Integer) lockStatus.get("remainingMinutes") : 0;
+			Object lastCtrl = lockStatus.get("lastCtrlTime");
+      		String msg = "마지막 제어(" + (lastCtrl != null ? lastCtrl.toString() : "-")
+       		+ ") 후 " + lockStatus.get("lockMinutes") + "분이 지나지 않았습니다.\n"
+						+ remaining + "분 후에 다시 시도하세요.";
 				ResponseObject<String> blocked = makeSuccessObj(400, msg, msg);
 				return new ResponseEntity<>(blocked, HttpStatus.BAD_REQUEST);
 			}
@@ -797,17 +806,9 @@ public class AiController extends BaseController {
 
 		aiService.pumpCommand(map);
 
-		// 다음 throttle 카운트 기준이 되도록 TB_MNL_CHN_LOG 적재.
-		for (String g : grpArr) {
-			HashMap<String, Object> logParam = new HashMap<>();
-			logParam.put("nowDate", serverTime);
-			logParam.put("oper", "ai_recommend");
-			logParam.put("pump_grp", g.trim());
-			logParam.put("newPumpComb", "");
-			logParam.put("newPumpFreq", "");
-			logParam.put("agoPumpComb", "");
-			logParam.put("agoPumpFreq", "");
-			drvnService.insertManualOperLogNew(logParam);
+		// 다음 throttle 카운트 기준이 되도록 TB_MNL_CHN_LOG 적재 (PumpService 통합 헬퍼).
+		for (int grpInt : grpInts) {
+			pumpService.recordControlCommand(grpInt, "ai_recommend");
 		}
 
 		ResponseObject<String> ok = makeSuccessObj(ResponseMessage.SELECT_SUCCESS, "펌프 제어 명령 전송 성공");
