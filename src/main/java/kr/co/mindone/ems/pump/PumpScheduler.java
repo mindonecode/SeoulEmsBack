@@ -166,6 +166,27 @@ public class PumpScheduler {
                     //map.put("PUMP_GRP_LIST", pumpGrpStr);
                     //if (!pumpService.changePumpList(true, pumpGrpStr).isEmpty() && pumpService.pumpChangeRangeStatus(map)) {
                     if (!pumpService.changePumpList(true, pumpGrpStr).isEmpty()) {
+                        // 통합 30분 throttle: AI 추천 / AI 자동 / 수동 제어가 TB_MNL_CHN_LOG 단일 락 테이블 공유.
+                        // 한 그룹이라도 잠겨있으면 전체 dispatch 스킵 (AiController.pumpCommand 와 동일한 all-or-nothing 정책).
+                        List<Integer> grpInts = new ArrayList<>();
+                        for (String g : pumpGrpStr) {
+                            try { grpInts.add(Integer.parseInt(g.trim())); } catch (NumberFormatException ignore) { }
+                        }
+                        boolean anyLocked = false;
+                        for (int grpInt : grpInts) {
+                            HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(grpInt);
+                            if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+                                System.out.println("[pumpAiControlTask] LOCKED pumpGrp=" + grpInt
+                                        + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime")
+                                        + " → skip auto control");
+                                anyLocked = true;
+                                break;
+                            }
+                        }
+                        if (anyLocked) {
+                            return;
+                        }
+
                         System.out.println("pumpAiControlTask pumpCommand Start");
 
                         /*if(wpp_code.equals("gr"))
@@ -186,6 +207,11 @@ public class PumpScheduler {
                             //pumpService.pumpCommandWMTemp(pumpGrpStr);
                         } else {
                             pumpService.pumpCommand(pumpGrpStr);
+                        }
+
+                        // dispatch 성공 후 throttle 카운트 기준이 되도록 TB_MNL_CHN_LOG 적재.
+                        for (int grpInt : grpInts) {
+                            pumpService.recordControlCommand(grpInt, "ai_auto");
                         }
                     }
                 }
