@@ -5337,15 +5337,15 @@ public class DrvnService {
 			now = LocalDateTime.now();
 		}
 		now = now.withSecond(0).withNano(0);
-		// 예측이 10분마다 생성되므로 t0 를 직전 10분 경계로 floor.
+		// t0 = 예측 batch 시각(10분 floor). 예측 배치가 10분 단위로 적재되므로 조회 키로만 사용.
 		// 예: 14:30~14:39 → t0 = 14:30, 14:55 → t0 = 14:50.
 		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
 
-		// 실측 시점: [t-6h-1min: 보조 prev, 결과 미포함] + t-6h ~ t (1분 간격, 총 361 row).
-		// 첫 시점은 prev 보조용. 마지막 시점 t 는 결과에 포함됨.
-		LocalDateTime auxStart = t0.minusHours(6).minusMinutes(1);
+		// 실측 시점: [now-6h-1min: 보조 prev, 결과 미포함] + now-6h ~ now (1분 간격).
+		// t0 가 아니라 now(분 단위) 까지 가져와 차트가 현재 시각 1분까지 표시되도록 함.
+		LocalDateTime auxStart = now.minusHours(6).minusMinutes(1);
 		List<LocalDateTime> rawTimes = new ArrayList<>();
-		for (LocalDateTime t = auxStart; !t.isAfter(t0); t = t.plusMinutes(1)) {
+		for (LocalDateTime t = auxStart; !t.isAfter(now); t = t.plusMinutes(1)) {
 			rawTimes.add(t);
 		}
 		// 예측 시점: t+10min, t+1h, t+2h, t+3h, t+6h (5점, t0 분 단위 기준)
@@ -5441,7 +5441,9 @@ public class DrvnService {
 		Set<String> lastRawRunning = Collections.emptySet();
 		for (LocalDateTime t : allTimes) {
 			String tsKey = t.format(shortFmt);
-			boolean isFuture = t.isAfter(t0);
+			// 실측 / 예측 구분 기준은 now (분 단위). t0(10분 floor) 기준이면 now=14:38 일 때
+			// 14:31~14:38 실측 데이터가 미래로 잘못 잡혀 prdctRunning 적용되는 버그가 있음.
+			boolean isFuture = t.isAfter(now);
 			Set<String> running;
 			if (isFuture) {
 				running = prdctRunning;
@@ -5515,7 +5517,7 @@ public class DrvnService {
 			row.put("flow", flow);
 			row.put("pwrUnit", pwrUnit);
 			row.put("deltaHour", deltaH);
-			row.put("isPredict", cur.isAfter(t0));
+			row.put("isPredict", cur.isAfter(now));   // now(분 단위) 이후가 예측. 실측 1분 단위 그래프 표시 보장.
 			row.put("runningPumps", new ArrayList<>(running));
 			result.add(row);
 		}

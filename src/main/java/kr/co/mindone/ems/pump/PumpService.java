@@ -90,6 +90,15 @@ public class PumpService {
     private String wpp_code;
 
     /**
+     * In-memory fallback lock 시각 (PUMP_GRP 별 마지막 제어 발사 시각).
+     * DB INSERT (TB_MNL_CHN_LOG) 가 어떤 이유로 실패해도 JVM 메모리 안에서 30분 카운트가 끊기지 않도록 함.
+     * 운영 중 1분마다 자동제어가 들어가던 현상의 직접 원인: insertManualOperLog 가 실패 → DB MAX 시각 안 갱신 → 가드 풀려 매분 발사.
+     * 이 캐시는 JVM 재시작 시 초기화되므로 DB 가드의 보조 역할.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<Integer, java.time.LocalDateTime> lastCtrlInMemory =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
      * 통합 제어 명령 lock 시간 (분).
      * AI 자동/AI 추천/수동 모든 제어 명령에 공통 적용.
      * gu 환경은 기존 5분 정책 유지, 그 외 30분.
@@ -111,31 +120,93 @@ public class PumpService {
         result.put("remainingMinutes", 0);
         result.put("lastCtrlTime", null);
 
+        DateTimeFormatter fmtMin = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+        DateTimeFormatter fmtSec = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+        // (1) TB_MNL_CHN_LOG (PUMP_GRP 별 로그 테이블)
+        LocalDateTime lastFromLog = null;
+        String lastLogStr = null;
         HashMap<String, Object> param = new HashMap<>();
         param.put("pump_grp", pumpGrp);
-        String lastTimeStr;
         try {
-            lastTimeStr = drvnMapper.selectLastCtrlTime(param);
-        } catch (Exception e) {
-            return result;  // 조회 실패 시 lock 없음으로 간주 (안전 장치)
-        }
-        if (lastTimeStr == null || lastTimeStr.isEmpty()) {
-            return result;
-        }
-        try {
-            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
-            LocalDateTime last = LocalDateTime.parse(lastTimeStr, fmt);
-            LocalDateTime now = LocalDateTime.now().withSecond(0).withNano(0);
-            long elapsedMin = Duration.between(last, now).toMinutes();
-            result.put("lastCtrlTime", lastTimeStr);
-            if (elapsedMin < lockMin) {
-                long remaining = lockMin - elapsedMin;
-                if (remaining < 1) remaining = 1;  // 1분 미만은 1분으로 표시
-                result.put("locked", true);
-                result.put("remainingMinutes", (int) remaining);
+            lastLogStr = drvnMapper.selectLastCtrlTime(param);
+            if (lastLogStr != null && !lastLogStr.isEmpty()) {
+                try {
+                    lastFromLog = LocalDateTime.parse(lastLogStr, fmtMin);
+                } catch (Exception parseErr) {
+                    System.out.println("[checkControlLockStatus] TB_MNL_CHN_LOG parse failed pumpGrp=" + pumpGrp
+                            + ", str=" + lastLogStr + " → assume LOCKED. err=" + parseErr.getMessage());
+                    result.put("locked", true);
+                    result.put("remainingMinutes", lockMin);
+                    result.put("lastCtrlTime", lastLogStr);
+                    result.put("error", "TB_MNL_CHN_LOG parse failed");
+                    return result;
+                }
             }
         } catch (Exception e) {
-            // 파싱 실패 시 lock 없음
+            System.out.println("[checkControlLockStatus] selectLastCtrlTime failed pumpGrp=" + pumpGrp
+                    + " → assume LOCKED. err=" + e.getMessage());
+            result.put("locked", true);
+            result.put("remainingMinutes", lockMin);
+            result.put("error", "selectLastCtrlTime failed");
+            return result;
+        }
+
+        // (2) TB_HMI_CTR_TAG MAX(RGSTR_TIME) — 실제 명령 발사의 단일 진실 원천 (멀티 인스턴스 환경 핵심).
+        //     ANLY_CD IN (RUN/STOP/FREQ) 만 필터. PUMP_GRP 무관 전체 락.
+        LocalDateTime lastFromHmi = null;
+        String lastHmiStr = null;
+        try {
+            lastHmiStr = drvnMapper.selectLastHmiCtrTime();
+            if (lastHmiStr != null && !lastHmiStr.isEmpty()) {
+                try {
+                    lastFromHmi = LocalDateTime.parse(lastHmiStr, fmtSec);
+                } catch (Exception parseErr) {
+                    System.out.println("[checkControlLockStatus] TB_HMI_CTR_TAG parse failed str=" + lastHmiStr
+                            + " err=" + parseErr.getMessage());
+                    // HMI 파싱 실패는 보조 정보라 fail-open 대신 무시 (다른 두 소스로 가드).
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("[checkControlLockStatus] selectLastHmiCtrTime failed → assume LOCKED. err=" + e.getMessage());
+            result.put("locked", true);
+            result.put("remainingMinutes", lockMin);
+            result.put("error", "selectLastHmiCtrTime failed");
+            return result;
+        }
+
+        // (3) In-memory fallback (현재 JVM 안에서의 마지막 발사 시각)
+        LocalDateTime lastInMem = lastCtrlInMemory.get(pumpGrp);
+        LocalDateTime lastInMemTruncated = (lastInMem == null) ? null : lastInMem.withSecond(0).withNano(0);
+
+        // (4) 세 시각 중 최댓값을 lock 기준으로 사용.
+        LocalDateTime last = null;
+        String source = null;
+        if (lastFromLog != null) { last = lastFromLog; source = "log"; }
+        if (lastFromHmi != null && (last == null || lastFromHmi.isAfter(last))) { last = lastFromHmi; source = "hmi"; }
+        if (lastInMemTruncated != null && (last == null || lastInMemTruncated.isAfter(last))) { last = lastInMemTruncated; source = "mem"; }
+
+        if (last == null) {
+            return result;  // 한 번도 발사 없었음 → lock 없음
+        }
+
+        LocalDateTime now = LocalDateTime.now().withSecond(0).withNano(0);
+        long elapsedMin = Duration.between(last, now).toMinutes();
+        if (elapsedMin < 0) elapsedMin = 0;
+        String dispStr;
+        if ("hmi".equals(source)) {
+            dispStr = lastHmiStr + " (hmi)";
+        } else if ("mem".equals(source)) {
+            dispStr = last.format(fmtMin) + " (mem)";
+        } else {
+            dispStr = lastLogStr;
+        }
+        result.put("lastCtrlTime", dispStr);
+        if (elapsedMin < lockMin) {
+            long remaining = lockMin - elapsedMin;
+            if (remaining < 1) remaining = 1;
+            result.put("locked", true);
+            result.put("remainingMinutes", (int) remaining);
         }
         return result;
     }
@@ -146,6 +217,11 @@ public class PumpService {
      * @param oper 'up'|'down'|'stop'|'ai_auto'|'ai_recommend' 등
      */
     public void recordControlCommand(int pumpGrp, String oper) {
+        // 1) in-memory 먼저 기록: DB INSERT 가 실패해도 JVM 안에서 가드 기준 시각이 유지되도록.
+        //    이게 핵심 — 운영에서 1분마다 자동제어가 들어가던 현상의 직접 차단.
+        lastCtrlInMemory.put(pumpGrp, LocalDateTime.now());
+
+        // 2) DB INSERT 시도 (실패해도 in-memory 가 backup)
         try {
             HashMap<String, Object> logParam = new HashMap<>();
             DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -154,7 +230,8 @@ public class PumpService {
             logParam.put("pump_grp", pumpGrp);
             drvnMapper.insertManualOperLog(logParam);
         } catch (Exception e) {
-            System.out.println("[recordControlCommand] failed: " + e.getMessage());
+            System.out.println("[recordControlCommand] DB INSERT failed (in-memory fallback active) pumpGrp="
+                    + pumpGrp + " oper=" + oper + " err=" + e.getMessage());
         }
     }
 
