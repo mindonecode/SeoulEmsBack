@@ -215,12 +215,52 @@ public class AiService {
     }
 
     /**
-     * 배수지의 순간 데이터를 조회하는 메서드
+     * 배수지 유입 유량 및 유입 유량 비중 데이터를 조회하는 메서드
      * @param map 조회에 필요한 파라미터
-     * @return 배수지 순간 데이터 리스트
+     * @return 배수지 유입 유량 및 유입 유량 비중 데이터 리스트
      */
     List < HashMap < String, Object >> tankInstantaneous(HashMap < String, Object > map) {
         return aiMapper.tankInstantaneous(map);
+    }
+
+    /**
+     * 배수지 유입 유량 및 유입 유량 비중 데이터를 조회하는 메서드
+     * @param hour 조회 기간
+     * @return 시간별 배수지 유입 유량 및 비중 데이터 리스트
+     */
+    Map<String, List<Map<String, Object>>> selectTankInFlowAndInFlowRateList(Integer hour) {
+		List<HashMap<String, Object>> list = aiMapper.selectTankInFlowAndInFlowRateList(hour);
+		Map<String, List<Map<String, Object>>> listMap = new TreeMap<>();
+
+		for (HashMap<String, Object> item : list) {
+			String tagName = String.valueOf(item.get("TNK_NM"));
+			List<Map<String, Object>> tagList = listMap.computeIfAbsent(tagName, k -> new ArrayList<>());
+
+			Map<String, Object> dataMap = new HashMap<>(item);
+			dataMap.remove("TNK_NM");
+			tagList.add(dataMap);
+		}
+        return listMap;
+    }
+
+    /**
+     * 배수지 수위 데이터를 조회하는 메서드
+     * @param hour 조회 기간
+     * @return 시간별 배수지 수위 데이터 리스트
+     */
+    Map<String, List<Map<String, Object>>> selectWaterLevel(Integer hour) {
+		List<HashMap<String, Object>> list = aiMapper.selectWaterLevel(hour);
+		Map<String, List<Map<String, Object>>> listMap = new TreeMap<>();
+
+		for (HashMap<String, Object> item : list) {
+			String tagName = String.valueOf(item.get("TNK_NM"));
+			List<Map<String, Object>> tagList = listMap.computeIfAbsent(tagName, k -> new ArrayList<>());
+
+			Map<String, Object> dataMap = new HashMap<>(item);
+			dataMap.remove("TNK_NM");
+			tagList.add(dataMap);
+		}
+        return listMap;
     }
 
     /**
@@ -1932,7 +1972,7 @@ public class AiService {
 
         for (HashMap < String, Object > statusItem: statusList) {
             String nowAiStatus = statusItem.get("AI_STATUS").toString();
-            //부분 AI
+            // AI 추천
             if (nowAiStatus.equals("1")) {
                 aiRecommend = true;
             }
@@ -1950,7 +1990,7 @@ public class AiService {
 
         for (HashMap < String, Object > statusItem: statusList) {
             String nowAiStatus = statusItem.get("AI_STATUS").toString();
-            //부분 AI
+            // AI 운영
             if (nowAiStatus.equals("0")) {
                 aiRecommend = true;
             }
@@ -2701,12 +2741,9 @@ public class AiService {
         result.put("isAiControl",   isAiControl);
 
         List<HashMap<String, Object>> items = new ArrayList<>();
-        if (isAiRecommend) {
-            collectAlarmItems(items, PumpService.AI_RECOMMEND, "recommend");
-        }
-        if (isAiControl) {
-            collectAlarmItems(items, PumpService.AI_CONTROL, "control");
-        }
+        if (isAiRecommend) collectAlarmItems(items, PumpService.AI_RECOMMEND, "recommend");
+        if (isAiControl) collectAlarmItems(items, PumpService.AI_CONTROL, "control");
+        
         result.put("items", items);
         return result;
     }

@@ -280,5 +280,10 @@ public class CommonController extends BaseController {
         return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, commonService.selectLatestTagData(tagIds));
     }
 
+    @Operation(summary = "직전 시간 태그데이터 조회", description = "전 시간 대비 수위 데이터 증감량 조회")
+    @PostMapping("/selectWtlvData")
+    public ResponseObject<List<HashMap<String, Object>>> selectWtlvData(@RequestBody HashMap<String, Object> tagIds){
+        return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, commonService.selectWtlvData(tagIds));
+    }
 
 }

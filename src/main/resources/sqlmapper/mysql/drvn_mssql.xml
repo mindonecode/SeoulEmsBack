@@ -2060,6 +2060,20 @@
 		WHERE
 			PUMP_GRP = #{pump_grp}
 	</select>
+
+	<!--
+	  TB_HMI_CTR_TAG 의 가장 최근 실제 명령 발사 시각 (ANLY_CD IN RUN/STOP/FREQ).
+	  멀티 인스턴스(여러 로컬 백엔드가 동일 DB 공유) 환경에서 노드 간 공유 가능한 단일 진실 원천.
+	  PUMP_GRP 컬럼이 TB_HMI_CTR_TAG 에 없어 그룹 무관 전체 락 의도.
+	-->
+	<select id="selectLastHmiCtrTime" resultType="String">
+		SELECT
+			DATE_FORMAT(MAX(RGSTR_TIME), '%Y-%m-%d %H:%i:%s') AS LAST_HMI_CTR_TIME
+		FROM
+			TB_HMI_CTR_TAG
+		WHERE
+			ANLY_CD IN ('RUN', 'STOP', 'FREQ')
+	</select>
 	<insert id="insertManualOperLogNew" parameterType="hashmap">
 		INSERT INTO TB_MNL_CHN_LOG
 			(RGSTR_TIME, OPER, PUMP_GRP, NewPumpComb, NewPumpFreq, AgoPumpComb, AgoPumpFreq)
@@ -2221,6 +2235,13 @@
 		AND
 		PUMP_PRIORITY = #{PUMP_PRIORITY};
 	</insert>
+
+	<update id="updatePumpComb">
+		UPDATE
+		TB_PUMP_CAL
+		SET PUMP_COMB = #{pumpComb}
+		WHERE COUNT_IDX = #{countIdx}
+	</update>
 	
 	<select id="selectPumpCombList" resultType="hashmap" parameterType="hashmap">
 		SELECT
@@ -2448,23 +2469,34 @@
 
 	<!--
 	  1분 단위 IWH/UFR 실측 조회 (TB_RAWDATA).
-	  selectMultiTagRawRange 과 동일하되 MINUTE(TS) % 10 = 0 필터 제거.
-	  분 정각 (SECOND=0) 만 반환.
+	  selectMultiTagRawRange 와 달리 MINUTE % 10 / SECOND=0 필터 없이 ts 를 분 단위로 그룹화.
+	  → 적재 SECOND 가 0이 아닌 경우(예: 14:38:23)도 14:38 키로 정상 집계.
+	  같은 (TAG, 분) 에 여러 row 가 있으면 가장 늦은 초의 값을 채택.
 	-->
 	<select id="selectMultiTagRawRangeMinutely" parameterType="hashmap" resultType="hashmap">
 		SELECT
-			TAGNAME as tag,
-			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') as ts,
-			VALUE as value
-		FROM TB_RAWDATA
-		WHERE TAGNAME IN
-			<foreach item="tag" collection="tagList" open="(" separator="," close=")">
-				#{tag}
-			</foreach>
-			AND TS &gt;= #{startDate}
-			AND TS &lt;= #{endDate}
-			AND SECOND(TS) = 0
-		ORDER BY TS, TAGNAME
+			tag,
+			ts,
+			value
+		FROM (
+			SELECT
+				TAGNAME as tag,
+				DATE_FORMAT(TS, '%Y-%m-%d %H:%i') as ts,
+				VALUE as value,
+				ROW_NUMBER() OVER (
+					PARTITION BY TAGNAME, DATE_FORMAT(TS, '%Y-%m-%d %H:%i')
+					ORDER BY TS DESC
+				) as rn
+			FROM TB_RAWDATA
+			WHERE TAGNAME IN
+				<foreach item="tag" collection="tagList" open="(" separator="," close=")">
+					#{tag}
+				</foreach>
+				AND TS &gt;= #{startDate}
+				AND TS &lt;= #{endDate}
+		) t
+		WHERE rn = 1
+		ORDER BY ts, tag
 	</select>
 
 	<!--
@@ -2490,20 +2522,31 @@
 
 	<!--
 	  1분 단위 펌프 가동 여부 실측 조회 (TB_RAWDATA + PMB_TAG).
-	  selectMultiTimePumpYnRaw 와 동일하되 MINUTE % 10 = 0 필터 제거.
+	  selectMultiTimePumpYnRaw 와 달리 MINUTE % 10 / SECOND=0 필터 없이 분 단위 그룹화.
+	  같은 (PUMP_IDX, 분) 에 여러 row 가 있으면 가장 늦은 초의 값을 채택.
 	-->
 	<select id="selectMultiTimePumpYnRawMinutely" parameterType="hashmap" resultType="hashmap">
 		SELECT
-			DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') as ts,
-			tcppi.PUMP_IDX as pumpIdx,
-			tr.VALUE as pumpYn
-		FROM TB_CTR_PRF_PUMPMST_INF tcppi
-		JOIN TB_RAWDATA tr ON tr.TAGNAME = tcppi.PMB_TAG
-		WHERE tcppi.PUMP_GRP = #{pumpGrp}
-			AND tr.TS &gt;= #{startDate}
-			AND tr.TS &lt;= #{endDate}
-			AND SECOND(tr.TS) = 0
-		ORDER BY tr.TS, tcppi.PUMP_IDX
+			ts,
+			pumpIdx,
+			pumpYn
+		FROM (
+			SELECT
+				DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') as ts,
+				tcppi.PUMP_IDX as pumpIdx,
+				tr.VALUE as pumpYn,
+				ROW_NUMBER() OVER (
+					PARTITION BY tcppi.PUMP_IDX, DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i')
+					ORDER BY tr.TS DESC
+				) as rn
+			FROM TB_CTR_PRF_PUMPMST_INF tcppi
+			JOIN TB_RAWDATA tr ON tr.TAGNAME = tcppi.PMB_TAG
+			WHERE tcppi.PUMP_GRP = #{pumpGrp}
+				AND tr.TS &gt;= #{startDate}
+				AND tr.TS &lt;= #{endDate}
+		) t
+		WHERE rn = 1
+		ORDER BY ts, pumpIdx
 	</select>
 
 	<!--

@@ -403,6 +403,14 @@ public interface DrvnMapper {
 	 */
 	String selectLastCtrlTime(HashMap<String, Object> param);
 
+	/**
+	 * TB_HMI_CTR_TAG 의 가장 최근 실제 명령 발사 시각 (ANLY_CD IN 'RUN', 'STOP', 'FREQ').
+	 * 멀티 인스턴스(로컬 백엔드 동시 가동) 환경에서 노드 간 공유 가능한 단일 진실 원천.
+	 * PUMP_GRP 컬럼이 직접 없어 그룹 무관 전체 락 의도.
+	 * @return 'yyyy-MM-dd HH:mm:ss' 또는 null
+	 */
+	String selectLastHmiCtrTime();
+
 	String getPumpCombLogTime();
 
 	Set<Integer> inverterPumpFreqCheck(HashMap<String, Object> pumpMap);
@@ -450,6 +458,8 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectPumpCombList(HashMap<String, Object> params);
 
 	void savePumpComb (HashMap<String, Object> params);
+
+	void updatePumpComb(@Param("pumpComb") String pumpComb, @Param("countIdx") int countIdx);
 
 	void updatePumpCombItem (HashMap<String, Object> params);
 

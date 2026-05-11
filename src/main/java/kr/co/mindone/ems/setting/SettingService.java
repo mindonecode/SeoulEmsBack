@@ -520,7 +520,10 @@ public class SettingService {
     public void setMonthSeason(List<HashMap<String, Object>> updateList) {
         for(HashMap<String, Object> updateMap : updateList){
             settingMapper.setMonthSeason(updateMap);
-            List<HashMap<String, Object>> targetSeasonLoad = settingMapper.selectSeasonLoad((String) updateMap.get("ssn"));
+            HashMap<String, Object> loadParams = new HashMap<>();
+            loadParams.put("ssn", updateMap.get("ssn"));
+            loadParams.put("mnth", updateMap.get("month"));
+            List<HashMap<String, Object>> targetSeasonLoad = settingMapper.selectSeasonLoad(loadParams);
             for(HashMap<String, Object> map : targetSeasonLoad){
                 map.put("month", updateMap.get("month"));
                 settingMapper.setTargetMonthLoad(map);
@@ -532,7 +535,7 @@ public class SettingService {
      * @param ssn 시즌 정보
      * @return 계절별 요금 정보
      */
-    public HashMap<String, Object> selectRateSeason(String ssn) {
+    public HashMap<String, Object> selectRateSeason(String ssn, String mnth) {
         HashMap<String, Object> returnMap = new HashMap<>();
         List<HashMap<String, Object>> rateList = settingMapper.selectRate(ssn);
         for(HashMap<String, Object> map:rateList){
@@ -541,7 +544,10 @@ public class SettingService {
             }
             returnMap.put((String) map.get("TIMEZONE"), map.get("ELCTR_RATE"));
         }
-        returnMap.put("selectSeasonLoad", settingMapper.selectSeasonLoad(ssn));
+        HashMap<String, Object> loadParams = new HashMap<>();
+        loadParams.put("ssn", ssn);
+        loadParams.put("mnth", mnth);
+        returnMap.put("selectSeasonLoad", settingMapper.selectSeasonLoad(loadParams));
         return returnMap;
     }
     /**
