@@ -85,6 +85,22 @@ public class DrvnConfig {
 	private int setMonth;
 	private StringBuffer loadCheckLog = new StringBuffer();
 
+	// === [Seoul/Dev] 부하+수위 기반 단계 조정 설정값 ============================
+	@Value("${seoul.step.gn.tags:}")
+	private String seoulGnTagsRaw;          // 공릉 수위 태그 CSV (예: "WB01Q0_P_WTDWLM011_ILE,WB01Q0_P_WTDWLM021_ILE,...")
+	@Value("${seoul.step.ba.tags:}")
+	private String seoulBaTagsRaw;          // 북악 수위 태그 CSV
+	@Value("${seoul.step.active.threshold:3.0}")
+	private double seoulActiveThreshold;    // 활성(가동중) 수조 임계 수위 (m)
+	@Value("${seoul.step.gn.target:6.0}")
+	private double seoulGnTarget;           // 공릉 07:00 목표 수위 (m)
+	@Value("${seoul.step.ba.target:7.6}")
+	private double seoulBaTarget;           // 북악 07:00 목표 수위 (m)
+	@Value("${seoul.step.mh.threshold:4.0}")
+	private double seoulMhThreshold;        // 중간/최대부하 수위 임계 (m)
+	private String[] seoulGnTags;           // @PostConstruct 에서 CSV 파싱
+	private String[] seoulBaTags;
+
 	/**
 	 * 거리계산시 압력 및 유량의 평균화를 위한 표준편차를 구하는 메서드
 	 *
@@ -136,6 +152,20 @@ public class DrvnConfig {
 		pumpCombTargetLevelMap = gson.fromJson(pumpCombTargetLevel, doubleType);
 		opt_idx = optIdxTag;
 
+		// Seoul/Dev 수위 태그 CSV → String[] 파싱 (공백 제거, 빈 항목 스킵)
+		seoulGnTags = splitCsvTags(seoulGnTagsRaw);
+		seoulBaTags = splitCsvTags(seoulBaTagsRaw);
+	}
+
+	private static String[] splitCsvTags(String raw) {
+		if (raw == null || raw.trim().isEmpty()) return new String[0];
+		String[] arr = raw.split(",");
+		List<String> out = new ArrayList<>(arr.length);
+		for (String s : arr) {
+			String t = s.trim();
+			if (!t.isEmpty()) out.add(t);
+		}
+		return out.toArray(new String[0]);
 	}
 
 	@Scheduled(cron = "0,30 * * * * *")
@@ -2993,36 +3023,121 @@ public class DrvnConfig {
 			grpFlowPressureMap.put("pressure", pressure);
 			grpFlowPressure.put(pump_grp, grpFlowPressureMap);
 
-			// === [Seoul] 시간대별 단순 단계 조정 ============================================
-			// 정책 (강북정수장 부하시간대.png 기준):
-			//   - 경부하(L)   : 기준 단계 +1   (증가운영)
-			//   - 중간부하(M) : 기준 단계 −1   (감소운영)
-			//   - 최대부하(H) : 기준 단계 그대로 (변경 없음)
-			// 경계 클램프:
-			//   - 첫 조합(index 0) 에서 −1 → 0 으로 유지 (감소운영해도 첫 조합 유지)
-			//   - 마지막 조합(index size-1) 에서 +1 → size-1 로 유지 (증가운영해도 마지막 조합 유지)
-			// 토/일/공휴일 보정: 기존 reduceMap 보정 로직과 동일 (HolidayChecker 사용).
-			// Seoul 인버터 미보유 → freqMap = null.
-			if ("seoul".equals(wpp_code) && closestPointIndex >= 0
+			// === [Seoul/Dev] 부하 + 수위 기반 단계 조정 =====================================
+			// 정책 (강북정수장 부하시간대.png + 공릉/북악 수위 정책, properties 키 seoul.step.*):
+			//   • "#1" = collectData index 0  (최소대수 조합),  "#N" = sizeMax
+			//   • 활성 수조 = 수위 ≥ seoulActiveThreshold (기본 3.0m). 활성 수조 평균이 "현재 수위".
+			//
+			//   [경부하 L]  기존 신림 정수장(DrvnConfig:3683~3807) 방식 차용:
+			//     - (현재 활성 평균 − 5분 전 활성 평균) × 12 = 시간당 상승속도 m/h
+			//     - 변화량 == 0 인 경우 5분씩 거슬러 올라가며 0 아닌 시점 탐색 (최대 60분)
+			//     - 도달 예상 절대시각 = nowScore(자정 기준 분) + (남거리/levelPlus)×60
+			//     - 데드라인 optMinute = 07:00 = 420분 (07시 이후면 다음 날 = 420+1440)
+			//     - totalScore < optMinute → "도달 가능"(감소 후보),  ≥ optMinute → "도달 불가"(증가 필요)
+			//     - 수위 하락(diff<0) 즉시 "도달 불가" → 증가
+			//   결합:
+			//     - 공릉 or 북악 중 하나라도 도달 불가 → +1단계
+			//     - 공릉 & 북악 모두 도달 가능       → −1단계
+			//
+			//   [중간부하 M]
+			//     - 공릉 & 북악 모두 수위 > 4m → −1단계
+			//     - 하나라도 수위 ≤ 4m         → +1단계
+			//
+			//   [최대부하 H]
+			//     - 공릉 & 북악 모두 수위 > 4m → #1 (최소대수 조합) 고정
+			//     - 하나라도 수위 ≤ 4m         → +1단계
+			//
+			//   [활성 0개 fallback]  공릉 or 북악 활성 수조가 0개 → 수위 기반 비교 불가 →
+			//     시간대 기반 단순 로직으로 fallback:
+			//       L → +1단계,  M → −1단계,  H → #1 (최소대수 조합) 고정
+			//
+			// 공통:
+			//   - 단계 범위 초과 시 [0, size−1] 클램프 (#1 또는 #N 끝단 유지)
+			//   - 30분 타이머/수동 우선은 기존 TB_MNL_CHN_LOG throttle 로직이 별도로 보장
+			//   - 토/일/공휴일 보정: 일요일·공휴일 → L 강제, 토요일 H → M
+			//   - Seoul 인버터 미보유 → freqMap = null
+			if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
 					&& collectData != null && !collectData.isEmpty()) {
 				String seoulLoad = reduceMap.get(dateTime.getMonthValue()).get(dateTime.getHour());
 				HolidayChecker seoulHolidayChecker = new HolidayChecker();
 				boolean seoulIsHoliday = seoulHolidayChecker.isPassDay(ts);
 				int seoulWeek = dateTime.getDayOfWeek().getValue();
 				if (seoulWeek == 7 || seoulIsHoliday) {
-					seoulLoad = "L";                          // 일요일/공휴일 → 경부하
+					seoulLoad = "L";
 				} else if (seoulWeek == 6 && "H".equals(seoulLoad)) {
-					seoulLoad = "M";                          // 토요일 H → 중간부하
+					seoulLoad = "M";
 				}
 
+				double[] gn = avgActiveSeoulWaterLevel(seoulGnTags, ts, seoulActiveThreshold);
+				double[] ba = avgActiveSeoulWaterLevel(seoulBaTags, ts, seoulActiveThreshold);
+				double gnLevel = gn[0];
+				double baLevel = ba[0];
+				int gnActive  = (int) gn[1];
+				int baActive  = (int) ba[1];
+
 				int seoulSizeMax = collectData.size() - 1;
-				int seoulAdjustedIndex;
-				if ("L".equals(seoulLoad)) {
-					seoulAdjustedIndex = Math.min(closestPointIndex + 1, seoulSizeMax);  // +1 (sizeMax 클램프)
+				int seoulDelta   = 0;
+				boolean forceFirstComb = false;
+				String adjReason = "";
+
+				boolean noActive = (gnActive == 0) || (baActive == 0);
+				if (noActive) {
+					// 활성 수조 0개 → 수위 비교 불가, 시간대 기반 fallback
+					if ("L".equals(seoulLoad)) {
+						seoulDelta = +1;
+						adjReason  = "fallback(활성0): L→+1";
+					} else if ("M".equals(seoulLoad)) {
+						seoulDelta = -1;
+						adjReason  = "fallback(활성0): M→−1";
+					} else {  // H
+						forceFirstComb = true;
+						adjReason      = "fallback(활성0): H→#1";
+					}
+				} else if ("L".equals(seoulLoad)) {
+					// 신림 정수장(DrvnConfig:3683~3807) 방식: 5분 변화량 × 12 → 도달 절대시각 vs 데드라인.
+					int nowScore     = dateTime.getHour() * 60 + dateTime.getMinute();
+					final int deadline7 = 7 * 60;                                      // 07:00 = 420분
+					int optMinute    = (nowScore < deadline7) ? deadline7 : deadline7 + 24 * 60;
+
+					boolean gnReachable = isStationReachableSinlimStyle(
+							seoulGnTags, seoulGnTarget, dateTime, nowScore, optMinute);
+					boolean baReachable = isStationReachableSinlimStyle(
+							seoulBaTags, seoulBaTarget, dateTime, nowScore, optMinute);
+
+					if (!gnReachable || !baReachable) {
+						seoulDelta = +1;
+						adjReason  = "L: 도달불가 (gn=" + gnReachable + ", ba=" + baReachable + ") → +1";
+					} else {
+						seoulDelta = -1;
+						adjReason  = "L: 둘다 도달가능 → −1";
+					}
+					logger.info("[SEOUL/L] ts={} pump_grp={} nowScore={} optMinute={} gn(target={}, reachable={}) ba(target={}, reachable={})",
+							ts, pump_grp, nowScore, optMinute,
+							seoulGnTarget, gnReachable, seoulBaTarget, baReachable);
+
 				} else if ("M".equals(seoulLoad)) {
-					seoulAdjustedIndex = Math.max(closestPointIndex - 1, 0);             // -1 (0 클램프)
+					if (gnLevel > seoulMhThreshold && baLevel > seoulMhThreshold) {
+						seoulDelta = -1;
+						adjReason  = "M: 둘다 수위>" + seoulMhThreshold + "m";
+					} else {
+						seoulDelta = +1;
+						adjReason  = "M: 하나라도 수위≤" + seoulMhThreshold + "m";
+					}
+				} else {  // "H" 최대부하
+					if (gnLevel > seoulMhThreshold && baLevel > seoulMhThreshold) {
+						forceFirstComb = true;
+						adjReason      = "H: 둘다 수위>" + seoulMhThreshold + "m → #1 고정";
+					} else {
+						seoulDelta = +1;
+						adjReason  = "H: 하나라도 수위≤" + seoulMhThreshold + "m";
+					}
+				}
+
+				int seoulAdjustedIndex;
+				if (forceFirstComb) {
+					seoulAdjustedIndex = 0;                                              // #1 = 최소대수 조합
 				} else {
-					seoulAdjustedIndex = closestPointIndex;                              // H 또는 그 외 → 그대로
+					seoulAdjustedIndex = Math.min(Math.max(closestPointIndex + seoulDelta, 0), seoulSizeMax);
 				}
 
 				Object seoulPc = collectData.get(seoulAdjustedIndex).get("pumpComb");
@@ -3031,15 +3146,17 @@ public class DrvnConfig {
 					List<String> seoulPcList = (List<String>) seoulPc;
 					returnComb = new ArrayList<>(seoulPcList);
 				}
-				freqMap = null;  // Seoul 인버터 없음 → 주파수 맵 사용 안 함
+				freqMap = null;  // Seoul 인버터 없음
 
-				loadCheckLog.append("[SEOUL] load=" + seoulLoad
-						+ ", baseIdx=" + closestPointIndex
-						+ ", adjustedIdx=" + seoulAdjustedIndex
-						+ ", sizeMax=" + seoulSizeMax
-						+ ", returnComb=" + returnComb + "#");
+				logger.info("[SEOUL] ts={} pump_grp={} load={} gn(active={}, lvl={}) ba(active={}, lvl={}) reason='{}' baseIdx={} adjustedIdx={} sizeMax={} returnComb={}",
+						ts, pump_grp, seoulLoad,
+						gnActive, String.format("%.3f", gnLevel),
+						baActive, String.format("%.3f", baLevel),
+						adjReason,
+						closestPointIndex, seoulAdjustedIndex, seoulSizeMax,
+						returnComb);
 			}
-			// === [Seoul] 단계 조정 끝 ========================================================
+			// === [Seoul/Dev] 단계 조정 끝 ====================================================
 
 			grpPrdctPwr = allPumpGrpPwrPrdct(returnComb, grpFlowPressure, freqMap);
 
@@ -5393,6 +5510,94 @@ public class DrvnConfig {
 
 
 		return returnComb;
+	}
+
+	/**
+	 * [Seoul/Dev] 경부하 도달 가능성 판정. 신림 정수장(DrvnConfig:3683~3807) 로직을 멀티 태그 평균 버전으로 차용.
+	 * <pre>
+	 *   levelPlus(m/h)  = (현재 활성 평균 − 5분 전 활성 평균) × 12
+	 *   optLevel(m)     = target − 현재 활성 평균
+	 *   optLevelMinute  = (optLevel / levelPlus) × 60          // 도달 소요(분)
+	 *   totalScore      = nowScore + optLevelMinute            // 도달 절대시각(자정기준 분)
+	 *   도달 가능        = totalScore < optMinute
+	 * </pre>
+	 * 보완: 5분 변화량 == 0 인 경우 5분씩 거슬러 올라가며 0 아닌 시점 탐색 (최대 60분).
+	 * 활성 평균 0(센서 결측) 인 경우도 거슬러 올라감. 끝까지 변화 못 찾으면 보수적으로 false(증가).
+	 *
+	 * @param tags       정수장 수위 태그 배열
+	 * @param target     07:00 목표 수위 (m)
+	 * @param dateTime   현재 시각
+	 * @param nowScore   현재 시각의 자정 기준 분 (hour×60 + minute)
+	 * @param optMinute  데드라인 (자정 기준 분, 07시 이후이면 +1440 추가됨)
+	 * @return true = 데드라인 안에 도달 가능 (감소 후보), false = 도달 불가 (증가 필요)
+	 */
+	private boolean isStationReachableSinlimStyle(String[] tags, double target,
+	                                              LocalDateTime dateTime, int nowScore, int optMinute) {
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		double curNow  = 0.0;
+		double diff    = 0.0;
+		int curScore   = nowScore;
+		boolean found  = false;
+		final int maxBack = 60;
+		for (int backShift = 0; backShift <= maxBack; backShift += 5) {
+			LocalDateTime nowT  = dateTime.minusMinutes(backShift);
+			LocalDateTime prevT = dateTime.minusMinutes(backShift + 5);
+			double[] n = avgActiveSeoulWaterLevel(tags, nowT.format(formatter),  seoulActiveThreshold);
+			double[] p = avgActiveSeoulWaterLevel(tags, prevT.format(formatter), seoulActiveThreshold);
+			if (n[1] == 0 || p[1] == 0) {
+				curScore -= 5;
+				continue;
+			}
+			double d = n[0] - p[0];
+			if (Math.abs(d) > 1e-9) {
+				curNow = n[0];
+				diff   = d;
+				found  = true;
+				break;
+			}
+			curScore -= 5;
+		}
+		if (!found)   return false;   // 변화 못 찾음 → 보수적으로 증가 필요
+		if (diff < 0) return false;   // 수위 하락 중 → 즉시 증가 필요
+
+		double levelPlus = diff * 12.0;                       // 시간당 상승속도 (m/h)
+		double optLevel  = target - curNow;
+		if (optLevel <= 0) return true;                       // 이미 목표 달성
+		double optLevelMinute = (optLevel / levelPlus) * 60.0;
+		double totalScore     = curScore + optLevelMinute;
+		return totalScore < optMinute;
+	}
+
+	/**
+	 * [Seoul/Dev] 특정 시점 기준, 주어진 수위 태그들 중 활성(≥threshold) 수조들의 평균 수위와 개수.
+	 * 호출부는 활성 개수가 0 이면 시간대 기반 fallback 으로 전환한다.
+	 *
+	 * @param tags         수위 TAG 배열 (예: 공릉 6개, 북악 2개)
+	 * @param nowDateTime  조회 기준 시각 문자열 (TB_RAWDATA.TS 비교용)
+	 * @param threshold    활성 판단 임계 수위 (예: 3.0m)
+	 * @return double[2] = {활성 평균 수위(없으면 0.0), 활성 수조 개수}
+	 */
+	private double[] avgActiveSeoulWaterLevel(String[] tags, String nowDateTime, double threshold) {
+		double sum = 0.0;
+		int count = 0;
+		if (tags == null || tags.length == 0) return new double[]{0.0, 0};
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("nowDateTime", nowDateTime);
+		for (String tag : tags) {
+			param.put("tagname", tag);
+			Double v = null;
+			try {
+				v = drvnMapper.selectRawData(param);
+			} catch (Exception e) {
+				// 단일 태그 조회 실패는 무시하고 계속 진행
+			}
+			if (v != null && v >= threshold) {
+				sum += v;
+				count++;
+			}
+		}
+		double avg = count > 0 ? sum / count : 0.0;
+		return new double[]{avg, count};
 	}
 
 
