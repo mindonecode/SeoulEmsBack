@@ -1789,29 +1789,28 @@
 	<select id="selectTankDataHourList" parameterType="hashMap" resultType="hashMap">
 		
 		SELECT
-		TNK_idx,
-		TNK_NM,
-		TNK_GRP_NM,
-		TNK_GRP_IDX,
-		ts,
-		tagname,
-		SUM(value) as value
+			TNK_idx,
+			TNK_NM,
+			TNK_GRP_NM,
+			TNK_GRP_IDX,
+			ts,
+			tagname,
+			SUM(value) as value
 		FROM (
-		select
-		tgi.TNK_idx,
-		tgi.TNK_NM,
-		tgi.TNK_GRP_NM,
-		tgi.TNK_GRP_IDX,
-		DATE_FORMAT(ts, '%Y-%m-%d %H:%i') ts,
-		tagname,
-		FORMAT (value ,0) value
-		from
-		TB_RAWDATA_HOUR rdh, TB_TNK_GRP_INF tgi
-		WHERE
-		rdh.tagname = tgi.LEI_TAG
+			select
+				tgi.TNK_idx,
+				tgi.TNK_NM,
+				tgi.TNK_GRP_NM,
+				tgi.TNK_GRP_IDX,
+				DATE_FORMAT(ts, '%Y-%m-%d %H:%i') ts,
+				tagname,
+				FORMAT (value ,0) value
+			from TB_RAWDATA_HOUR rdh, 
+				TB_TNK_GRP_INF tgi
+			where rdh.tagname = tgi.LEI_TAG
 				<![CDATA[AND ts >=concat(#{date},' 00:00:00') AND ts <= concat(#{date},' 23:59:00')]]>
-		and tnk_typ = '1'
-		and tgi.USE_YN='1'
+				and tnk_typ = '1'
+				and tgi.USE_YN='1'
 		) a
 		GROUP BY TNK_GRP_NM, ts
 	</select>
@@ -1878,6 +1877,24 @@
 		USE_YN = '1' AND TNK_TYP = '1'
 		GROUP BY
 		TNK_GRP_NM
+	</select>
+	<select id="selectTankInFlowAndInFlowRateList" parameterType="Integer" resultType="hashMap">
+		SELECT rd.TS, ROUND(rd.VALUE, 2) AS VALUE, tgi.TNK_NM
+		FROM TB_RAWDATA_15MIN rd
+		INNER JOIN TB_TNK_GRP_INF tgi
+			ON rd.TAGNAME = tgi.IN_FLW_TAG
+			AND tgi.USE_YN = '1'
+		WHERE rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+		ORDER BY rd.TS ASC;
+	</select>
+	<select id="selectWaterLevel" parameterType="Integer" resultType="hashMap">
+		SELECT rd.TS, ROUND(rd.VALUE, 2) AS VALUE, tgi.TNK_NM
+		FROM TB_RAWDATA_15MIN rd
+		INNER JOIN TB_TNK_GRP_INF tgi
+			ON rd.TAGNAME = tgi.LEI_TAG
+			AND tgi.USE_YN = '1'
+		WHERE rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+		ORDER BY rd.TS ASC;
 	</select>
 	<select id="selectPumpPwqList" parameterType="hashMap" resultType="hashMap">
 		SELECT
@@ -2835,13 +2852,10 @@
 	</select>
 
 	<select id="selectAiStatus" resultType="hashMap">
-    SELECT
-    TAG_GRP as PUMP_GRP,
-    DEFAULT_VALUE as AI_STATUS
-    FROM
-    TB_WPP_TAG_CODE
-    WHERE
-    FUNC_TYP = 'PumpStatus'
+    SELECT TAG_GRP as PUMP_GRP, DEFAULT_VALUE as AI_STATUS
+    FROM TB_WPP_TAG_CODE
+    WHERE FUNC_TYP = 'PumpStatus'
+    <!-- WHERE FUNC_TYP = 'TestPumpStatus' -->
     ORDER BY PUMP_GRP
 	</select>
 
@@ -2873,16 +2887,11 @@
 	</select>
 
 	<select id="selectPumpEmergencyStatus" parameterType="String" resultType="String">
-    select
-    DEFAULT_VALUE
-    from
-    TB_WPP_TAG_CODE
-    where
-    TAG_GRP = 'EMS'
-    and
-    TAG_DSC = 'emerStatus'
-    and
-    TAG_UNIT = #{pumpGrp}
+    SELECT DEFAULT_VALUE
+    FROM TB_WPP_TAG_CODE
+    WHERE TAG_GRP = 'EMS'
+    	AND TAG_DSC = 'emerStatus'
+    	AND TAG_UNIT = #{pumpGrp}
 	</select>
 
 	<select id="selectAIPumpData" resultType="hashMap" parameterType="int">
@@ -3182,64 +3191,47 @@
 		  호출자(createPumpCombStatus) 는 cur_freq/pre_freq null 가드가 이미 있어 호환됨.
 		-->
 		SELECT
-		DATE_FORMAT(rst.RGSTR_TIME, '%Y-%m-%d %H:%i:%s') as rgstr_time,
-		rst.PUMP_YN_RST as 'pre_comb',
-		raw.PUMP_USE_RST as 'cur_comb',
-		rst.FLOW_CTR
-		FROM
-		(
-		SELECT
-		A.RGSTR_TIME,
-		GROUP_CONCAT(CASE WHEN A.PUMP_YN = 1 THEN A.PUMP_IDX END ORDER BY A.PUMP_IDX ASC) AS PUMP_YN_RST,
-		A.FLOW_CTR
+			DATE_FORMAT(rst.RGSTR_TIME, '%Y-%m-%d %H:%i:%s') as rgstr_time,
+			rst.PUMP_YN_RST as 'pre_comb',
+			raw.PUMP_USE_RST as 'cur_comb',
+			rst.FLOW_CTR
 		FROM (
-		SELECT
-		t1.PUMP_IDX,
-		COALESCE(t2.PUMP_YN, t1.PUMP_YN) AS PUMP_YN,
-		COALESCE(t2.RGSTR_TIME, t1.RGSTR_TIME) AS RGSTR_TIME,
-		COALESCE(t2.RATE_CTGRY, 'None') AS RATE_CTGRY,
-		COALESCE(t2.FLOW_CTR, 'None') AS FLOW_CTR,
-		CASE
-		WHEN t2.OPT_IDX is not null THEN 1
-		ELSE 0
-		END AS FLAG
-		FROM
-		TB_CTR_PUMPYN_RST t1
-		LEFT JOIN
-		TB_CTR_PUMPYN_INQUIRY t2
-		ON
-		t1.OPT_IDX = t2.OPT_IDX
-		AND
-		t1.PUMP_IDX = t2.PUMP_IDX
-		AND
-		t1.RGSTR_TIME = t2.RGSTR_TIME
-		WHERE
-		t1.PUMP_GRP = #{pump_grp}
-		AND
-		t1.RGSTR_TIME = (
-				select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST where RGSTR_TIME &lt;= #{nowDate} and RGSTR_TIME &gt; DATE_SUB(#{nowDate}, interval 15 minute)
-			)
-		) A
-		GROUP BY
-		A.RGSTR_TIME
+			SELECT
+				A.RGSTR_TIME,
+				GROUP_CONCAT(CASE WHEN A.PUMP_YN = 1 THEN A.PUMP_IDX END ORDER BY A.PUMP_IDX ASC) AS PUMP_YN_RST,
+				A.FLOW_CTR
+			FROM (
+				SELECT
+					t1.PUMP_IDX,
+					COALESCE(t2.PUMP_YN, t1.PUMP_YN) AS PUMP_YN,
+					COALESCE(t2.RGSTR_TIME, t1.RGSTR_TIME) AS RGSTR_TIME,
+					COALESCE(t2.RATE_CTGRY, 'None') AS RATE_CTGRY,
+					COALESCE(t2.FLOW_CTR, 'None') AS FLOW_CTR,
+					CASE WHEN t2.OPT_IDX is not null 
+						THEN 1
+						ELSE 0
+						END AS FLAG
+				FROM TB_CTR_PUMPYN_RST t1 
+					LEFT JOIN TB_CTR_PUMPYN_INQUIRY t2 
+						ON t1.OPT_IDX = t2.OPT_IDX
+						AND t1.PUMP_IDX = t2.PUMP_IDX
+						AND t1.RGSTR_TIME = t2.RGSTR_TIME
+				WHERE t1.PUMP_GRP = #{pump_grp}
+					AND t1.RGSTR_TIME = (
+						select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST where RGSTR_TIME &lt;= #{nowDate} and RGSTR_TIME &gt; DATE_SUB(#{nowDate}, interval 15 minute)
+					)
+			) A
+			GROUP BY A.RGSTR_TIME
 		) rst
-		LEFT JOIN
-		(
-		SELECT
-		tr.TS as TS,
-		GROUP_CONCAT(CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END ORDER BY tc.PUMP_IDX ASC) AS PUMP_USE_RST
-		FROM
-		TB_RAWDATA tr
-		JOIN
-		TB_CTR_PRF_PUMPMST_INF tc
-		ON
-		tr.TAGNAME = tc.PMB_TAG
-		WHERE
-		tc.PUMP_GRP = #{pump_grp}
-		AND
-		tr.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{nowDate} and TS &gt; DATE_SUB(#{nowDate}, interval 15 minute))
-		GROUP BY
-		tr.TS
+		LEFT JOIN (
+			SELECT tr.TS as TS,
+				GROUP_CONCAT(CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END ORDER BY tc.PUMP_IDX ASC) AS PUMP_USE_RST
+			FROM TB_RAWDATA tr
+				JOIN TB_CTR_PRF_PUMPMST_INF tc
+				ON tr.TAGNAME = tc.PMB_TAG
+			WHERE tc.PUMP_GRP = #{pump_grp}
+				AND tr.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{nowDate} and TS &gt; DATE_SUB(#{nowDate}, interval 15 minute))
+			GROUP BY tr.TS
 		) raw
 		<!--
 		  ON 1=1 (cross join):
@@ -3249,10 +3241,8 @@
 		    1=1 결합으로도 결과 행이 폭주하지 않으며 cur_comb 항상 채워짐.
 		-->
 		ON 1 = 1
-		GROUP BY
-		rst.RGSTR_TIME
-		ORDER BY
-		rst.RGSTR_TIME;
+		GROUP BY rst.RGSTR_TIME
+		ORDER BY rst.RGSTR_TIME;
 	</select>
 
 	<select id="getAIPumpTime" resultType="String">

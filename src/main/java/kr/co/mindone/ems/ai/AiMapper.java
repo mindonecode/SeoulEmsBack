@@ -118,6 +118,20 @@ public interface AiMapper {
 	List<HashMap<String, Object>> tankInstantaneous(HashMap<String, Object> map);
 
 	/**
+	 * 배수지 유입 유량 및 유입 유량 비중 데이터를 조회한다.
+	 * @param hour 조회 기간
+	 * @return 배수지 유입 유량 및 유입 유량 비중 데이터
+	 */
+	List<HashMap<String, Object>> selectTankInFlowAndInFlowRateList(Integer hour);
+
+	/**
+	 * 배수지 수위 데이터를 조회한다.
+	 * @param hour 조회 기간
+	 * @return 배수지 수위 데이터
+	 */
+	List<HashMap<String, Object>> selectWaterLevel(Integer hour);
+
+	/**
 	 * 전력량 데이터를 조회한다.
 	 * @param map 조회 조건을 포함하는 파라미터
 	 * @return 전력량 리스트
