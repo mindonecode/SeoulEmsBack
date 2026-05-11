@@ -285,4 +285,62 @@ public class CommonService {
 	public List<HashMap<String, Object>> selectLatestTagData(HashMap<String,Object> tagIds) {
 		return commonMapper.selectLatestTagData(tagIds);
 	}
+
+	public List<HashMap<String, Object>>selectWtlvData(HashMap<String, Object> tagIds){
+		List<HashMap<String, Object>> previousTags = commonMapper.selectWtlvData(tagIds);
+		List<HashMap<String, Object>> latestTags = commonMapper.selectLatestTagData(tagIds);
+
+		Map<String, HashMap<String, Object>> latestByTagName = new HashMap<>();
+		for (HashMap<String, Object> latestTag : latestTags) {
+			if (latestTag == null || latestTag.get("TAGNAME") == null) {
+				continue;
+			}
+			latestByTagName.put(latestTag.get("TAGNAME").toString(), latestTag);
+		}
+
+		for (HashMap<String, Object> previousTag : previousTags) {
+			if (previousTag == null || previousTag.get("TAGNAME") == null) {
+				continue;
+			}
+
+			HashMap<String, Object> latestTag = latestByTagName.get(previousTag.get("TAGNAME").toString());
+			if (latestTag == null) {
+				previousTag.put("LATEST_VALUE", "-");
+//				previousTag.put("LATEST_TS", null);
+				previousTag.put("DIFF_VALUE", "-");
+				continue;
+			}
+
+			previousTag.put("LATEST_VALUE", latestTag.get("VALUE"));
+//			previousTag.put("LATEST_TS", latestTag.get("TS"));
+
+			Double latestValue = toDouble(latestTag.get("VALUE"));
+			Double previousValue = toDouble(previousTag.get("VALUE"));
+			if (latestValue == null || previousValue == null) {
+				previousTag.put("DIFF_VALUE", "-");
+				continue;
+			}
+
+			previousTag.put("DIFF_VALUE", Math.round((latestValue - previousValue) * 100d) / 100d);
+		}
+
+		return previousTags;
+	}
+
+	private Double toDouble(Object value) {
+		if (value == null) {
+			return null;
+		}
+
+		String stringValue = value.toString().trim();
+		if (stringValue.isEmpty() || "-".equals(stringValue)) {
+			return null;
+		}
+
+		try {
+			return Double.parseDouble(stringValue);
+		} catch (NumberFormatException e) {
+			return null;
+		}
+	}
 }
