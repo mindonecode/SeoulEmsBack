@@ -2047,6 +2047,19 @@
 			#{pump_grp}
 		);
 	</insert>
+
+	<!--
+	  PUMP_GRP 별 가장 최근 제어 명령 시각 (TB_MNL_CHN_LOG 의 가장 최근 RGSTR_TIME).
+	  AI 자동/AI 추천/수동 모든 제어 명령 발사 후 기록되는 통합 lock 시각.
+	-->
+	<select id="selectLastCtrlTime" parameterType="hashmap" resultType="String">
+		SELECT
+			DATE_FORMAT(MAX(RGSTR_TIME), '%Y-%m-%d %H:%i') AS LAST_CTRL_TIME
+		FROM
+			TB_MNL_CHN_LOG
+		WHERE
+			PUMP_GRP = #{pump_grp}
+	</select>
 	<insert id="insertManualOperLogNew" parameterType="hashmap">
 		INSERT INTO TB_MNL_CHN_LOG
 			(RGSTR_TIME, OPER, PUMP_GRP, NewPumpComb, NewPumpFreq, AgoPumpComb, AgoPumpFreq)
@@ -2375,6 +2388,26 @@
 		ORDER BY TS, TAGNAME
 	</select>
 
+	<!--
+	  수위 5개 태그를 1분 단위 BETWEEN 범위로 조회.
+	  selectWaterLevelByRange 와 동일 태그 셋이지만, IN 리스트 대신 BETWEEN + SECOND=0 사용.
+	-->
+	<select id="selectWaterLevelByMinuteRange" parameterType="hashmap" resultType="HashMap">
+		SELECT TS, TAGNAME, VALUE
+		FROM TB_RAWDATA
+		WHERE TAGNAME IN (
+		'ZG01Q0_P_WTDWLM011_ILE',
+		'WB01Q0_P_WTDWLM021_ILE',
+		'WB02Q0_P_WTDWLM021_ILE',
+		'WJ55Q0_P_WTDWLE011_ILE',
+		'WS03Q0_P_WTDWLM011_ILE'
+		)
+		AND TS &gt;= #{startDate}
+		AND TS &lt;= #{endDate}
+		AND SECOND(TS) = 0
+		ORDER BY TS, TAGNAME
+	</select>
+
 	<select id="selectPumpRunHistoryByGrp" parameterType="hashmap" resultType="HashMap">
 		SELECT
 			rd.TS         AS TS,
@@ -2414,6 +2447,27 @@
 	</select>
 
 	<!--
+	  1분 단위 IWH/UFR 실측 조회 (TB_RAWDATA).
+	  selectMultiTagRawRange 과 동일하되 MINUTE(TS) % 10 = 0 필터 제거.
+	  분 정각 (SECOND=0) 만 반환.
+	-->
+	<select id="selectMultiTagRawRangeMinutely" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			TAGNAME as tag,
+			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') as ts,
+			VALUE as value
+		FROM TB_RAWDATA
+		WHERE TAGNAME IN
+			<foreach item="tag" collection="tagList" open="(" separator="," close=")">
+				#{tag}
+			</foreach>
+			AND TS &gt;= #{startDate}
+			AND TS &lt;= #{endDate}
+			AND SECOND(TS) = 0
+		ORDER BY TS, TAGNAME
+	</select>
+
+	<!--
 	  10분 단위 펌프 가동 여부 실측 조회 (TB_RAWDATA + PMB_TAG).
 	  - pumpGrp: 펌프 계통
 	  - startDate, endDate: TS 범위
@@ -2430,6 +2484,24 @@
 			AND tr.TS &gt;= #{startDate}
 			AND tr.TS &lt;= #{endDate}
 			AND MINUTE(tr.TS) % 10 = 0
+			AND SECOND(tr.TS) = 0
+		ORDER BY tr.TS, tcppi.PUMP_IDX
+	</select>
+
+	<!--
+	  1분 단위 펌프 가동 여부 실측 조회 (TB_RAWDATA + PMB_TAG).
+	  selectMultiTimePumpYnRaw 와 동일하되 MINUTE % 10 = 0 필터 제거.
+	-->
+	<select id="selectMultiTimePumpYnRawMinutely" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') as ts,
+			tcppi.PUMP_IDX as pumpIdx,
+			tr.VALUE as pumpYn
+		FROM TB_CTR_PRF_PUMPMST_INF tcppi
+		JOIN TB_RAWDATA tr ON tr.TAGNAME = tcppi.PMB_TAG
+		WHERE tcppi.PUMP_GRP = #{pumpGrp}
+			AND tr.TS &gt;= #{startDate}
+			AND tr.TS &lt;= #{endDate}
 			AND SECOND(tr.TS) = 0
 		ORDER BY tr.TS, tcppi.PUMP_IDX
 	</select>

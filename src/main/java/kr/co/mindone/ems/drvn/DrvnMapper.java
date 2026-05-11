@@ -395,6 +395,14 @@ public interface DrvnMapper {
 
 	void insertManualOperLog(HashMap<String, Object> logInsParma);
 
+	/**
+	 * PUMP_GRP 별 가장 최근 제어 명령 시각 조회 (TB_MNL_CHN_LOG).
+	 * AI 자동/AI 추천/수동 모든 제어 명령 발사 후 기록되는 통합 lock 시각.
+	 * @param param pump_grp
+	 * @return 'yyyy-MM-dd HH:mm' 또는 null
+	 */
+	String selectLastCtrlTime(HashMap<String, Object> param);
+
 	String getPumpCombLogTime();
 
 	Set<Integer> inverterPumpFreqCheck(HashMap<String, Object> pumpMap);
@@ -473,6 +481,12 @@ public interface DrvnMapper {
 
 	List<HashMap<String,Object>> selectWaterLevelByRange(HashMap<String, Object> param);
 
+	/**
+	 * 수위 5개 태그를 1분 단위 BETWEEN 범위로 조회.
+	 * @param param startDate, endDate (yyyy-MM-dd HH:mm:00)
+	 */
+	List<HashMap<String,Object>> selectWaterLevelByMinuteRange(HashMap<String, Object> param);
+
 	List<HashMap<String,Object>> selectPumpRunHistoryByGrp(HashMap<String, Object> param);
 
 	/**
@@ -481,6 +495,12 @@ public interface DrvnMapper {
 	 * @return [{tag, ts(yyyy-MM-dd HH:mm), value(Object)}]
 	 */
 	List<HashMap<String, Object>> selectMultiTagRawRange(HashMap<String, Object> param);
+
+	/**
+	 * 다중 태그 × 다중 시점 실측값 조회 (TB_RAWDATA, 1분 단위).
+	 * selectMultiTagRawRange 와 동일 파라미터, MINUTE % 10 = 0 필터 미적용.
+	 */
+	List<HashMap<String, Object>> selectMultiTagRawRangeMinutely(HashMap<String, Object> param);
 
 	/**
 	 * 다중 태그 × 다중 PRDCT_TIME 예측값 조회 (TB_CTR_TNK_RST).
@@ -496,6 +516,12 @@ public interface DrvnMapper {
 	 * @return [{ts, pumpIdx, pumpYn}]
 	 */
 	List<HashMap<String, Object>> selectMultiTimePumpYnRaw(HashMap<String, Object> param);
+
+	/**
+	 * 시점별 펌프 가동 여부 실측 조회 (1분 단위).
+	 * selectMultiTimePumpYnRaw 와 동일 파라미터, MINUTE % 10 = 0 필터 미적용.
+	 */
+	List<HashMap<String, Object>> selectMultiTimePumpYnRawMinutely(HashMap<String, Object> param);
 
 	/**
 	 * 가장 최근 RGSTR_TIME 기준 펌프별 예측 가동 여부 (TB_CTR_PUMPYN_RST).

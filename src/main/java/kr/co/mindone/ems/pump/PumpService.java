@@ -36,6 +36,9 @@ public class PumpService {
     private PumpMapper pumpMapper;
 
     @Autowired
+    private kr.co.mindone.ems.drvn.DrvnMapper drvnMapper;
+
+    @Autowired
     private KafkaProperties kafkaProperties;
 
     private static final int PUMP_RUN_COMMAND_SUCCESS = 0; //동작성공
@@ -85,6 +88,75 @@ public class PumpService {
 
     @Value("${spring.profiles.active}")
     private String wpp_code;
+
+    /**
+     * 통합 제어 명령 lock 시간 (분).
+     * AI 자동/AI 추천/수동 모든 제어 명령에 공통 적용.
+     * gu 환경은 기존 5분 정책 유지, 그 외 30분.
+     */
+    private int controlLockMinutes() {
+        return "gu".equals(wpp_code) ? 5 : 30;
+    }
+
+    /**
+     * 통합 제어 lock 상태 체크 (TB_MNL_CHN_LOG 의 PUMP_GRP 별 가장 최근 시각 기준).
+     * @param pumpGrp 대상 펌프 그룹
+     * @return {locked: bool, remainingMinutes: int, lastCtrlTime: String|null, lockMinutes: int}
+     */
+    public HashMap<String, Object> checkControlLockStatus(int pumpGrp) {
+        HashMap<String, Object> result = new HashMap<>();
+        int lockMin = controlLockMinutes();
+        result.put("lockMinutes", lockMin);
+        result.put("locked", false);
+        result.put("remainingMinutes", 0);
+        result.put("lastCtrlTime", null);
+
+        HashMap<String, Object> param = new HashMap<>();
+        param.put("pump_grp", pumpGrp);
+        String lastTimeStr;
+        try {
+            lastTimeStr = drvnMapper.selectLastCtrlTime(param);
+        } catch (Exception e) {
+            return result;  // 조회 실패 시 lock 없음으로 간주 (안전 장치)
+        }
+        if (lastTimeStr == null || lastTimeStr.isEmpty()) {
+            return result;
+        }
+        try {
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+            LocalDateTime last = LocalDateTime.parse(lastTimeStr, fmt);
+            LocalDateTime now = LocalDateTime.now().withSecond(0).withNano(0);
+            long elapsedMin = Duration.between(last, now).toMinutes();
+            result.put("lastCtrlTime", lastTimeStr);
+            if (elapsedMin < lockMin) {
+                long remaining = lockMin - elapsedMin;
+                if (remaining < 1) remaining = 1;  // 1분 미만은 1분으로 표시
+                result.put("locked", true);
+                result.put("remainingMinutes", (int) remaining);
+            }
+        } catch (Exception e) {
+            // 파싱 실패 시 lock 없음
+        }
+        return result;
+    }
+
+    /**
+     * 제어 명령 발사 후 lock 시각 기록 (TB_MNL_CHN_LOG INSERT).
+     * @param pumpGrp 대상 펌프 그룹
+     * @param oper 'up'|'down'|'stop'|'ai_auto'|'ai_recommend' 등
+     */
+    public void recordControlCommand(int pumpGrp, String oper) {
+        try {
+            HashMap<String, Object> logParam = new HashMap<>();
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            logParam.put("nowDate", LocalDateTime.now().format(fmt));
+            logParam.put("oper", oper == null ? "ai_auto" : oper);
+            logParam.put("pump_grp", pumpGrp);
+            drvnMapper.insertManualOperLog(logParam);
+        } catch (Exception e) {
+            System.out.println("[recordControlCommand] failed: " + e.getMessage());
+        }
+    }
 
     /**
      * AI모드인 펌프 그룹 리스트 정보를 전달 받아 현재 펌프 가동 상태 정보를 반환
@@ -1422,10 +1494,23 @@ public class PumpService {
         if ("dev".equals(wppNorm) || "seoul".equals(wppNorm)) {
             System.out.println("[PumpService.pumpCommand] DEV/SEOUL bypass → devInsertHmiTagFromLatestPumpYn for groups=" + pumpGrpStr);
             for (String grp : pumpGrpStr) {
+                int pumpGrpInt;
                 try {
-                    devInsertHmiTagFromLatestPumpYn(Integer.parseInt(grp));
+                    pumpGrpInt = Integer.parseInt(grp);
                 } catch (NumberFormatException e) {
                     System.out.println("[DEV] pumpCommand: invalid PUMP_GRP=" + grp);
+                    continue;
+                }
+                // 통합 30분 lock 가드 — 마지막 제어 후 N분 미경과면 명령 발사 skip
+                HashMap<String, Object> lockStatus = checkControlLockStatus(pumpGrpInt);
+                if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+                    System.out.println("[PumpService.pumpCommand] LOCKED pumpGrp=" + pumpGrpInt
+                            + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime"));
+                    continue;
+                }
+                int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpInt);
+                if (inserted > 0) {
+                    recordControlCommand(pumpGrpInt, "ai_command");
                 }
             }
             return;

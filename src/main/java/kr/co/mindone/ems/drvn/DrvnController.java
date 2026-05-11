@@ -79,6 +79,28 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 현재 시각의 부하 시간대 조회
+	 * @return {zone, label, month, hour, dayOfWeek, isHoliday}
+	 */
+	@GetMapping("/getCurrentLoadZone")
+	public ResponseObject<HashMap<String, Object>> getCurrentLoadZone(){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.getCurrentLoadZone());
+	}
+
+	/**
+	 * [GET] 시간 범위에 대한 시간대별 부하 시간대 시리즈 조회 (정시 단위).
+	 * @param startTs "yyyy-MM-dd HH:mm"
+	 * @param endTs   "yyyy-MM-dd HH:mm"
+	 * @return [{ts, zone}]
+	 */
+	@GetMapping("/getLoadZoneSeries")
+	public ResponseObject<List<HashMap<String, Object>>> getLoadZoneSeries(
+			@RequestParam("startTs") String startTs,
+			@RequestParam("endTs") String endTs){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.getLoadZoneSeries(startTs, endTs));
+	}
+
+	/**
 	 * [POST] 운전형황 시스템 성능공선 데이터 호출 api
 	 * @param map
 	 * cycle : 주기 [5 ~ 60]

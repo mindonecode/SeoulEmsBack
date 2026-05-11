@@ -4593,6 +4593,10 @@ public class DrvnService {
 		return drvnMapper.checkManualOperLog(checkLogParam);
 	}
 
+	public void insertManualOperLogNew(HashMap<String, Object> logInsParma) {
+		drvnMapper.insertManualOperLogNew(logInsParma);
+	}
+
 	public String getPumpCombLogTime() {
 		return drvnMapper.getPumpCombLogTime();
 	}
@@ -5079,19 +5083,20 @@ public class DrvnService {
 			now = LocalDateTime.now();
 		}
 		now = now.withSecond(0).withNano(0);
-		LocalDateTime t0 = now.withMinute(0);
+		// 예측이 10분마다 생성되므로 t0 를 직전 10분 경계로 floor.
+		// 예: 18:50~18:59 → t0 = 18:50, 18:40~18:49 → t0 = 18:40.
+		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
 
 		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:00");
 		DateTimeFormatter shortFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-		// 1. 실측 (t-6h, t-3h, t-2h, t-1h, t 정각 5개)
-		List<LocalDateTime> rawTimes = Arrays.asList(
-			t0.minusHours(6), t0.minusHours(3), t0.minusHours(2), t0.minusHours(1), t0
-		);
-		List<String> rawTimeStrs = rawTimes.stream().map(fmt::format).collect(Collectors.toList());
+		// 1. 실측 (t-6h ~ now, 1분 단위 raw 그대로). 끝점은 분 단위 now 까지 포함.
+		String rawStartStr = fmt.format(t0.minusHours(6));
+		String rawEndStr = fmt.format(now);
 		HashMap<String, Object> rawParam = new HashMap<>();
-		rawParam.put("tsList", rawTimeStrs);
-		List<HashMap<String,Object>> rawData = drvnMapper.selectWaterLevelByRange(rawParam);
+		rawParam.put("startDate", rawStartStr);
+		rawParam.put("endDate", rawEndStr);
+		List<HashMap<String,Object>> rawData = drvnMapper.selectWaterLevelByMinuteRange(rawParam);
 
 		Map<String, List<Map<String,Object>>> result = new HashMap<>();
 		for(Map<String,Object> row: rawData){
@@ -5102,12 +5107,16 @@ public class DrvnService {
 			result.computeIfAbsent(tag, k-> new ArrayList<>()).add(point);
 		}
 
-		// 2. 예측 (t+1h/+2h/+3h/+6h) — 매핑이 있고 비어있지 않은 경우만
+		// 2. 예측 (t+10min/+1h/+2h/+3h/+6h) — 매핑이 있고 비어있지 않은 경우만
 		if (waterLevelPrdctTagMap == null || waterLevelPrdctTagMap.isEmpty()) {
 			return result;
 		}
 		List<LocalDateTime> prdctTimes = Arrays.asList(
-			t0.plusHours(1), t0.plusHours(2), t0.plusHours(3), t0.plusHours(6)
+			t0.plusMinutes(10),
+			t0.plusHours(1),
+			t0.plusHours(2),
+			t0.plusHours(3),
+			t0.plusHours(6)
 		);
 		List<String> prdctTimeStrs = prdctTimes.stream().map(fmt::format).collect(Collectors.toList());
 
@@ -5125,6 +5134,32 @@ public class DrvnService {
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", now.format(fmt));
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
+
+		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.
+		// 예: 19:00 호출 시 19:00 batch 가 아직 없으면 18:50 batch 의 [19:00,19:50,20:50,21:50,0:50] 사용.
+		if (prdctRows == null || prdctRows.isEmpty()) {
+			LocalDateTime t0Prev = t0.minusMinutes(10);
+			List<LocalDateTime> prdctTimesFb = new ArrayList<>();
+			for (LocalDateTime cand : Arrays.asList(
+					t0Prev.plusMinutes(10),
+					t0Prev.plusHours(1),
+					t0Prev.plusHours(2),
+					t0Prev.plusHours(3),
+					t0Prev.plusHours(6))) {
+				if (cand.isAfter(now)) prdctTimesFb.add(cand);
+			}
+			if (!prdctTimesFb.isEmpty()) {
+				List<String> prdctTimeStrsFb = prdctTimesFb.stream().map(fmt::format).collect(Collectors.toList());
+				prdctParam.put("prdctTimeList", prdctTimeStrsFb);
+				List<HashMap<String, Object>> fbRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
+				if (fbRows != null && !fbRows.isEmpty()) {
+					log.info("selectWaterLevel: t0={} batch 미등록 → t0Prev={} fallback ({}건)",
+							t0.format(shortFmt), t0Prev.format(shortFmt), fbRows.size());
+					prdctRows = fbRows;
+					prdctTimes = prdctTimesFb;
+				}
+			}
+		}
 
 		// {ts(short) -> {dstrb_id -> value}}
 		Map<String, Map<String, Double>> prdctTsTag = new TreeMap<>();
@@ -5257,19 +5292,23 @@ public class DrvnService {
 	}
 
 	/**
-	 * 전력 원단위 + 유량 차트 데이터 (시간 단위, 현재 −6h/−3h/−2h/−1h ~ 현재 ~ +1h/+2h/+3h/+6h).
-	 * - 시점은 정시(분=0) 기준. 인접 시점 간 차분으로 구간 사용량 산출.
+	 * 전력 원단위 + 유량 차트 데이터.
+	 * - 과거: t-6h ~ t 의 1분 단위 raw 시점 (총 361 row). 보조 prev 로 t-6h-1min 1점을 추가 조회.
+	 * - 예측: t+1h, t+2h, t+3h, t+6h (4 row, 정시 기준).
+	 * - 인접 시점 간 차분으로 구간 사용량 산출. Δh 는 (cur−prev) 분/60.
 	 * - 전력: pumpPwrTagMap[pumpGrp] 의 PUMP_IDX → IWH 태그 매핑에서, cur 시점 가동 펌프의 IWH 차분만 합산
-	 *   - 실측 가동: TB_RAWDATA + PMB_TAG (시점별)
+	 *   - 실측 가동: TB_RAWDATA + PMB_TAG (시점별, 누락 분은 직전 분 LOCF)
 	 *   - 예측 가동: TB_CTR_PUMPYN_RST 의 가장 최근 RGSTR_TIME 행 (미래 시점 전체에 동일 적용)
 	 * - 유량: pumpDstrbIdMap[pumpGrp].flow (UFR 순시값, m³/h)
-	 * - 원단위 = 구간 전력(kWh) / (UFR(m³/h) × Δh) = kWh/m³  (Δh: cur-prev 시간)
+	 * - 원단위 = 구간 전력(kWh) / (UFR(m³/h) × Δh) = kWh/m³  (flow ≥ MIN_FLOW_M3H 인 경우만 계산)
 	 * @param pumpGrp 펌프 계통
-	 * @return [{ts, pwrInterval, flow, pwrUnit, deltaHour, isPredict, runningPumps}] (9개 시점)
+	 * @return [{ts, pwrInterval, flow, pwrUnit, deltaHour, isPredict, runningPumps}]
 	 */
 	public List<HashMap<String, Object>> selectPwrUnitChartData(int pumpGrp) {
 		return selectPwrUnitChartData(pumpGrp, null);
 	}
+
+	private static final double MIN_FLOW_M3H = 50.0;
 
 	public List<HashMap<String, Object>> selectPwrUnitChartData(int pumpGrp, String nowOverride) {
 		List<HashMap<String, Object>> result = new ArrayList<>();
@@ -5298,19 +5337,20 @@ public class DrvnService {
 			now = LocalDateTime.now();
 		}
 		now = now.withSecond(0).withNano(0);
-		// 정시(분=0) 기준. 14:30 → 14:00
-		LocalDateTime t0 = now.withMinute(0);
+		// 예측이 10분마다 생성되므로 t0 를 직전 10분 경계로 floor.
+		// 예: 14:30~14:39 → t0 = 14:30, 14:55 → t0 = 14:50.
+		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
 
-		// 실측 시점: t-6h, t-3h, t-2h, t-1h, t (5점). t-6h 는 차분 prev 없음(=결과 row 의 pwrInterval/pwrUnit null).
-		List<LocalDateTime> rawTimes = Arrays.asList(
-			t0.minusHours(6),
-			t0.minusHours(3),
-			t0.minusHours(2),
-			t0.minusHours(1),
-			t0
-		);
-		// 예측 시점: t+1h, t+2h, t+3h, t+6h (4점)
+		// 실측 시점: [t-6h-1min: 보조 prev, 결과 미포함] + t-6h ~ t (1분 간격, 총 361 row).
+		// 첫 시점은 prev 보조용. 마지막 시점 t 는 결과에 포함됨.
+		LocalDateTime auxStart = t0.minusHours(6).minusMinutes(1);
+		List<LocalDateTime> rawTimes = new ArrayList<>();
+		for (LocalDateTime t = auxStart; !t.isAfter(t0); t = t.plusMinutes(1)) {
+			rawTimes.add(t);
+		}
+		// 예측 시점: t+10min, t+1h, t+2h, t+3h, t+6h (5점, t0 분 단위 기준)
 		List<LocalDateTime> prdctTimes = Arrays.asList(
+			t0.plusMinutes(10),
 			t0.plusHours(1),
 			t0.plusHours(2),
 			t0.plusHours(3),
@@ -5325,12 +5365,12 @@ public class DrvnService {
 		List<String> allTags = new ArrayList<>(pwrTags);
 		allTags.add(flowTag);
 
-		// 1. 실측 IWH/UFR
+		// 1. 실측 IWH/UFR (1분 단위)
 		HashMap<String, Object> rawParam = new HashMap<>();
 		rawParam.put("tagList", allTags);
 		rawParam.put("startDate", startDateStr);
 		rawParam.put("endDate", endDateStr);
-		List<HashMap<String, Object>> rawRows = drvnMapper.selectMultiTagRawRange(rawParam);
+		List<HashMap<String, Object>> rawRows = drvnMapper.selectMultiTagRawRangeMinutely(rawParam);
 
 		// 2. 예측 IWH/UFR
 		HashMap<String, Object> prdctParam = new HashMap<>();
@@ -5339,16 +5379,42 @@ public class DrvnService {
 		prdctParam.put("nowDateTime", nowDateTimeStr);
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
 
+		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.
+		// 예: 19:00 호출 시 19:00 batch 가 아직 없으면 18:50 batch 의 [19:00,19:50,20:50,21:50,0:50] 사용.
+		if (prdctRows == null || prdctRows.isEmpty()) {
+			LocalDateTime t0Prev = t0.minusMinutes(10);
+			List<LocalDateTime> prdctTimesFb = new ArrayList<>();
+			for (LocalDateTime cand : Arrays.asList(
+					t0Prev.plusMinutes(10),
+					t0Prev.plusHours(1),
+					t0Prev.plusHours(2),
+					t0Prev.plusHours(3),
+					t0Prev.plusHours(6))) {
+				if (cand.isAfter(now)) prdctTimesFb.add(cand);
+			}
+			if (!prdctTimesFb.isEmpty()) {
+				List<String> prdctTimeStrsFb = prdctTimesFb.stream().map(fmt::format).collect(Collectors.toList());
+				prdctParam.put("prdctTimeList", prdctTimeStrsFb);
+				List<HashMap<String, Object>> fbRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
+				if (fbRows != null && !fbRows.isEmpty()) {
+					log.info("selectPwrUnitChartData: t0={} batch 미등록 → t0Prev={} fallback ({}건)",
+							t0.format(shortFmt), t0Prev.format(shortFmt), fbRows.size());
+					prdctRows = fbRows;
+					prdctTimes = prdctTimesFb;
+				}
+			}
+		}
+
 		Map<String, Map<String, Double>> tsTagValue = new TreeMap<>();
 		mergeTagValueRows(tsTagValue, rawRows);
 		mergeTagValueRows(tsTagValue, prdctRows);
 
-		// 3. 실측 펌프 가동 여부 (시점별 PUMP_IDX 셋)
+		// 3. 실측 펌프 가동 여부 (1분 단위, 시점별 PUMP_IDX 셋)
 		HashMap<String, Object> ynRawParam = new HashMap<>();
 		ynRawParam.put("pumpGrp", pumpGrp);
 		ynRawParam.put("startDate", startDateStr);
 		ynRawParam.put("endDate", endDateStr);
-		List<HashMap<String, Object>> ynRawRows = drvnMapper.selectMultiTimePumpYnRaw(ynRawParam);
+		List<HashMap<String, Object>> ynRawRows = drvnMapper.selectMultiTimePumpYnRawMinutely(ynRawParam);
 		Map<String, Set<String>> rawRunningByTs = buildRunningSetByTs(ynRawRows);
 
 		// 4. 예측 펌프 가동 여부 (가장 최근 RGSTR_TIME 1세트 → 모든 미래 시점에 적용)
@@ -5369,15 +5435,23 @@ public class DrvnService {
 		allTimes.addAll(rawTimes);
 		allTimes.addAll(prdctTimes);
 
-		// 시점별 가동 펌프 IWH 합산
+		// 시점별 가동 펌프 IWH 합산. 누락 분(rawRunningByTs 에 키 없음)은 직전 분의 running set 을 carry-forward.
 		Map<String, Double> iwhSumByTs = new LinkedHashMap<>();
 		Map<String, Set<String>> runningByTs = new LinkedHashMap<>();
+		Set<String> lastRawRunning = Collections.emptySet();
 		for (LocalDateTime t : allTimes) {
 			String tsKey = t.format(shortFmt);
 			boolean isFuture = t.isAfter(t0);
-			Set<String> running = isFuture
-				? prdctRunning
-				: rawRunningByTs.getOrDefault(tsKey, Collections.emptySet());
+			Set<String> running;
+			if (isFuture) {
+				running = prdctRunning;
+			} else if (rawRunningByTs.containsKey(tsKey)) {
+				running = rawRunningByTs.get(tsKey);
+				lastRawRunning = running;
+			} else {
+				// LOCF: 누락 분은 직전 분의 가동 상태 유지
+				running = lastRawRunning;
+			}
 			runningByTs.put(tsKey, running);
 
 			Map<String, Double> tagMap = tsTagValue.get(tsKey);
@@ -5397,41 +5471,41 @@ public class DrvnService {
 			iwhSumByTs.put(tsKey, sum);
 		}
 
-		// 시점별 row 빌드. 첫 시점(t-6h)은 prev 없음 → pwrInterval/pwrUnit null, flow 만 표시.
+		// 시점별 row 빌드. allTimes[0] (t-6h-1min) 은 보조 prev 전용이라 결과에 포함하지 않는다.
+		// 따라서 t-6h(첫 표시 시점) 부터 prev 가 항상 존재하여 pwrInterval/pwrUnit 산출 가능.
 		for (int i = 0; i < allTimes.size(); i++) {
+			if (i == 0) continue; // 보조 prev 시점은 skip
 			LocalDateTime cur = allTimes.get(i);
-			LocalDateTime prev = i > 0 ? allTimes.get(i - 1) : null;
+			LocalDateTime prev = allTimes.get(i - 1);
 			String curKey = cur.format(shortFmt);
-			String prevKey = prev == null ? null : prev.format(shortFmt);
+			String prevKey = prev.format(shortFmt);
 
 			Set<String> running = runningByTs.getOrDefault(curKey, Collections.emptySet());
 			Map<String, Double> curTagMap = tsTagValue.get(curKey);
-			Map<String, Double> prevTagMap = prevKey == null ? null : tsTagValue.get(prevKey);
+			Map<String, Double> prevTagMap = tsTagValue.get(prevKey);
 
 			Double pwrInterval = null;
-			Double deltaH = null;
-			if (prev != null) {
-				deltaH = ChronoUnit.MINUTES.between(prev, cur) / 60.0;
-				if (curTagMap != null && prevTagMap != null) {
-					double s = 0;
-					int hit = 0;
-					for (Map.Entry<String, String> e : idxToTag.entrySet()) {
-						if (!running.contains(e.getKey())) continue;
-						Double cv = curTagMap.get(e.getValue());
-						Double pv = prevTagMap.get(e.getValue());
-						if (cv == null || pv == null) continue;
-						double diff = cv - pv;
-						if (diff < 0) diff = 0;
-						s += diff;
-						hit++;
-					}
-					if (hit > 0) pwrInterval = s;
+			Double deltaH = ChronoUnit.MINUTES.between(prev, cur) / 60.0;
+			if (curTagMap != null && prevTagMap != null) {
+				double s = 0;
+				int hit = 0;
+				for (Map.Entry<String, String> e : idxToTag.entrySet()) {
+					if (!running.contains(e.getKey())) continue;
+					Double cv = curTagMap.get(e.getValue());
+					Double pv = prevTagMap.get(e.getValue());
+					if (cv == null || pv == null) continue;
+					double diff = cv - pv;
+					if (diff < 0) diff = 0;
+					s += diff;
+					hit++;
 				}
+				if (hit > 0) pwrInterval = s;
 			}
 
 			Double flow = curTagMap == null ? null : curTagMap.get(flowTag);
 			Double pwrUnit = null;
-			if (pwrInterval != null && flow != null && flow > 0 && deltaH != null && deltaH > 0) {
+			// 분 단위에서 flow 가 매우 작으면 pwrUnit 가 폭주 → 임계값(MIN_FLOW_M3H) 이상일 때만 산출
+			if (pwrInterval != null && flow != null && flow >= MIN_FLOW_M3H && deltaH != null && deltaH > 0) {
 				pwrUnit = pwrInterval / (flow * deltaH);
 			}
 
@@ -5486,6 +5560,118 @@ public class DrvnService {
 			}
 			sink.computeIfAbsent(tsObj.toString(), k -> new HashMap<>()).put(tagObj.toString(), v);
 		}
+	}
+
+	/**
+	 * 시간 범위에 대한 시간대별 부하 시간대 시리즈 반환 (정시 단위).
+	 * - 차트 배경 markArea 표시용
+	 * - 인접 동일 zone 병합은 클라이언트 측 책임
+	 * @param startTsStr "yyyy-MM-dd HH:mm" (분=0 권장)
+	 * @param endTsStr   "yyyy-MM-dd HH:mm" (분=0 권장)
+	 * @return [{ts, zone:'L'|'M'|'H'|'?'}] — startTs 부터 endTs 까지 매 정시
+	 */
+	public List<HashMap<String, Object>> getLoadZoneSeries(String startTsStr, String endTsStr) {
+		List<HashMap<String, Object>> result = new ArrayList<>();
+		DateTimeFormatter inFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		LocalDateTime start;
+		LocalDateTime end;
+		try {
+			start = LocalDateTime.parse(startTsStr.length() >= 16 ? startTsStr.substring(0, 16) : startTsStr, inFmt).withMinute(0).withSecond(0).withNano(0);
+			end = LocalDateTime.parse(endTsStr.length() >= 16 ? endTsStr.substring(0, 16) : endTsStr, inFmt).withMinute(0).withSecond(0).withNano(0);
+		} catch (Exception e) {
+			log.warn("getLoadZoneSeries: 시간 파싱 실패 startTs={} endTs={}", startTsStr, endTsStr);
+			return result;
+		}
+		if (end.isBefore(start)) {
+			LocalDateTime swap = start; start = end; end = swap;
+		}
+		// 안전 장치: 최대 14일 (336시간) 으로 범위 제한
+		if (java.time.Duration.between(start, end).toHours() > 336) {
+			end = start.plusHours(336);
+		}
+
+		HolidayChecker checker = new HolidayChecker();
+		LocalDateTime cur = start;
+		while (!cur.isAfter(end)) {
+			int month = cur.getMonthValue();
+			int hour = cur.getHour();
+			int week = cur.getDayOfWeek().getValue();
+
+			String zone = null;
+			if (DrvnConfig.reduceMap != null
+					&& DrvnConfig.reduceMap.get(month) != null
+					&& DrvnConfig.reduceMap.get(month).get(hour) != null) {
+				zone = DrvnConfig.reduceMap.get(month).get(hour);
+			}
+
+			boolean isHoliday;
+			try {
+				isHoliday = checker.isPassDay(cur.format(inFmt));
+			} catch (Exception e) {
+				isHoliday = false;
+			}
+			if (week == 7 || isHoliday) zone = "L";
+			else if (week == 6 && "H".equals(zone)) zone = "M";
+
+			HashMap<String, Object> row = new HashMap<>();
+			row.put("ts", cur.format(inFmt));
+			row.put("zone", zone == null ? "?" : zone);
+			result.add(row);
+
+			cur = cur.plusHours(1);
+		}
+		return result;
+	}
+
+	/**
+	 * 현재 시각의 부하 시간대 (L/M/H) 와 한글 라벨 반환.
+	 * - DrvnConfig.reduceMap (TB_RT_RATE_INF, RATE_IDX=1) 의 [월][시] 매핑 사용
+	 * - 토요일 H → M, 일요일/공휴일 → L 보정 (HolidayChecker)
+	 * @return {zone:'L'|'M'|'H'|'?', label:'경부하'|'중간부하'|'최대부하'|'미정', month, hour, dayOfWeek, isHoliday}
+	 */
+	public HashMap<String, Object> getCurrentLoadZone() {
+		HashMap<String, Object> result = new HashMap<>();
+		LocalDateTime now = LocalDateTime.now();
+		int month = now.getMonthValue();
+		int hour = now.getHour();
+		int week = now.getDayOfWeek().getValue();   // 1=월 ~ 7=일
+
+		String zone = null;
+		if (DrvnConfig.reduceMap != null
+				&& DrvnConfig.reduceMap.get(month) != null
+				&& DrvnConfig.reduceMap.get(month).get(hour) != null) {
+			zone = DrvnConfig.reduceMap.get(month).get(hour);
+		}
+
+		String tsStr = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+		HolidayChecker checker = new HolidayChecker();
+		boolean isHoliday;
+		try {
+			isHoliday = checker.isPassDay(tsStr);
+		} catch (Exception e) {
+			isHoliday = false;
+		}
+
+		// 보정: 일요일/공휴일 → L, 토요일 H → M
+		if (week == 7 || isHoliday) {
+			zone = "L";
+		} else if (week == 6 && "H".equals(zone)) {
+			zone = "M";
+		}
+
+		String label;
+		if ("L".equals(zone))      label = "경부하";
+		else if ("M".equals(zone)) label = "중간부하";
+		else if ("H".equals(zone)) label = "최대부하";
+		else                       label = "미정";
+
+		result.put("zone", zone == null ? "?" : zone);
+		result.put("label", label);
+		result.put("month", month);
+		result.put("hour", hour);
+		result.put("dayOfWeek", week);
+		result.put("isHoliday", isHoliday);
+		return result;
 	}
 
 }

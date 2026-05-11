@@ -17,6 +17,7 @@ import kr.co.mindone.ems.common.CommonService;
 import kr.co.mindone.ems.config.base.BaseController;
 import kr.co.mindone.ems.config.response.ResponseMessage;
 import kr.co.mindone.ems.config.response.ResponseObject;
+import kr.co.mindone.ems.drvn.DrvnService;
 import kr.co.mindone.ems.energy.EnerSpendService;
 import kr.co.mindone.ems.setting.SettingService;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +26,8 @@ import org.apache.ibatis.annotations.DeleteProvider;
 import org.apache.ibatis.annotations.Param;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.UnsupportedEncodingException;
@@ -55,6 +58,12 @@ public class AiController extends BaseController {
 
 	@Autowired
 	private CommonService commonService;
+
+	@Autowired
+	private DrvnService drvnService;
+
+	@Autowired
+	private kr.co.mindone.ems.pump.PumpService pumpService;
 
 	private final AtomicBoolean isRunning = new AtomicBoolean(false);
 
@@ -760,21 +769,50 @@ public class AiController extends BaseController {
 	 * @return 명령 전송 성공 여부
 	 */
 	@GetMapping("/pumpCommand")
-	public ResponseObject < String > pumpCommand(@RequestParam HashMap < String, Object > map) {
-		//System.out.println("pumpCommand map:"+map.toString());
+	public ResponseEntity<ResponseObject<String>> pumpCommand(@RequestParam HashMap < String, Object > map) {
 		if (wpp_code.equals("ba")) {
 			if (map.containsKey("pump_grp")) {
 				String str = map.get("pump_grp").toString();
-				//System.out.println("str:"+str);
 				if (str.contains("4")) {
 					str += ",5";
 					map.put("pump_grp", str);
 				}
 			}
 		}
-		//System.out.println("map:"+map.toString());
+
+		// 통합 30분 throttle: AI 자동/AI 추천/수동 모든 제어가 같은 lock 테이블 사용.
+		// 차단 시 남은 시간(분) 도 메시지에 포함. PumpService.checkControlLockStatus 가 정책 일원화.
+		String pumpGrpStr = map.containsKey("pump_grp") ? map.get("pump_grp").toString() : "";
+		String[] grpArr = pumpGrpStr.isEmpty() ? new String[0] : pumpGrpStr.split(",");
+		java.util.List<Integer> grpInts = new java.util.ArrayList<>();
+		for (String g : grpArr) {
+			try {
+				grpInts.add(Integer.parseInt(g.trim()));
+			} catch (NumberFormatException ignore) { }
+		}
+		for (int grpInt : grpInts) {
+			HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(grpInt);
+			if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+				int remaining = lockStatus.get("remainingMinutes") instanceof Integer
+						? (Integer) lockStatus.get("remainingMinutes") : 0;
+			Object lastCtrl = lockStatus.get("lastCtrlTime");
+      		String msg = "마지막 제어(" + (lastCtrl != null ? lastCtrl.toString() : "-")
+       		+ ") 후 " + lockStatus.get("lockMinutes") + "분이 지나지 않았습니다.\n"
+						+ remaining + "분 후에 다시 시도하세요.";
+				ResponseObject<String> blocked = makeSuccessObj(400, msg, msg);
+				return new ResponseEntity<>(blocked, HttpStatus.BAD_REQUEST);
+			}
+		}
+
 		aiService.pumpCommand(map);
-		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, "펌프 제어 명령 전송 성공");
+
+		// 다음 throttle 카운트 기준이 되도록 TB_MNL_CHN_LOG 적재 (PumpService 통합 헬퍼).
+		for (int grpInt : grpInts) {
+			pumpService.recordControlCommand(grpInt, "ai_recommend");
+		}
+
+		ResponseObject<String> ok = makeSuccessObj(ResponseMessage.SELECT_SUCCESS, "펌프 제어 명령 전송 성공");
+		return new ResponseEntity<>(ok, HttpStatus.OK);
 	}
 
 	@GetMapping("/pumpCommandAI")
