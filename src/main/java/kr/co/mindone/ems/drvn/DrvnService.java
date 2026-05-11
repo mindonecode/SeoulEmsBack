@@ -5055,10 +5055,44 @@ public class DrvnService {
 	List<HashMap<String, Object>> selectPumpCombList(HashMap<String, Object> map) { return drvnMapper.selectPumpCombList(map); }
 
 	public void savePumpComb(List<HashMap<String, Object>> listMap) {
-		for(HashMap<String, Object> map:listMap){
+		StringBuilder pumpIDX = new StringBuilder();
+		int pumpGrp = -1;
+		double pumpCount = 0.0;
+		int pumpPriority = 0;
+
+		for(HashMap<String, Object> map:listMap) {
 			drvnMapper.savePumpComb(map);
+			
+			if (pumpGrp == -1 && map.get("PUMP_GRP") != null) {
+				pumpGrp = Integer.parseInt(String.valueOf(map.get("PUMP_GRP")));
+				pumpCount = Double.parseDouble(String.valueOf(map.get("PUMP_COUNT")));
+				pumpPriority = Integer.parseInt(String.valueOf(map.get("PUMP_PRIORITY")));
+			}
+
+			if(map.get("PUMP_YN") != null && "1".equals(String.valueOf(map.get("PUMP_YN")))) { //사용 중인 펌프면
+				if(map.get("PUMP_IDX") != null) {
+					int idx =  Integer.parseInt(String.valueOf(map.get("PUMP_IDX")));
+					pumpIDX.append(idx).append(",");
+				}
+			}
+		}
+		
+		if(pumpIDX.length() > 0 && pumpGrp > -1) {
+			pumpIDX.deleteCharAt(pumpIDX.length()-1);
+			
+			// 기존 값에 대한 정보(COUNT_IDX)를 찾아서 그 자리에 덮어쓰는 로직
+			HashMap<String, Object> calParam = new HashMap<>();
+			calParam.put("pump_grp", pumpGrp);
+			calParam.put("pump_count", pumpCount);
+			calParam.put("pump_priority", pumpPriority);
+			
+			List<HashMap<String, Object>> getGrpCombCal = drvnMapper.getGroupPumpCal(calParam);
+			int countIdx = (int) getGrpCombCal.get(0).get("COUNT_IDX");
+			
+			drvnMapper.updatePumpComb(pumpIDX.toString(), countIdx);
 		}
 	}
+
 	public Map<String, List<Map<String,Object>>> selectWaterLevel(){
 		return selectWaterLevel(null);
 	}
