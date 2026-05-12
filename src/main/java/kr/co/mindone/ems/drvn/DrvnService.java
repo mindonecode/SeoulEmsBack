@@ -5620,6 +5620,7 @@ public class DrvnService {
 
 		// 시점별 row 빌드. allTimes[0] (t-6h-1min) 은 보조 prev 전용이라 결과에 포함하지 않는다.
 		// 따라서 t-6h(첫 표시 시점) 부터 prev 가 항상 존재하여 pwrInterval/pwrUnit 산출 가능.
+		Double lastValidPwrUnit = null;   // 적산값(prev 누락 등)으로 pwrUnit 가 비정상적으로 치솟을 때 fallback
 		for (int i = 0; i < allTimes.size(); i++) {
 			if (i == 0) continue; // 보조 prev 시점은 skip
 			LocalDateTime cur = allTimes.get(i);
@@ -5654,6 +5655,13 @@ public class DrvnService {
 			// 분 단위에서 flow 가 매우 작으면 pwrUnit 가 폭주 → 임계값(MIN_FLOW_M3H) 이상일 때만 산출
 			if (pwrInterval != null && flow != null && flow >= MIN_FLOW_M3H && deltaH != null && deltaH > 0) {
 				pwrUnit = pwrInterval / (flow * deltaH);
+			}
+			// 방어 로직: 적산값 누락 등으로 pwrUnit 가 비정상적으로 치솟을 때(>100) 직전 정상값 사용.
+			// 직전 정상값도 없으면 null 유지.
+			if (pwrUnit != null && pwrUnit > 100.0) {
+				pwrUnit = lastValidPwrUnit;
+			} else if (pwrUnit != null) {
+				lastValidPwrUnit = pwrUnit;
 			}
 
 			HashMap<String, Object> row = new HashMap<>();
