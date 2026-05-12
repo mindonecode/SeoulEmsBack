@@ -521,6 +521,14 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectMultiTagPrdctRange(HashMap<String, Object> param);
 
 	/**
+	 * 다중 태그 × 다중 PRDCT_TIME 의 "10분 horizon" 예측값 조회 (TB_CTR_TNK_RST).
+	 * PRDCT_TIME = RGSTR_TIME + 10분 조건을 만족하는 행만 반환 → 실측과의 정확도 비교용.
+	 * @param param tagList(List<String>), prdctTimeList(List<String>)
+	 * @return [{tag, ts(yyyy-MM-dd HH:mm), value(Object)}]
+	 */
+	List<HashMap<String, Object>> selectMultiTagPrdct10minHorizon(HashMap<String, Object> param);
+
+	/**
 	 * 시점별 펌프 가동 여부 실측 조회 (PMB_TAG via TB_RAWDATA).
 	 * @param param pumpGrp, startDate, endDate
 	 * @return [{ts, pumpIdx, pumpYn}]

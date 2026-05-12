@@ -5141,6 +5141,42 @@ public class DrvnService {
 			result.computeIfAbsent(tag, k-> new ArrayList<>()).add(point);
 		}
 
+		// 1-1. 1주일 전 / 2주일 전 같은 요일·시각 실측 (비교 표시용).
+		//      TB_RAWDATA 에서 weeksAgo 만큼 shift 한 동일 범위 조회 → 결과 TS 를 다시 현재 주차로 시프트하여
+		//      ${tagname}_W1 / ${tagname}_W2 sibling key 로 push. 프론트는 동일한 시점 매칭 로직 재사용.
+		for (int weeksAgo : new int[]{1, 2}) {
+			LocalDateTime startWk = t0.minusHours(6).minusWeeks(weeksAgo);
+			LocalDateTime endWk = now.minusWeeks(weeksAgo);
+			HashMap<String, Object> wkParam = new HashMap<>();
+			wkParam.put("startDate", fmt.format(startWk));
+			wkParam.put("endDate", fmt.format(endWk));
+			List<HashMap<String, Object>> wkData = drvnMapper.selectWaterLevelByMinuteRange(wkParam);
+			String suffix = "_W" + weeksAgo;
+			for (Map<String, Object> row : wkData) {
+				String tag = (String) row.get("TAGNAME");
+				Object tsObj = row.get("TS");
+				if (tag == null || tsObj == null) continue;
+				LocalDateTime shifted = null;
+				if (tsObj instanceof Timestamp) {
+					shifted = ((Timestamp) tsObj).toLocalDateTime().plusWeeks(weeksAgo);
+				} else if (tsObj instanceof java.util.Date) {
+					shifted = LocalDateTime.ofInstant(((java.util.Date) tsObj).toInstant(),
+							java.time.ZoneId.systemDefault()).plusWeeks(weeksAgo);
+				} else {
+					try {
+						String raw = tsObj.toString();
+						String trimmed = raw.length() >= 16 ? raw.substring(0, 16) : raw;
+						shifted = LocalDateTime.parse(trimmed, shortFmt).plusWeeks(weeksAgo);
+					} catch (Exception ignored) {}
+				}
+				if (shifted == null) continue;
+				Map<String, Object> point = new HashMap<>();
+				point.put("ts", Timestamp.valueOf(shifted));
+				point.put("value", row.get("VALUE"));
+				result.computeIfAbsent(tag + suffix, k -> new ArrayList<>()).add(point);
+			}
+		}
+
 		// 2. 예측 (t+10min/+1h/+2h/+3h/+6h) — 매핑이 있고 비어있지 않은 경우만
 		if (waterLevelPrdctTagMap == null || waterLevelPrdctTagMap.isEmpty()) {
 			return result;
@@ -5223,6 +5259,51 @@ public class DrvnService {
 				result.computeIfAbsent(tagname, k -> new ArrayList<>()).add(point);
 			}
 		}
+
+		// 3. 과거 10분 horizon 예측 (실측 구간 오버레이용)
+		//    t-6h ~ t0 의 10분 경계마다 PRDCT_TIME = RGSTR_TIME + 10분 예측값 조회.
+		//    실측과의 정확도 비교 차트용으로 sibling 키 "${tagname}_PRDCT_HIST" 에 별도 push.
+		List<LocalDateTime> pastPrdctTimes = new ArrayList<>();
+		for (int i = 36; i >= 1; i--) {
+			pastPrdctTimes.add(t0.minusMinutes(i * 10L));
+		}
+		pastPrdctTimes.add(t0);
+		List<String> pastPrdctTimeStrs = pastPrdctTimes.stream().map(fmt::format).collect(Collectors.toList());
+
+		HashMap<String, Object> histParam = new HashMap<>();
+		histParam.put("tagList", new ArrayList<>(allPrdctIds));
+		histParam.put("prdctTimeList", pastPrdctTimeStrs);
+		List<HashMap<String, Object>> histRows = drvnMapper.selectMultiTagPrdct10minHorizon(histParam);
+
+		if (histRows != null && !histRows.isEmpty()) {
+			Map<String, Map<String, Double>> histTsTag = new TreeMap<>();
+			mergeTagValueRows(histTsTag, histRows);
+
+			for (Map.Entry<String, List<String>> e : waterLevelPrdctTagMap.entrySet()) {
+				String tagname = e.getKey();
+				List<String> ids = e.getValue();
+				if (ids == null || ids.isEmpty()) continue;
+				String histKey = tagname + "_PRDCT_HIST";
+				for (LocalDateTime t : pastPrdctTimes) {
+					String tsKey = t.format(shortFmt);
+					Map<String, Double> idMap = histTsTag.get(tsKey);
+					if (idMap == null) continue;
+					double sum = 0;
+					int hit = 0;
+					for (String id : ids) {
+						Double v = idMap.get(id);
+						if (v != null) { sum += v; hit++; }
+					}
+					if (hit == 0) continue;
+					double avg = sum / hit;
+					Map<String, Object> point = new HashMap<>();
+					point.put("ts", t.format(fmt));
+					point.put("value", avg);
+					result.computeIfAbsent(histKey, k -> new ArrayList<>()).add(point);
+				}
+			}
+		}
+
 		return result;
 	}
 
@@ -5443,6 +5524,36 @@ public class DrvnService {
 		mergeTagValueRows(tsTagValue, rawRows);
 		mergeTagValueRows(tsTagValue, prdctRows);
 
+		// 2-1. 과거 10분 horizon 예측 (실측 구간 오버레이용) - flow 태그만
+		//      t-6h ~ t0 의 10분 경계마다 PRDCT_TIME = RGSTR_TIME + 10분 예측값 조회.
+		//      각 시점의 예측값을 ts→value 로 매핑하여 row 빌드 시 flowPrdct 필드에 부착.
+		Map<String, Double> flowPrdctHistByTs = new HashMap<>();
+		{
+			List<LocalDateTime> pastPrdctTimes = new ArrayList<>();
+			for (int i = 36; i >= 1; i--) {
+				pastPrdctTimes.add(t0.minusMinutes(i * 10L));
+			}
+			pastPrdctTimes.add(t0);
+			List<String> pastPrdctTimeStrs = pastPrdctTimes.stream().map(fmt::format).collect(Collectors.toList());
+
+			HashMap<String, Object> histParam = new HashMap<>();
+			histParam.put("tagList", Collections.singletonList(flowTag));
+			histParam.put("prdctTimeList", pastPrdctTimeStrs);
+			List<HashMap<String, Object>> histRows = drvnMapper.selectMultiTagPrdct10minHorizon(histParam);
+			if (histRows != null) {
+				for (HashMap<String, Object> r : histRows) {
+					Object tagObj = r.get("tag");
+					Object tsObj = r.get("ts");
+					Object valObj = r.get("value");
+					if (tagObj == null || tsObj == null || valObj == null) continue;
+					if (!flowTag.equals(tagObj.toString())) continue;
+					try {
+						flowPrdctHistByTs.put(tsObj.toString(), Double.parseDouble(valObj.toString()));
+					} catch (NumberFormatException ignored) {}
+				}
+			}
+		}
+
 		// 3. 실측 펌프 가동 여부 (1분 단위, 시점별 PUMP_IDX 셋)
 		HashMap<String, Object> ynRawParam = new HashMap<>();
 		ynRawParam.put("pumpGrp", pumpGrp);
@@ -5552,6 +5663,7 @@ public class DrvnService {
 			row.put("pwrUnit", pwrUnit);
 			row.put("deltaHour", deltaH);
 			row.put("isPredict", cur.isAfter(now));   // now(분 단위) 이후가 예측. 실측 1분 단위 그래프 표시 보장.
+			row.put("flowPrdct", flowPrdctHistByTs.get(curKey));   // 과거 10분 경계의 horizon 예측값 (그 외 null). 미래는 flow 가 곧 예측.
 			row.put("runningPumps", new ArrayList<>(running));
 			result.add(row);
 		}
