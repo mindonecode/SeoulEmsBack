@@ -2345,8 +2345,6 @@
 		PUMP_COUNT = #{PUMP_COUNT}
 		AND
 		PUMP_PRIORITY = #{PUMP_PRIORITY}
-		AND
-		COUNT_IDX = #{COUNT_IDX};
 	</update>
 	<select id="getGrpPumpComb" parameterType="int" resultType="hashmap">
 		SELECT PUMP_COMB, P_ADD_VAL, P_MUL_VAL, P_SQRT_MUL_VAL, FC_MIN_VAL, FC_MAX_VAL
@@ -2598,6 +2596,30 @@
 			AND t.PRDCT_TIME = m.PRDCT_TIME
 			AND t.RGSTR_TIME = m.MAX_RGSTR
 		ORDER BY t.PRDCT_TIME, t.DSTRB_ID
+	</select>
+
+	<!--
+	  과거 10분 horizon 예측 조회 (TB_CTR_TNK_RST).
+	  각 PRDCT_TIME 에 대해 PRDCT_TIME = RGSTR_TIME + 10분 인 예측 행만 반환 → 실측과의 정확도 비교용.
+	  - tagList: DSTRB_ID 리스트
+	  - prdctTimeList: 과거 PRDCT_TIME 10분 경계 리스트
+	-->
+	<select id="selectMultiTagPrdct10minHorizon" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DSTRB_ID as tag,
+			DATE_FORMAT(PRDCT_TIME, '%Y-%m-%d %H:%i') as ts,
+			PRDCT_VALUE as value
+		FROM TB_CTR_TNK_RST
+		WHERE DSTRB_ID IN
+			<foreach item="tag" collection="tagList" open="(" separator="," close=")">
+				#{tag}
+			</foreach>
+			AND PRDCT_TIME IN
+			<foreach item="ptime" collection="prdctTimeList" open="(" separator="," close=")">
+				#{ptime}
+			</foreach>
+			AND PRDCT_TIME = DATE_ADD(RGSTR_TIME, INTERVAL 10 MINUTE)
+		ORDER BY PRDCT_TIME, DSTRB_ID
 	</select>
 
 </mapper>
