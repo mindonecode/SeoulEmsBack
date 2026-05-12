@@ -78,8 +78,6 @@ public class DrvnService {
 	private String pumpDstrbId;
 	@Value("${dstrb.prdct.pumpPwrTag}")
 	private String pumpPwrTag;
-	@Value("${dstrb.prdct.waterLevelPrdctTag}")
-	private String waterLevelPrdctTag;
 	@Value("${dstrb.prdct.pwrCal.calVal}")
 	private String prdctPwrCalVal;
 	@Value("${dstrb.prdct.dstrbId}")
@@ -109,8 +107,6 @@ public class DrvnService {
 	private LinkedHashMap<Integer, HashMap<String, String>> pumpDstrbIdMap;
 	// 계통별 펌프 IDX → IWH 적산 태그명. key: PUMP_IDX(문자열), value: 태그명
 	private LinkedHashMap<Integer, LinkedHashMap<String, String>> pumpPwrTagMap;
-	// 수위 실측 TAGNAME → 예측 DSTRB_ID 리스트 (다중 센서 평균)
-	private LinkedHashMap<String, List<String>> waterLevelPrdctTagMap;
 	private HashMap<String, List<String>> dstrbIdMap;
 	@Getter
 	private HashMap<Integer, HashMap<String, List<String>>> headLossFlowIdMap;
@@ -153,8 +149,6 @@ public class DrvnService {
 		pumpDstrbIdMap = gson.fromJson(pumpDstrbId, linkedStrType);
 		Type linkedPwrType = new TypeToken<LinkedHashMap<Integer, LinkedHashMap<String, String>>>(){}.getType();
 		pumpPwrTagMap = gson.fromJson(pumpPwrTag, linkedPwrType);
-		Type wlPrdctType = new TypeToken<LinkedHashMap<String, List<String>>>(){}.getType();
-		waterLevelPrdctTagMap = gson.fromJson(waterLevelPrdctTag, wlPrdctType);
 		dstrbIdMap = gson.fromJson(dstrbId, strArrType);
 		headLossFlowIdMap = gson.fromJson(headLossFlow, arrType);
 		headLossGrpMap = gson.fromJson(headLossGrp, arrType);
@@ -5098,10 +5092,11 @@ public class DrvnService {
 	}
 
 	/**
-	 * 수위 시계열 조회 (정각 9개 시점: t-6h, t-3h, t-2h, t-1h, t, t+1h, t+2h, t+3h, t+6h).
-	 * 실측: TB_RAWDATA 에서 t-6h, t-3h, t-2h, t-1h, t 5개 정각.
-	 * 예측: waterLevelPrdctTagMap 매핑이 있으면 TB_CTR_TNK_RST 에서 t+1h/+2h/+3h/+6h 4개 시점의 PRDCT_VALUE 조회 후
-	 *       매핑된 DSTRB_ID 그룹 평균을 실측 TAGNAME 키 아래 함께 push.
+	 * 수위 시계열 조회 (raw 24h + 미래 예측 5시점 + 과거 10분 horizon 예측).
+	 * 실측: TB_RAWDATA 에서 seoul.waterlevel.*.tags 의 모든 탱크 태그 1분 단위 조회.
+	 * 예측: TB_CTR_TNK_RST 에서 동일 태그명을 DSTRB_ID 로 사용해 PRDCT_VALUE 조회 후
+	 *       탱크별 result[<tag>] / result[<tag>_PRDCT_HIST] 키에 직접 push.
+	 *       배수지별 활성 수조 평균은 4단계의 _AVG 집계에서 일괄 처리.
 	 */
 	public Map<String, List<Map<String,Object>>> selectWaterLevel(String nowOverride){
 		LocalDateTime now;
@@ -5197,10 +5192,10 @@ public class DrvnService {
 			}
 		}
 
-		// 2. 예측 (t+10min/+1h/+2h/+3h/+6h) — 매핑이 있고 비어있지 않은 경우만
-		if (waterLevelPrdctTagMap == null || waterLevelPrdctTagMap.isEmpty()) {
-			return result;
-		}
+		// 2. 예측 (t+10min/+1h/+2h/+3h/+6h)
+		//    DSTRB_ID = 실측 TAGNAME 동일 가정. seoul.waterlevel.*.tags 에 정의된 모든 탱크 태그를
+		//    그대로 TB_CTR_TNK_RST 의 DSTRB_ID 로 조회. 적재된 탱크만 result["<tag>"] 미래 포인트를
+		//    얻고, 미적재 탱크는 AVG 집계에서 자연스럽게 누락(connectNulls)된다.
 		List<LocalDateTime> prdctTimes = Arrays.asList(
 			t0.plusMinutes(10),
 			t0.plusHours(1),
@@ -5210,17 +5205,8 @@ public class DrvnService {
 		);
 		List<String> prdctTimeStrs = prdctTimes.stream().map(fmt::format).collect(Collectors.toList());
 
-		// 매핑된 모든 DSTRB_ID flatten
-		Set<String> allPrdctIds = new LinkedHashSet<>();
-		for (List<String> ids : waterLevelPrdctTagMap.values()) {
-			if (ids != null) allPrdctIds.addAll(ids);
-		}
-		if (allPrdctIds.isEmpty()) {
-			return result;
-		}
-
 		HashMap<String, Object> prdctParam = new HashMap<>();
-		prdctParam.put("tagList", new ArrayList<>(allPrdctIds));
+		prdctParam.put("tagList", waterLevelTagList);
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", now.format(fmt));
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
@@ -5251,32 +5237,18 @@ public class DrvnService {
 			}
 		}
 
-		// {ts(short) -> {dstrb_id -> value}}
-		Map<String, Map<String, Double>> prdctTsTag = new TreeMap<>();
-		mergeTagValueRows(prdctTsTag, prdctRows);
-
-		// 매핑된 그룹 평균 → 실측 TAGNAME 키로 push
-		for (Map.Entry<String, List<String>> e : waterLevelPrdctTagMap.entrySet()) {
-			String tagname = e.getKey();
-			List<String> ids = e.getValue();
-			if (ids == null || ids.isEmpty()) continue;
-			for (LocalDateTime t : prdctTimes) {
-				String tsKey = t.format(shortFmt);
-				Map<String, Double> idMap = prdctTsTag.get(tsKey);
-				if (idMap == null) continue;
-				double sum = 0;
-				int hit = 0;
-				for (String id : ids) {
-					Double v = idMap.get(id);
-					if (v != null) { sum += v; hit++; }
-				}
-				if (hit == 0) continue;
-				double avg = sum / hit;
+		// 미래 예측 행을 탱크별 result 키에 직접 push (DSTRB_ID == TAGNAME).
+		if (prdctRows != null && !prdctRows.isEmpty()) {
+			for (Map<String, Object> row : prdctRows) {
+				Object tagObj = row.get("tag");
+				Object tsObj = row.get("ts");
+				Object vObj = row.get("value");
+				if (tagObj == null || tsObj == null || vObj == null) continue;
 				Map<String, Object> point = new HashMap<>();
-				point.put("ts", t.format(fmt));
-				point.put("value", avg);
+				point.put("ts", formatPrdctTs(tsObj.toString(), fmt, shortFmt));
+				point.put("value", vObj);
 				point.put("isPredict", true);
-				result.computeIfAbsent(tagname, k -> new ArrayList<>()).add(point);
+				result.computeIfAbsent(tagObj.toString(), k -> new ArrayList<>()).add(point);
 			}
 		}
 
@@ -5291,36 +5263,20 @@ public class DrvnService {
 		List<String> pastPrdctTimeStrs = pastPrdctTimes.stream().map(fmt::format).collect(Collectors.toList());
 
 		HashMap<String, Object> histParam = new HashMap<>();
-		histParam.put("tagList", new ArrayList<>(allPrdctIds));
+		histParam.put("tagList", waterLevelTagList);
 		histParam.put("prdctTimeList", pastPrdctTimeStrs);
 		List<HashMap<String, Object>> histRows = drvnMapper.selectMultiTagPrdct10minHorizon(histParam);
 
 		if (histRows != null && !histRows.isEmpty()) {
-			Map<String, Map<String, Double>> histTsTag = new TreeMap<>();
-			mergeTagValueRows(histTsTag, histRows);
-
-			for (Map.Entry<String, List<String>> e : waterLevelPrdctTagMap.entrySet()) {
-				String tagname = e.getKey();
-				List<String> ids = e.getValue();
-				if (ids == null || ids.isEmpty()) continue;
-				String histKey = tagname + "_PRDCT_HIST";
-				for (LocalDateTime t : pastPrdctTimes) {
-					String tsKey = t.format(shortFmt);
-					Map<String, Double> idMap = histTsTag.get(tsKey);
-					if (idMap == null) continue;
-					double sum = 0;
-					int hit = 0;
-					for (String id : ids) {
-						Double v = idMap.get(id);
-						if (v != null) { sum += v; hit++; }
-					}
-					if (hit == 0) continue;
-					double avg = sum / hit;
-					Map<String, Object> point = new HashMap<>();
-					point.put("ts", t.format(fmt));
-					point.put("value", avg);
-					result.computeIfAbsent(histKey, k -> new ArrayList<>()).add(point);
-				}
+			for (Map<String, Object> row : histRows) {
+				Object tagObj = row.get("tag");
+				Object tsObj = row.get("ts");
+				Object vObj = row.get("value");
+				if (tagObj == null || tsObj == null || vObj == null) continue;
+				Map<String, Object> point = new HashMap<>();
+				point.put("ts", formatPrdctTs(tsObj.toString(), fmt, shortFmt));
+				point.put("value", vObj);
+				result.computeIfAbsent(tagObj + "_PRDCT_HIST", k -> new ArrayList<>()).add(point);
 			}
 		}
 
@@ -5411,6 +5367,21 @@ public class DrvnService {
 		}
 
 		return result;
+	}
+
+	/**
+	 * selectMultiTagPrdctRange / selectMultiTagPrdct10minHorizon 반환의 ts(=DATE_FORMAT
+	 * "yyyy-MM-dd HH:mm") 문자열을 fmt("yyyy-MM-dd HH:mm:00") 으로 정규화.
+	 * 파싱 실패 시 원문 반환.
+	 */
+	private static String formatPrdctTs(String tsStr, DateTimeFormatter fmt, DateTimeFormatter shortFmt) {
+		if (tsStr == null) return null;
+		try {
+			String trimmed = tsStr.length() >= 16 ? tsStr.substring(0, 16) : tsStr;
+			return LocalDateTime.parse(trimmed, shortFmt).format(fmt);
+		} catch (Exception ex) {
+			return tsStr;
+		}
 	}
 
 	/**
