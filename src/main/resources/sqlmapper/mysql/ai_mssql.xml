@@ -1787,7 +1787,6 @@
 	</select>
 
 	<select id="selectTankDataHourList" parameterType="hashMap" resultType="hashMap">
-		
 		SELECT
 			TNK_idx,
 			TNK_NM,
@@ -1879,13 +1878,17 @@
 		TNK_GRP_NM
 	</select>
 	<select id="selectTankInFlowAndInFlowRateList" parameterType="Integer" resultType="hashMap">
-		SELECT rd.TS, ROUND(rd.VALUE, 2) AS VALUE, tgi.TNK_NM
+		SELECT rd.TS, ROUND(rd.VALUE / 1000, 2) AS VALUE, tgi.TNK_GRP_NM AS TNK_GRP_NM
 		FROM TB_RAWDATA_15MIN rd
-		INNER JOIN TB_TNK_GRP_INF tgi
+		INNER JOIN (
+			SELECT TNK_GRP_NM, IN_FLW_TAG
+			FROM TB_TNK_GRP_INF
+			WHERE USE_YN = '1'
+			GROUP BY TNK_GRP_IDX
+		) tgi
 			ON rd.TAGNAME = tgi.IN_FLW_TAG
-			AND tgi.USE_YN = '1'
 		WHERE rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
-		ORDER BY rd.TS ASC;
+		ORDER BY rd.TS ASC
 	</select>
 	<select id="selectWaterLevel" parameterType="Integer" resultType="hashMap">
 		SELECT rd.TS, ROUND(rd.VALUE, 2) AS VALUE, tgi.TNK_NM
@@ -1894,7 +1897,7 @@
 			ON rd.TAGNAME = tgi.LEI_TAG
 			AND tgi.USE_YN = '1'
 		WHERE rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
-		ORDER BY rd.TS ASC;
+		ORDER BY rd.TS ASC
 	</select>
 	<select id="selectPumpPwqList" parameterType="hashMap" resultType="hashMap">
 		SELECT
