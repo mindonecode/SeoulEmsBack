@@ -5124,10 +5124,28 @@ public class DrvnService {
 		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:00");
 		DateTimeFormatter shortFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-		// 1. 실측 (t-6h ~ now, 1분 단위 raw 그대로). 끝점은 분 단위 now 까지 포함.
-		String rawStartStr = fmt.format(t0.minusHours(6));
+		// 조회 대상 태그: 5개 배수지의 모든 수조 LEI 태그를 flatten.
+		// (mapper selectWaterLevelByMinuteRange 가 tagList foreach 로 동적 IN 처리)
+		LinkedHashMap<String, String[]> reservoirTagMap = drvnConfig.getSeoulReservoirTagMap();
+		List<String> waterLevelTagList = new ArrayList<>();
+		if (reservoirTagMap != null) {
+			for (String[] arr : reservoirTagMap.values()) {
+				if (arr == null) continue;
+				for (String t : arr) {
+					if (t != null && !t.isEmpty()) waterLevelTagList.add(t);
+				}
+			}
+		}
+		if (waterLevelTagList.isEmpty()) {
+			log.warn("selectWaterLevel: seoulReservoirTagMap 미설정 → 빈 결과 반환");
+			return new HashMap<>();
+		}
+
+		// 1. 실측 (t-24h ~ now, 1분 단위 raw 그대로). 끝점은 분 단위 now 까지 포함.
+		String rawStartStr = fmt.format(t0.minusHours(24));
 		String rawEndStr = fmt.format(now);
 		HashMap<String, Object> rawParam = new HashMap<>();
+		rawParam.put("tagList", waterLevelTagList);
 		rawParam.put("startDate", rawStartStr);
 		rawParam.put("endDate", rawEndStr);
 		List<HashMap<String,Object>> rawData = drvnMapper.selectWaterLevelByMinuteRange(rawParam);
@@ -5142,12 +5160,14 @@ public class DrvnService {
 		}
 
 		// 1-1. 1주일 전 / 2주일 전 같은 요일·시각 실측 (비교 표시용).
-		//      TB_RAWDATA 에서 weeksAgo 만큼 shift 한 동일 범위 조회 → 결과 TS 를 다시 현재 주차로 시프트하여
-		//      ${tagname}_W1 / ${tagname}_W2 sibling key 로 push. 프론트는 동일한 시점 매칭 로직 재사용.
+		//      현재 차트가 표시하는 [t-24h ~ now+6h] 전 구간을 weeksAgo 만큼 shift 한 범위로 조회 →
+		//      결과 TS 를 다시 현재 주차로 시프트하여 ${tagname}_W1 / ${tagname}_W2 sibling key 로 push.
+		//      예측 구간도 1분 단위 비교 라인으로 채워짐.
 		for (int weeksAgo : new int[]{1, 2}) {
-			LocalDateTime startWk = t0.minusHours(6).minusWeeks(weeksAgo);
-			LocalDateTime endWk = now.minusWeeks(weeksAgo);
+			LocalDateTime startWk = t0.minusHours(24).minusWeeks(weeksAgo);
+			LocalDateTime endWk = now.plusHours(6).minusWeeks(weeksAgo);
 			HashMap<String, Object> wkParam = new HashMap<>();
+			wkParam.put("tagList", waterLevelTagList);
 			wkParam.put("startDate", fmt.format(startWk));
 			wkParam.put("endDate", fmt.format(endWk));
 			List<HashMap<String, Object>> wkData = drvnMapper.selectWaterLevelByMinuteRange(wkParam);
@@ -5261,10 +5281,10 @@ public class DrvnService {
 		}
 
 		// 3. 과거 10분 horizon 예측 (실측 구간 오버레이용)
-		//    t-6h ~ t0 의 10분 경계마다 PRDCT_TIME = RGSTR_TIME + 10분 예측값 조회.
+		//    t-24h ~ t0 의 10분 경계마다 PRDCT_TIME = RGSTR_TIME + 10분 예측값 조회.
 		//    실측과의 정확도 비교 차트용으로 sibling 키 "${tagname}_PRDCT_HIST" 에 별도 push.
 		List<LocalDateTime> pastPrdctTimes = new ArrayList<>();
-		for (int i = 36; i >= 1; i--) {
+		for (int i = 144; i >= 1; i--) {   // 24h × 60min ÷ 10min = 144
 			pastPrdctTimes.add(t0.minusMinutes(i * 10L));
 		}
 		pastPrdctTimes.add(t0);
@@ -5304,21 +5324,131 @@ public class DrvnService {
 			}
 		}
 
+		// 4. 배수지별 활성 수조(≥seoulActiveThreshold) 평균 시리즈.
+		//    화면 "수위 변동" 차트가 배수지당 1개 라인을 표출하기 위해 sibling 키로 push:
+		//      "<배수지>_AVG"            ← raw + 미래예측(isPredict 보존)
+		//      "<배수지>_AVG_W1"         ← 1주 전 비교
+		//      "<배수지>_AVG_W2"         ← 2주 전 비교
+		//      "<배수지>_AVG_PRDCT_HIST" ← 과거 10분 horizon 예측
+		//    임계 미만 수조는 평균에서 제외. 시점별 활성 수조 0개면 누락(connectNulls 동작).
+		LinkedHashMap<String, String[]> tagMap = drvnConfig.getSeoulReservoirTagMap();
+		if (tagMap != null && !tagMap.isEmpty()) {
+			String[][] siblingPairs = {
+				{"", "_AVG"},
+				{"_W1", "_AVG_W1"},
+				{"_W2", "_AVG_W2"},
+				{"_PRDCT_HIST", "_AVG_PRDCT_HIST"}
+			};
+			for (Map.Entry<String, String[]> ent : tagMap.entrySet()) {
+				String resName = ent.getKey();
+				String[] tags = ent.getValue();
+				if (tags == null || tags.length == 0) continue;
+				// 배수지별 임계 — 구리는 1.5m, 나머지는 전역 3.0m (DrvnConfig 정책).
+				double threshold = drvnConfig.getSeoulReservoirThreshold(resName);
+				for (String[] pair : siblingPairs) {
+					String inSuffix = pair[0];
+					String outKey = resName + pair[1];
+					// 분 단위 epoch → [sum, count]. isPredict 플래그는 raw 시리즈에만 존재.
+					TreeMap<Long, double[]> agg = new TreeMap<>();
+					Map<Long, Boolean> predictFlag = new HashMap<>();
+					for (String tag : tags) {
+						List<Map<String, Object>> series = result.get(tag + inSuffix);
+						if (series == null) continue;
+						for (Map<String, Object> p : series) {
+							Object tsObj = p.get("ts");
+							Object vObj = p.get("value");
+							if (tsObj == null || vObj == null) continue;
+							Long tsKey = tsToMinuteEpochMs(tsObj);
+							if (tsKey == null) continue;
+							double v;
+							if (vObj instanceof Number) {
+								v = ((Number) vObj).doubleValue();
+							} else {
+								try { v = Double.parseDouble(vObj.toString()); }
+								catch (Exception ex) { continue; }
+							}
+							if (v < threshold) continue;
+							double[] sc = agg.computeIfAbsent(tsKey, k -> new double[]{0d, 0d});
+							sc[0] += v;
+							sc[1] += 1d;
+							if (Boolean.TRUE.equals(p.get("isPredict"))) {
+								predictFlag.put(tsKey, Boolean.TRUE);
+							}
+						}
+					}
+					if (agg.isEmpty()) continue;
+					List<Map<String, Object>> outList = new ArrayList<>(agg.size());
+					for (Map.Entry<Long, double[]> e : agg.entrySet()) {
+						double[] sc = e.getValue();
+						int cnt = (int) sc[1];
+						if (cnt == 0) continue;
+						LocalDateTime ldt = new java.sql.Timestamp(e.getKey()).toLocalDateTime();
+						Map<String, Object> point = new HashMap<>();
+						point.put("ts", ldt.format(fmt));
+						point.put("value", sc[0] / cnt);
+						point.put("activeCount", cnt);
+						if (Boolean.TRUE.equals(predictFlag.get(e.getKey()))) {
+							point.put("isPredict", true);
+						}
+						outList.add(point);
+					}
+					if (!outList.isEmpty()) {
+						result.put(outKey, outList);
+					}
+				}
+			}
+
+			// 평균 산출이 끝났으므로 프론트가 사용하지 않는 개별 수조 시리즈 키는 응답에서 제거.
+			// 남기는 키: "<배수지>_AVG", "<배수지>_AVG_W1", "<배수지>_AVG_W2", "<배수지>_AVG_PRDCT_HIST".
+			Set<String> keepKeys = new HashSet<>();
+			for (String resName : tagMap.keySet()) {
+				keepKeys.add(resName + "_AVG");
+				keepKeys.add(resName + "_AVG_W1");
+				keepKeys.add(resName + "_AVG_W2");
+				keepKeys.add(resName + "_AVG_PRDCT_HIST");
+			}
+			result.keySet().retainAll(keepKeys);
+		}
+
 		return result;
 	}
 
 	/**
-	 * 최근 6시간 펌프 가동대수 시계열 (10분 버킷, 가중치 적용)
+	 * selectWaterLevel 평균 산출용 ts 정규화 헬퍼.
+	 * Timestamp / Date / String("yyyy-MM-dd HH:mm[:ss[.x]]") 모두 분 단위 epoch ms 로 변환.
+	 */
+	private static Long tsToMinuteEpochMs(Object tsObj) {
+		if (tsObj == null) return null;
+		long ms;
+		if (tsObj instanceof java.sql.Timestamp) {
+			ms = ((java.sql.Timestamp) tsObj).getTime();
+		} else if (tsObj instanceof java.util.Date) {
+			ms = ((java.util.Date) tsObj).getTime();
+		} else {
+			String s = tsObj.toString();
+			try {
+				// "yyyy-MM-dd HH:mm:ss[.x]" → Timestamp.valueOf
+				String trimmed = s.length() >= 19 ? s.substring(0, 19) : s + ":00";
+				ms = java.sql.Timestamp.valueOf(trimmed).getTime();
+			} catch (Exception ex) {
+				return null;
+			}
+		}
+		return (ms / 60_000L) * 60_000L;
+	}
+
+	/**
+	 * 최근 24시간 펌프 가동대수 시계열 (10분 버킷, 가중치 적용)
 	 *
 	 * <p>각 10분 버킷에서 PUMP_IDX 별로 ON 비율(0~1)을 구하고,
 	 * application properties 의 {@code dstrb.pump.level} 가중치를 곱해 합산한다.
 	 * (PUMP_IDX 1, 7 = 0.5대 / 그 외 = 1대)</p>
 	 *
 	 * @param pumpGrp 펌프 그룹 (서울 송수펌프는 1)
-	 * @return 36개 버킷의 [startMin(0~360), endMin, value] 리스트. 0분 = 6시간 전, 360분 = 현재
+	 * @return 144개 버킷의 [startMin(0~1440), endMin, value] 리스트. 0분 = 24시간 전, 1440분 = 현재
 	 */
 	public List<HashMap<String,Object>> selectPumpRunCountHistory(int pumpGrp){
-		final int totalMinutes = 360;
+		final int totalMinutes = 1440;
 		final int bucketMinutes = 10;
 		final int bucketCount = totalMinutes / bucketMinutes;
 
@@ -5456,9 +5586,10 @@ public class DrvnService {
 		// 예: 14:30~14:39 → t0 = 14:30, 14:55 → t0 = 14:50.
 		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
 
-		// 실측 시점: [now-6h-1min: 보조 prev, 결과 미포함] + now-6h ~ now (1분 간격).
+		// 실측 시점: [now-24h-1min: 보조 prev, 결과 미포함] + now-24h ~ now (1분 간격).
 		// t0 가 아니라 now(분 단위) 까지 가져와 차트가 현재 시각 1분까지 표시되도록 함.
-		LocalDateTime auxStart = now.minusHours(6).minusMinutes(1);
+		// (수위 차트와 동일하게 24h 윈도우. 유량 W1/W2 비교 라인도 이 범위 + 미래 6h 까지 표시.)
+		LocalDateTime auxStart = now.minusHours(24).minusMinutes(1);
 		List<LocalDateTime> rawTimes = new ArrayList<>();
 		for (LocalDateTime t = auxStart; !t.isAfter(now); t = t.plusMinutes(1)) {
 			rawTimes.add(t);
@@ -5523,6 +5654,39 @@ public class DrvnService {
 		Map<String, Map<String, Double>> tsTagValue = new TreeMap<>();
 		mergeTagValueRows(tsTagValue, rawRows);
 		mergeTagValueRows(tsTagValue, prdctRows);
+
+		// 2-0. 유량(flow) 1주 전 / 2주 전 같은 요일·시각 실측 (W1/W2 비교 라인용, flow 만).
+		//      현재 차트가 표시하는 [t-24h ~ t+6h] 전 구간을 weeksAgo 만큼 shift 한 범위로 조회 →
+		//      결과 TS 를 다시 현재 주차로 시프트하여 row.flowW1 / row.flowW2 필드로 부착.
+		Map<String, Double> flowW1ByTs = new HashMap<>();
+		Map<String, Double> flowW2ByTs = new HashMap<>();
+		for (int weeksAgo : new int[]{1, 2}) {
+			LocalDateTime startWk = now.minusHours(24).minusWeeks(weeksAgo);
+			LocalDateTime endWk = now.plusHours(6).minusWeeks(weeksAgo);
+			HashMap<String, Object> wkParam = new HashMap<>();
+			wkParam.put("tagList", Collections.singletonList(flowTag));
+			wkParam.put("startDate", fmt.format(startWk));
+			wkParam.put("endDate", fmt.format(endWk));
+			List<HashMap<String, Object>> wkRows = drvnMapper.selectMultiTagRawRangeMinutely(wkParam);
+			if (wkRows == null) continue;
+			Map<String, Double> sink = (weeksAgo == 1) ? flowW1ByTs : flowW2ByTs;
+			for (HashMap<String, Object> r : wkRows) {
+				Object tagObj = r.get("tag");
+				Object tsObj = r.get("ts");
+				Object valObj = r.get("value");
+				if (tagObj == null || tsObj == null || valObj == null) continue;
+				if (!flowTag.equals(tagObj.toString())) continue;
+				LocalDateTime shifted;
+				try {
+					String raw = tsObj.toString();
+					String trimmed = raw.length() >= 16 ? raw.substring(0, 16) : raw;
+					shifted = LocalDateTime.parse(trimmed, shortFmt).plusWeeks(weeksAgo);
+				} catch (Exception ex) { continue; }
+				try {
+					sink.put(shifted.format(shortFmt), Double.parseDouble(valObj.toString()));
+				} catch (NumberFormatException ignored) {}
+			}
+		}
 
 		// 2-1. 과거 10분 horizon 예측 (실측 구간 오버레이용) - flow 태그만
 		//      t-6h ~ t0 의 10분 경계마다 PRDCT_TIME = RGSTR_TIME + 10분 예측값 조회.
@@ -5620,7 +5784,6 @@ public class DrvnService {
 
 		// 시점별 row 빌드. allTimes[0] (t-6h-1min) 은 보조 prev 전용이라 결과에 포함하지 않는다.
 		// 따라서 t-6h(첫 표시 시점) 부터 prev 가 항상 존재하여 pwrInterval/pwrUnit 산출 가능.
-		Double lastValidPwrUnit = null;   // 적산값(prev 누락 등)으로 pwrUnit 가 비정상적으로 치솟을 때 fallback
 		for (int i = 0; i < allTimes.size(); i++) {
 			if (i == 0) continue; // 보조 prev 시점은 skip
 			LocalDateTime cur = allTimes.get(i);
@@ -5656,13 +5819,6 @@ public class DrvnService {
 			if (pwrInterval != null && flow != null && flow >= MIN_FLOW_M3H && deltaH != null && deltaH > 0) {
 				pwrUnit = pwrInterval / (flow * deltaH);
 			}
-			// 방어 로직: 적산값 누락 등으로 pwrUnit 가 비정상적으로 치솟을 때(>100) 직전 정상값 사용.
-			// 직전 정상값도 없으면 null 유지.
-			if (pwrUnit != null && pwrUnit > 100.0) {
-				pwrUnit = lastValidPwrUnit;
-			} else if (pwrUnit != null) {
-				lastValidPwrUnit = pwrUnit;
-			}
 
 			HashMap<String, Object> row = new HashMap<>();
 			row.put("ts", curKey);
@@ -5672,6 +5828,8 @@ public class DrvnService {
 			row.put("deltaHour", deltaH);
 			row.put("isPredict", cur.isAfter(now));   // now(분 단위) 이후가 예측. 실측 1분 단위 그래프 표시 보장.
 			row.put("flowPrdct", flowPrdctHistByTs.get(curKey));   // 과거 10분 경계의 horizon 예측값 (그 외 null). 미래는 flow 가 곧 예측.
+			row.put("flowW1", flowW1ByTs.get(curKey));             // 1주 전 같은 요일·시각 실측 (W1 비교 라인).
+			row.put("flowW2", flowW2ByTs.get(curKey));             // 2주 전 같은 요일·시각 실측 (W2 비교 라인).
 			row.put("runningPumps", new ArrayList<>(running));
 			result.add(row);
 		}

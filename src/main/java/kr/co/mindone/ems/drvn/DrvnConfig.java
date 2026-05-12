@@ -101,6 +101,36 @@ public class DrvnConfig {
 	private String[] seoulGnTags;           // @PostConstruct 에서 CSV 파싱
 	private String[] seoulBaTags;
 
+	// === [Seoul] 배수지별 수조 LEI 태그 (수위 변동 차트 ≥3m 활성 수조 평균용) =====
+	// 공릉(gn)/북악(ba)는 위 seoul.step.*.tags 와 동일 값을 placeholder 로 재사용.
+	@Value("${seoul.waterlevel.guri.tags:}")
+	private String seoulWlGuriRaw;
+	@Value("${seoul.waterlevel.gn.tags:}")
+	private String seoulWlGnRaw;
+	@Value("${seoul.waterlevel.wg.tags:}")
+	private String seoulWlWgRaw;
+	@Value("${seoul.waterlevel.wgok.tags:}")
+	private String seoulWlWgokRaw;
+	@Value("${seoul.waterlevel.ba.tags:}")
+	private String seoulWlBaRaw;
+	// 배수지명(한국어) → 수조 태그 배열. selectWaterLevel 평균 산출 및 _AVG sibling 키 push 에 사용.
+	// 키 순서는 프론트 reservoirs 배열과 일치 (구리, 공릉, 월계, 월곡, 북악).
+	private LinkedHashMap<String, String[]> seoulReservoirTagMap;
+
+	// 배수지별 활성 수조 임계 (m). 미설정 시 seoulActiveThreshold(3.0) 폴백.
+	// 구리는 수조 운영 수위가 낮아 1.5m. 다른 배수지는 -1 디폴트 → 전역값 사용.
+	@Value("${seoul.waterlevel.guri.threshold:-1}")
+	private double seoulWlGuriThreshold;
+	@Value("${seoul.waterlevel.gn.threshold:-1}")
+	private double seoulWlGnThreshold;
+	@Value("${seoul.waterlevel.wg.threshold:-1}")
+	private double seoulWlWgThreshold;
+	@Value("${seoul.waterlevel.wgok.threshold:-1}")
+	private double seoulWlWgokThreshold;
+	@Value("${seoul.waterlevel.ba.threshold:-1}")
+	private double seoulWlBaThreshold;
+	private Map<String, Double> seoulReservoirThresholdMap;
+
 	/**
 	 * 거리계산시 압력 및 유량의 평균화를 위한 표준편차를 구하는 메서드
 	 *
@@ -155,6 +185,44 @@ public class DrvnConfig {
 		// Seoul/Dev 수위 태그 CSV → String[] 파싱 (공백 제거, 빈 항목 스킵)
 		seoulGnTags = splitCsvTags(seoulGnTagsRaw);
 		seoulBaTags = splitCsvTags(seoulBaTagsRaw);
+
+		// 배수지명 → 수조 태그 배열 (LinkedHashMap 으로 입력 순서 유지).
+		// 빈 항목(태그 미설정)도 일단 빈 배열로 등록해 두면 호출부에서 동일 키 순회 가능.
+		seoulReservoirTagMap = new LinkedHashMap<>();
+		seoulReservoirTagMap.put("구리", splitCsvTags(seoulWlGuriRaw));
+		seoulReservoirTagMap.put("공릉", splitCsvTags(seoulWlGnRaw));
+		seoulReservoirTagMap.put("월계", splitCsvTags(seoulWlWgRaw));
+		seoulReservoirTagMap.put("월곡", splitCsvTags(seoulWlWgokRaw));
+		seoulReservoirTagMap.put("북악", splitCsvTags(seoulWlBaRaw));
+
+		// 배수지별 임계 (-1 = 미설정 → 전역 seoulActiveThreshold 폴백).
+		seoulReservoirThresholdMap = new HashMap<>();
+		if (seoulWlGuriThreshold >= 0) seoulReservoirThresholdMap.put("구리", seoulWlGuriThreshold);
+		if (seoulWlGnThreshold   >= 0) seoulReservoirThresholdMap.put("공릉", seoulWlGnThreshold);
+		if (seoulWlWgThreshold   >= 0) seoulReservoirThresholdMap.put("월계", seoulWlWgThreshold);
+		if (seoulWlWgokThreshold >= 0) seoulReservoirThresholdMap.put("월곡", seoulWlWgokThreshold);
+		if (seoulWlBaThreshold   >= 0) seoulReservoirThresholdMap.put("북악", seoulWlBaThreshold);
+	}
+
+	/**
+	 * 배수지명별 활성 수조 임계 (m). 개별 설정이 없으면 전역 {@link #getSeoulActiveThreshold()} 폴백.
+	 */
+	public double getSeoulReservoirThreshold(String reservoirName) {
+		Double v = seoulReservoirThresholdMap == null ? null : seoulReservoirThresholdMap.get(reservoirName);
+		return v != null ? v : seoulActiveThreshold;
+	}
+
+	/**
+	 * 배수지명(한국어) → 수조 LEI 태그 배열. 입력 순서 유지(LinkedHashMap).
+	 * 화면 "수위 변동" 차트가 배수지별 ≥{@link #getSeoulActiveThreshold()} 활성 수조 평균 표출 시 사용.
+	 */
+	public LinkedHashMap<String, String[]> getSeoulReservoirTagMap() {
+		return seoulReservoirTagMap;
+	}
+
+	/** 활성(가동중) 수조 판단 임계 수위 (m). */
+	public double getSeoulActiveThreshold() {
+		return seoulActiveThreshold;
 	}
 
 	private static String[] splitCsvTags(String raw) {

@@ -2408,19 +2408,18 @@
 	</select>
 
 	<!--
-	  수위 5개 태그를 1분 단위 BETWEEN 범위로 조회.
-	  selectWaterLevelByRange 와 동일 태그 셋이지만, IN 리스트 대신 BETWEEN + SECOND=0 사용.
+	  수위 태그를 1분 단위 BETWEEN 범위로 조회.
+	  호출부에서 tagList(List&lt;String&gt;) 로 조회 대상 태그를 동적 전달.
+	  배수지별 수조 다중 태그(예: 공릉 6지, 월계 4지 등) 모두 조회되어
+	  ${배수지}_AVG / _AVG_W1 / _AVG_W2 평균 산출에 반영된다.
 	-->
 	<select id="selectWaterLevelByMinuteRange" parameterType="hashmap" resultType="HashMap">
 		SELECT TS, TAGNAME, VALUE
 		FROM TB_RAWDATA
-		WHERE TAGNAME IN (
-		'ZG01Q0_P_WTDWLM011_ILE',
-		'WB01Q0_P_WTDWLM021_ILE',
-		'WB02Q0_P_WTDWLM021_ILE',
-		'WJ55Q0_P_WTDWLE011_ILE',
-		'WS03Q0_P_WTDWLM011_ILE'
-		)
+		WHERE TAGNAME IN
+		<foreach collection="tagList" item="tag" open="(" separator="," close=")">
+			#{tag}
+		</foreach>
 		AND TS &gt;= #{startDate}
 		AND TS &lt;= #{endDate}
 		AND SECOND(TS) = 0
@@ -2438,7 +2437,7 @@
 		  ON cppi.PMB_TAG = rd.TAGNAME
 		WHERE cppi.PUMP_GRP = #{PUMP_GRP}
 		  AND cppi.USE_YN = '1'
-		  AND rd.TS &gt;= DATE_SUB(NOW(), INTERVAL 6 HOUR)
+		  AND rd.TS &gt;= DATE_SUB(NOW(), INTERVAL 24 HOUR)
 		ORDER BY rd.TS
 	</select>
 
