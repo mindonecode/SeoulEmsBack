@@ -5665,7 +5665,8 @@ public class DrvnService {
 		Map<String, Double> flowPrdctHistByTs = new HashMap<>();
 		{
 			List<LocalDateTime> pastPrdctTimes = new ArrayList<>();
-			for (int i = 36; i >= 1; i--) {
+			final int PAST_PRDCT_STEPS = 24 * 6; // 차트 윈도우 24h × (60분/10분) = 144
+			for (int i = PAST_PRDCT_STEPS; i >= 1; i--) {
 				pastPrdctTimes.add(t0.minusMinutes(i * 10L));
 			}
 			pastPrdctTimes.add(t0);
