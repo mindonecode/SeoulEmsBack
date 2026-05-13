@@ -196,62 +196,55 @@
 	</select>
 	<select id="selectPumpPerformList" parameterType="hashMap" resultType="hashMap">
 		SELECT a.*,
-		(
-		SELECT CONCAT(PUMP_GRP_NM, PUMP_GRP_IDX)
-		FROM TB_CTR_PRF_PUMPMST_INF
-		WHERE
-		<if test="tag_type == 'PMB_TAG'">PMB_TAG</if>
-		<if test="tag_type == 'PRI_TAG'">PRI_D_TAG</if>
-		<if test="tag_type == 'PWI_TAG'">PWI_TAG</if>
-		<if test="tag_type == 'SPI_TAG'">SPI_TAG</if> = tagname
-		LIMIT 1
-		) name
+			(
+			select CONCAT(PUMP_GRP_NM, PUMP_GRP_IDX)
+			from TB_CTR_PRF_PUMPMST_INF
+			where
+				<if test="tag_type == 'PMB_TAG'">PMB_TAG</if>
+				<if test="tag_type == 'PRI_TAG'">PRI_D_TAG</if>
+				<if test="tag_type == 'PWI_TAG'">PWI_TAG</if>
+				<if test="tag_type == 'SPI_TAG'">SPI_TAG</if> = tagname
+			limit 1
+			) name
 		FROM (
-		SELECT
-		<if test='time_type == "h"'>DATE_FORMAT(b.ts,'%Y-%m-%d %H:%i')</if>
-		<if test='time_type == "d"'>DATE_FORMAT(b.ts,'%Y-%m-%d')</if>
-		<if test='time_type == "m"'>DATE_FORMAT(b.ts,'%Y-%m')</if>
-		<if test='time_type == "y"'>DATE_FORMAT(b.ts,'%Y')</if> ts,
-		b.tagname,
-		<if test="tag_type == 'PWI_TAG'">
-			ROUND(b.value * c.PWI_UNIT_VALUE, 2) as value
-		</if>
-		<if test="tag_type != 'PWI_TAG'">
-			b.value as value
-		</if>
-		FROM TB_RAWDATA_HOUR b
-		<if test="tag_type == 'PWI_TAG'">
-			,
-			TB_PEAK_TAG_INF c
-		</if>
-		WHERE
-		<if test='time_type == "h" or time_type == "d"'>
-			<![CDATA[b.ts >= CONCAT(#{start_date}, ' 00:00:00') AND b.ts <= CONCAT(#{end_date}, ' 23:59:00')]]>
-		</if>
-		<if test='time_type == "m"'>
-			<![CDATA[b.ts >= CONCAT(#{start_date}, '-01 00:00:00') AND b.ts <= CONCAT(#{end_date}, '-31 23:59:00')]]>
-		</if>
-		<if test='time_type == "y"'>
-			<![CDATA[b.ts >= CONCAT(#{start_date}, '-01-01 00:00:00') AND b.ts <= CONCAT(#{end_date}, '-12-31 23:59:00')]]>
-		</if>
-		AND b.tagname IN (
-		SELECT
-		<if test="tag_type == 'PMB_TAG'">PMB_TAG</if>
-		<if test="tag_type == 'PWI_TAG'">PWI_TAG</if>
-		<if test="tag_type == 'PRI_TAG'">PRI_D_TAG</if>
-		<if test="tag_type == 'SPI_TAG'">SPI_TAG</if>
-		FROM TB_CTR_PRF_PUMPMST_INF
-		)
-		<if test="tag_type == 'PWI_TAG'">
-			AND
-			b.tagname = c.PWI_TAG
-		</if>
-		GROUP BY
-		<if test='time_type == "h"'>b.ts</if>
-		<if test='time_type == "d"'>DATE(b.ts)</if>
-		<if test='time_type == "m"'>MONTH(b.ts)</if>
-		<if test='time_type == "y"'>YEAR(b.ts)</if>,
-		b.tagname
+			select
+				<if test='time_type == "h"'>DATE_FORMAT(b.ts,'%Y-%m-%d %H:%i')</if>
+				<if test='time_type == "d"'>DATE_FORMAT(b.ts,'%Y-%m-%d')</if>
+				<if test='time_type == "m"'>DATE_FORMAT(b.ts,'%Y-%m')</if>
+				<if test='time_type == "y"'>DATE_FORMAT(b.ts,'%Y')</if> ts,
+				b.tagname,
+				<if test="tag_type == 'PWI_TAG'">ROUND(b.value * c.PWI_UNIT_VALUE, 2) as value</if>
+				<if test="tag_type != 'PWI_TAG'">b.value as value</if>
+			from TB_RAWDATA_HOUR b
+				<if test="tag_type == 'PWI_TAG'">
+					,
+					TB_PEAK_TAG_INF c
+				</if>
+			where
+				<if test='time_type == "h" or time_type == "d"'>
+					<![CDATA[b.ts >= CONCAT(#{start_date}, ' 00:00:00') AND b.ts <= CONCAT(#{end_date}, ' 23:59:00')]]>
+				</if>
+				<if test='time_type == "m"'>
+					<![CDATA[b.ts >= CONCAT(#{start_date}, '-01 00:00:00') AND b.ts <= CONCAT(#{end_date}, '-31 23:59:00')]]>
+				</if>
+				<if test='time_type == "y"'>
+					<![CDATA[b.ts >= CONCAT(#{start_date}, '-01-01 00:00:00') AND b.ts <= CONCAT(#{end_date}, '-12-31 23:59:00')]]>
+				</if>
+				and b.tagname IN (
+					select
+					<if test="tag_type == 'PMB_TAG'">PMB_TAG</if>
+					<if test="tag_type == 'PWI_TAG'">PWI_TAG</if>
+					<if test="tag_type == 'PRI_TAG'">PRI_D_TAG</if>
+					<if test="tag_type == 'SPI_TAG'">SPI_TAG</if>
+					from TB_CTR_PRF_PUMPMST_INF
+				)
+				<if test="tag_type == 'PWI_TAG'">AND b.tagname = c.PWI_TAG</if>
+			group by
+				<if test='time_type == "h"'>b.ts</if>
+				<if test='time_type == "d"'>DATE(b.ts)</if>
+				<if test='time_type == "m"'>MONTH(b.ts)</if>
+				<if test='time_type == "y"'>YEAR(b.ts)</if>,
+				b.tagname
 		) a;
 	</select>
 	<select id="selectPumpPerformList_ss_pwi" parameterType="hashMap" resultType="hashMap">

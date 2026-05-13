@@ -2598,23 +2598,22 @@
 	</select>
 
 	<select id="selectPumpList" resultType="hashMap">
-    select
-    PUMP_IDX,
-    PUMP_GRP,
-    TNK_GRP_IDX,
-    PUMP_GRP_IDX,
-    PUMP_GRP_NM,
-    PUMP_GRP_DSC,
-    PUMP_NM,
-    PUMP_TYP,
-    PUMP_TYP_DSC,
-    EMS_MIN_WPP_TAG,
-    EMS_MIN_WPJ_TAG,
-    DUTY_H,
-    DUTY_Q
-    from
-    TB_CTR_PRF_PUMPMST_INF
-    order by PUMP_GRP_IDX, PUMP_IDX
+    SELECT
+    	PUMP_IDX,
+    	PUMP_GRP,
+    	TNK_GRP_IDX,
+    	PUMP_GRP_IDX,
+    	PUMP_GRP_NM,
+    	PUMP_GRP_DSC,
+    	PUMP_NM,
+    	PUMP_TYP,
+    	PUMP_TYP_DSC,
+    	EMS_MIN_WPP_TAG,
+    	EMS_MIN_WPJ_TAG,
+    	DUTY_H,
+    	DUTY_Q
+    FROM TB_CTR_PRF_PUMPMST_INF
+    ORDER BY PUMP_GRP_IDX, PUMP_IDX
 	</select>
 
 
