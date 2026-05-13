@@ -233,11 +233,11 @@ public class AiService {
 		Map<String, List<Map<String, Object>>> listMap = new TreeMap<>();
 
 		for (HashMap<String, Object> item : list) {
-			String tagName = String.valueOf(item.get("TNK_NM"));
+			String tagName = String.valueOf(item.get("TNK_GRP_NM"));
 			List<Map<String, Object>> tagList = listMap.computeIfAbsent(tagName, k -> new ArrayList<>());
 
 			Map<String, Object> dataMap = new HashMap<>(item);
-			dataMap.remove("TNK_NM");
+			dataMap.remove("TNK_GRP_NM");
 			tagList.add(dataMap);
 		}
         return listMap;
