@@ -487,25 +487,43 @@
 			SELECT #{item} AS TAGNAME
 		</foreach>
 		),
-		latest AS (
+		latest_input AS (
+		<choose>
+			<when test="latestTags != null and latestTags.size() > 0">
+				<foreach item="item" collection="latestTags" separator=" UNION ALL ">
+					SELECT
+						#{item.TAGNAME} AS TAGNAME,
+						#{item.TS} AS LATEST_TS
+				</foreach>
+			</when>
+			<otherwise>
+				SELECT
+					NULL AS TAGNAME,
+					NULL AS LATEST_TS
+				WHERE 1 = 0
+			</otherwise>
+		</choose>
+		),
+		prev_ts AS (
 		SELECT
-		TAGNAME, VALUE, TS,
-		ROW_NUMBER() OVER(PARTITION BY TAGNAME ORDER BY TS DESC) as rn
-		FROM TB_RAWDATA
-		WHERE
-		TS &gt;= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
-		AND TS &lt;= NOW()
-		AND TAGNAME IN (
-		<foreach item="item" index="index" collection="tagIds" separator=",">
-			#{item}
-		</foreach>
-		)
+		L.TAGNAME,
+		MAX(R.TS) AS PREV_TS
+		FROM TB_RAWDATA R
+		JOIN latest_input L
+		ON R.TAGNAME = L.TAGNAME
+		WHERE R.TS &lt;= DATE_SUB(STR_TO_DATE(L.LATEST_TS, '%Y-%m-%d %H:%i:%s'), INTERVAL 1 HOUR)
+		GROUP BY L.TAGNAME
 		)
 		SELECT
 		T.TAGNAME,
-		IFNULL(ROUND(L.VALUE, 2), '-') AS VALUE,
-		DATE_FORMAT(L.TS, '%Y-%m-%d %H:%i:%s') AS TS
+		IFNULL(ROUND(R.VALUE, 2), '-') AS VALUE,
+		DATE_FORMAT(R.TS, '%Y-%m-%d %H:%i:%s') AS TS
 		FROM tags T
-		LEFT JOIN latest L ON T.TAGNAME = L.TAGNAME AND L.rn = 2
+		LEFT JOIN prev_ts P
+		ON T.TAGNAME = P.TAGNAME
+		LEFT JOIN TB_RAWDATA R
+		ON R.TAGNAME = P.TAGNAME
+		AND R.TS = P.PREV_TS
 	</select>
+
 </mapper>
