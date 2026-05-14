@@ -125,11 +125,18 @@ public interface AiMapper {
 	List<HashMap<String, Object>> selectTankInFlowAndInFlowRateList(Integer hour);
 
 	/**
-	 * 배수지 수위 데이터를 조회한다.
+	 * 배수지 수위 데이터 추세를 조회한다.
 	 * @param hour 조회 기간
-	 * @return 배수지 수위 데이터
+	 * @return 배수지 수위 데이터 추세
 	 */
-	List<HashMap<String, Object>> selectWaterLevel(Integer hour);
+	List<HashMap<String, Object>> selectWaterLevelTrend(Integer hour);
+
+	/**
+	 * 배수지 수위 데이터 현황을 조회한다.
+	 * @param hour 조회 기간
+	 * @return 배수지 수위 데이터 현황
+	 */
+	List<HashMap<String, Object>> selectWaterLevelCurrent(Integer hour);
 
 	/**
 	 * 전력량 데이터를 조회한다.
