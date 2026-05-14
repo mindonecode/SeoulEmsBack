@@ -1890,13 +1890,72 @@
 		WHERE rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
 		ORDER BY rd.TS ASC
 	</select>
-	<select id="selectWaterLevel" parameterType="Integer" resultType="hashMap">
-		SELECT rd.TS, ROUND(rd.VALUE, 2) AS VALUE, tgi.TNK_NM
-		FROM TB_RAWDATA_15MIN rd
+	<select id="selectWaterLevelTrend" parameterType="Integer" resultType="hashMap">
+		SELECT DATE_FORMAT(rd.TS, '%Y-%m-%d %H:%i:%s') AS TS, ROUND(AVG(rd.VALUE), 2) AS VALUE, tgi.TNK_GRP_NM,
+			CASE 
+				WHEN rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR) THEN 'now'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 WEEK) THEN '1Week ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 WEEK) THEN '2Week ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 WEEK) THEN '3Week ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 WEEK) THEN '4Week ago'
+			END AS DATE_GRP
+		FROM 
+			<choose>
+        <when test="hour >= 12">TB_RAWDATA_15MIN</when>
+        <otherwise>TB_RAWDATA</otherwise>
+      </choose> rd
 		INNER JOIN TB_TNK_GRP_INF tgi
 			ON rd.TAGNAME = tgi.LEI_TAG
 			AND tgi.USE_YN = '1'
-		WHERE rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+		WHERE 
+			(
+				rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 WEEK))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 WEEK))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 WEEK))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 WEEK))
+			)
+			AND (
+				(tgi.TNK_NM = '구리' AND rd.VALUE &gt;= 1.5)
+				OR (tgi.TNK_NM != '구리' AND rd.VALUE &gt;= 3)
+			)
+		GROUP BY tgi.TNK_GRP_NM, DATE_GRP, rd.TS
+		ORDER BY rd.TS ASC
+	</select>
+	<select id="selectWaterLevelCurrent" parameterType="Integer" resultType="hashMap">
+		SELECT DATE_FORMAT(rd.TS, '%Y-%m-%d %H:%i:%s') AS TS, ROUND(AVG(rd.VALUE), 2) AS VALUE, tgi.TNK_GRP_NM,
+			CASE 
+				WHEN rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR) THEN 'now'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN '1Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 DAY) THEN '2Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 DAY) THEN '3Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 DAY) THEN '4Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 5 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 5 DAY) THEN '5Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 6 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 6 DAY) THEN '6Day ago'
+			END AS DATE_GRP
+		FROM 
+			<choose>
+        <when test="hour >= 12">TB_RAWDATA_15MIN</when>
+        <otherwise>TB_RAWDATA</otherwise>
+      </choose> rd
+		INNER JOIN TB_TNK_GRP_INF tgi
+			ON rd.TAGNAME = tgi.LEI_TAG
+			AND tgi.USE_YN = '1'
+		WHERE 
+			(
+				rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 5 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 5 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 6 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 6 DAY))
+			)
+			AND (
+				(tgi.TNK_NM = '구리' AND rd.VALUE &gt;= 1.5)
+				OR (tgi.TNK_NM != '구리' AND rd.VALUE &gt;= 3)
+			)
+		GROUP BY tgi.TNK_GRP_NM, DATE_GRP, rd.TS
 		ORDER BY rd.TS ASC
 	</select>
 	<select id="selectPumpPwqList" parameterType="hashMap" resultType="hashMap">
