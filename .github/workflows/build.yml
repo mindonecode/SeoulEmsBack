@@ -1,19 +1,24 @@
-  name: sbd_back
+name: sbd_back
 
-  on:
-    push:
-      branches: [master]
+on:
+  push:
+    branches:
+      - master
 
-  jobs:
-    build:
-      runs-on: ubuntu-22.04
-      steps:
-        - uses: appleboy/ssh-action@master
-          with:
-            port: ${{ secrets.port }}
-            host: ${{ secrets.host }}
-            username: ${{ secrets.username }}
-            password: ${{ secrets.password }}
-            script: |
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.host }}
+          username: ${{ secrets.username }}
+          port: ${{ secrets.port }}
+          password: ${{ secrets.password }}
+          script: |
             cd /d D:\SBD_Proj\SeoulEmsBack
             call sbdBackStart.bat
