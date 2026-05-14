@@ -287,8 +287,11 @@ public class CommonService {
 	}
 
 	public List<HashMap<String, Object>>selectWtlvData(HashMap<String, Object> tagIds){
-		List<HashMap<String, Object>> previousTags = commonMapper.selectWtlvData(tagIds);
 		List<HashMap<String, Object>> latestTags = commonMapper.selectLatestTagData(tagIds);
+		HashMap<String, Object> previousTagParams = new HashMap<>();
+		previousTagParams.put("tagIds", tagIds.get("tagIds"));
+		previousTagParams.put("latestTags", latestTags);
+		List<HashMap<String, Object>> previousTags = commonMapper.selectWtlvData(previousTagParams);
 
 		Map<String, HashMap<String, Object>> latestByTagName = new HashMap<>();
 		for (HashMap<String, Object> latestTag : latestTags) {
