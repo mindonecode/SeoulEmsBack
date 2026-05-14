@@ -4948,7 +4948,7 @@ public class DrvnService {
 	public void setPumpListYn(List<HashMap<String, Object>> updateList) {
 		for(HashMap<String, Object> map:updateList){
 			drvnMapper.setPumpListYn(map);
-
+			drvnMapper.setPumpUseYn(map);
 		}
 	}
 
@@ -5087,7 +5087,11 @@ public class DrvnService {
 			calParam.put("pump_priority", pumpPriority);
 			
 			List<HashMap<String, Object>> getGrpCombCal = drvnMapper.getGroupPumpCal(calParam);
-			int countIdx = (int) getGrpCombCal.get(0).get("COUNT_IDX");
+			int countIdx = 0;
+			 
+			if(getGrpCombCal != null && !getGrpCombCal.isEmpty()) {
+				if ((int) getGrpCombCal.get(0).get("C_ORD") == 1) countIdx = (int) getGrpCombCal.get(0).get("COUNT_IDX");
+			}
 			
 			drvnMapper.updatePumpComb(pumpIDX.toString(), countIdx);
 		}

@@ -2322,6 +2322,14 @@
 		AND
 		PUMP_PRIORITY = #{PUMP_PRIORITY}
 	</update>
+
+	<update id="setPumpUseYn" parameterType="hashmap">
+		UPDATE TB_PUMP_CAL
+		SET USE_YN = #{USE_YN}
+		WHERE
+		PUMP_COUNT = #{PUMP_COUNT}
+	</update>
+
 	<update id="disableGroupPumpCal" parameterType="hashmap">
 		UPDATE TB_PUMP_CAL
 		SET USE_YN = 0
