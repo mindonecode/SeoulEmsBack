@@ -12,8 +12,8 @@
           with:
             port: ${{ secrets.port }}
             host: ${{ secrets.host }}
-            username: ${{ secrets.user }}
-            password: ${{ secrets.pw }}
+            username: ${{ secrets.username }}
+            password: ${{ secrets.password }}
             script:
               cd /d D:\SBD_Proj\SeoulEmsBack
               call sbdBackStart.bat
