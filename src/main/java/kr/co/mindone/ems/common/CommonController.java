@@ -270,7 +270,7 @@ public class CommonController extends BaseController {
     }
 
     /**
-     * 15분이내 태그 데이터 조회 두둥
+     * 15분이내 태그 데이터 조회 두둥 탁
      * @param map 조회 태그 리스트
      * @return 조회 태그에 대한 가장 최근 TS, VALUE, TAG_NAME
      */
