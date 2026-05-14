@@ -3,7 +3,7 @@ cd /d D:\SBD_Proj\SeoulEmsBack\
 
 git reset --hard
 echo git reset
-git pull origin main
+git pull origin master
 echo git pull
 pm2 stop sbd_back
 echo pm2 stop
