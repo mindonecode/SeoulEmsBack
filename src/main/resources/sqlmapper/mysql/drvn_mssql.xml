@@ -2345,8 +2345,6 @@
 		PUMP_COUNT = #{PUMP_COUNT}
 		AND
 		PUMP_PRIORITY = #{PUMP_PRIORITY}
-		AND
-		COUNT_IDX = #{COUNT_IDX};
 	</update>
 	<select id="getGrpPumpComb" parameterType="int" resultType="hashmap">
 		SELECT PUMP_COMB, P_ADD_VAL, P_MUL_VAL, P_SQRT_MUL_VAL, FC_MIN_VAL, FC_MAX_VAL
@@ -2410,19 +2408,18 @@
 	</select>
 
 	<!--
-	  수위 5개 태그를 1분 단위 BETWEEN 범위로 조회.
-	  selectWaterLevelByRange 와 동일 태그 셋이지만, IN 리스트 대신 BETWEEN + SECOND=0 사용.
+	  수위 태그를 1분 단위 BETWEEN 범위로 조회.
+	  호출부에서 tagList(List&lt;String&gt;) 로 조회 대상 태그를 동적 전달.
+	  배수지별 수조 다중 태그(예: 공릉 6지, 월계 4지 등) 모두 조회되어
+	  ${배수지}_AVG / _AVG_W1 / _AVG_W2 평균 산출에 반영된다.
 	-->
 	<select id="selectWaterLevelByMinuteRange" parameterType="hashmap" resultType="HashMap">
 		SELECT TS, TAGNAME, VALUE
 		FROM TB_RAWDATA
-		WHERE TAGNAME IN (
-		'ZG01Q0_P_WTDWLM011_ILE',
-		'WB01Q0_P_WTDWLM021_ILE',
-		'WB02Q0_P_WTDWLM021_ILE',
-		'WJ55Q0_P_WTDWLE011_ILE',
-		'WS03Q0_P_WTDWLM011_ILE'
-		)
+		WHERE TAGNAME IN
+		<foreach collection="tagList" item="tag" open="(" separator="," close=")">
+			#{tag}
+		</foreach>
 		AND TS &gt;= #{startDate}
 		AND TS &lt;= #{endDate}
 		AND SECOND(TS) = 0
@@ -2440,7 +2437,7 @@
 		  ON cppi.PMB_TAG = rd.TAGNAME
 		WHERE cppi.PUMP_GRP = #{PUMP_GRP}
 		  AND cppi.USE_YN = '1'
-		  AND rd.TS &gt;= DATE_SUB(NOW(), INTERVAL 6 HOUR)
+		  AND rd.TS &gt;= DATE_SUB(NOW(), INTERVAL 24 HOUR)
 		ORDER BY rd.TS
 	</select>
 
@@ -2598,6 +2595,30 @@
 			AND t.PRDCT_TIME = m.PRDCT_TIME
 			AND t.RGSTR_TIME = m.MAX_RGSTR
 		ORDER BY t.PRDCT_TIME, t.DSTRB_ID
+	</select>
+
+	<!--
+	  과거 10분 horizon 예측 조회 (TB_CTR_TNK_RST).
+	  각 PRDCT_TIME 에 대해 PRDCT_TIME = RGSTR_TIME + 10분 인 예측 행만 반환 → 실측과의 정확도 비교용.
+	  - tagList: DSTRB_ID 리스트
+	  - prdctTimeList: 과거 PRDCT_TIME 10분 경계 리스트
+	-->
+	<select id="selectMultiTagPrdct10minHorizon" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DSTRB_ID as tag,
+			DATE_FORMAT(PRDCT_TIME, '%Y-%m-%d %H:%i') as ts,
+			PRDCT_VALUE as value
+		FROM TB_CTR_TNK_RST
+		WHERE DSTRB_ID IN
+			<foreach item="tag" collection="tagList" open="(" separator="," close=")">
+				#{tag}
+			</foreach>
+			AND PRDCT_TIME IN
+			<foreach item="ptime" collection="prdctTimeList" open="(" separator="," close=")">
+				#{ptime}
+			</foreach>
+			AND PRDCT_TIME = DATE_ADD(RGSTR_TIME, INTERVAL 10 MINUTE)
+		ORDER BY PRDCT_TIME, DSTRB_ID
 	</select>
 
 </mapper>
