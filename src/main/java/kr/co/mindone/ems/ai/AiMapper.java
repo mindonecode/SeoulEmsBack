@@ -8,7 +8,7 @@ package kr.co.mindone.ems.ai;
  * ===========================================================
  * DATE              AUTHOR             NOTE
  * -----------------------------------------------------------
- * 24. 9. 23.        geunwon       최초 생성
+ * 24. 9. 23.        geunwon       최초 생성?
  */
 import org.apache.ibatis.annotations.Mapper;
 
