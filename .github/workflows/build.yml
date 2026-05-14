@@ -12,6 +12,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+      - name: Debug network reachability
+        run: |
+          echo "=== DNS resolve test ==="
+          getent hosts "${{ secrets.host }}" || echo "[FAIL] DNS resolve failed"
+          echo ""
+          echo "=== TCP connect test (5s timeout) ==="
+          nc -zv -w 5 "${{ secrets.host }}" "${{ secrets.port }}" || echo "[FAIL] TCP connect failed"
+          echo ""
+          echo "=== Traceroute (first 10 hops) ==="
+          timeout 15 traceroute -n -m 10 "${{ secrets.host }}" || echo "[INFO] traceroute skipped/failed"
       - name: Deploy
         uses: appleboy/ssh-action@master
         with:
