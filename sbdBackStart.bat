@@ -15,5 +15,5 @@ call gradlew.bat build
 echo gradle build
 powershell -nop -c "& {sleep 10}"
 echo sleep 10 done
-call pm2 start java --name sbd_back -- -jar build/libs/*.jar
+call pm2 start java --name sbd_back -- -jar build/libs/ems-0.0.1-SNAPSHOT.war
 echo pm2 start
