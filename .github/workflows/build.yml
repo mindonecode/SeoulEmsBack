@@ -9,7 +9,7 @@
       runs-on: ubuntu-22.04
       steps:
         - uses: appleboy/ssh-action@master
-      with:
+          with:
           host: ${{ secrets.host }}
           username: ${{ secrets.username }}
           port: ${{ secrets.port }}
