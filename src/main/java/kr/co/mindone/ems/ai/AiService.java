@@ -244,23 +244,57 @@ public class AiService {
     }
 
     /**
-     * 배수지 수위 데이터를 조회하는 메서드
+     * 배수지 수위 추세 데이터를 조회하는 메서드
      * @param hour 조회 기간
-     * @return 시간별 배수지 수위 데이터 리스트
+     * @return 시간별 배수지 수위 추세 데이터 리스트
      */
-    Map<String, List<Map<String, Object>>> selectWaterLevel(Integer hour) {
-		List<HashMap<String, Object>> list = aiMapper.selectWaterLevel(hour);
-		Map<String, List<Map<String, Object>>> listMap = new TreeMap<>();
+    Map<String, Map<String, List<Map<String, Object>>>> selectWaterLevelTrend(Integer hour) {
+		List<HashMap<String, Object>> list = aiMapper.selectWaterLevelTrend(hour);
+		Map<String, Map<String, List<Map<String, Object>>>> returnMap = new TreeMap<>();
 
 		for (HashMap<String, Object> item : list) {
-			String tagName = String.valueOf(item.get("TNK_NM"));
-			List<Map<String, Object>> tagList = listMap.computeIfAbsent(tagName, k -> new ArrayList<>());
+			String tagName = String.valueOf(item.get("TNK_GRP_NM"));
+			Map<String, List<Map<String, Object>>> dateGroup = returnMap.computeIfAbsent(tagName, k -> new LinkedHashMap<>());
 
-			Map<String, Object> dataMap = new HashMap<>(item);
-			dataMap.remove("TNK_NM");
-			tagList.add(dataMap);
+			String ts = String.valueOf(item.get("TS"));
+			String date = String.valueOf(item.get("DATE_GRP"));
+
+			List<Map<String, Object>> dataList = dateGroup.computeIfAbsent(date, k -> new ArrayList<>());
+
+			Map<String, Object> dataMap = new HashMap<>();
+			dataMap.put("TS", ts);
+			dataMap.put("VALUE", item.get("VALUE"));
+			dataList.add(dataMap);
 		}
-        return listMap;
+
+        return returnMap;
+    }
+
+    /**
+     * 배수지 수위 현황 데이터를 조회하는 메서드
+     * @param hour 조회 기간
+     * @return 시간별 배수지 수위 현황 데이터 리스트
+     */
+    Map<String, Map<String, List<Map<String, Object>>>> selectWaterLevelCurrent(Integer hour) {
+		List<HashMap<String, Object>> list = aiMapper.selectWaterLevelCurrent(hour);
+		Map<String, Map<String, List<Map<String, Object>>>> returnMap = new TreeMap<>();
+
+		for (HashMap<String, Object> item : list) {
+			String tagName = String.valueOf(item.get("TNK_GRP_NM"));
+			Map<String, List<Map<String, Object>>> dateGroup = returnMap.computeIfAbsent(tagName, k -> new LinkedHashMap<>());
+
+			String ts = String.valueOf(item.get("TS"));
+			String date = String.valueOf(item.get("DATE_GRP"));
+
+			List<Map<String, Object>> dataList = dateGroup.computeIfAbsent(date, k -> new ArrayList<>());
+
+			Map<String, Object> dataMap = new HashMap<>();
+			dataMap.put("TS", ts);
+			dataMap.put("VALUE", item.get("VALUE"));
+			dataList.add(dataMap);
+		}
+
+        return returnMap;
     }
 
     /**
