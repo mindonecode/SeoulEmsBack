@@ -35,5 +35,6 @@ echo gradle build
 powershell -nop -c "& {sleep 10}"
 echo sleep 10 done
 
-call "C:\Users\hjseok\AppData\Roaming\npm\pm2.cmd" start cmd --name sbd_back -- /c ""%JAVA_EXE%" -jar D:\SBD_Proj\SeoulEmsBack\build\libs\ems-0.0.1-SNAPSHOT.war"
+call "C:\Users\hjseok\AppData\Roaming\npm\pm2.cmd" start "%JAVA_EXE%" --name sbd_back -- -jar "D:\SBD_Proj\SeoulEmsBack\build\libs\ems-0.0.1-SNAPSHOT.war"
+if errorlevel 1 exit /b 1
 echo pm2 start
