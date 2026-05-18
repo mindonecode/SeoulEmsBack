@@ -372,6 +372,51 @@ public class DrvnConfig {
 					log.error("시간 오프셋 {}분 처리 중 오류 발생: {}", i, e.getMessage(), e);
 				}
 			}
+
+			// 5단계 horizon (10/60/120/180/360) 예측 조합 산출 → TB_CTR_PUMPYN_PRDCT_RST
+			// 기존 10분 로직(TB_CTR_PUMPYN_RST) 과 별도 흐름. 차트 미래 segment 용.
+			// gs(고산)/wpp_code 별 특수 결합은 1차 적용 보류 — 일반 그룹만 처리.
+			final int[] HORIZONS = {10, 60, 120, 180, 360};
+			String nowDateTimeForHorizon = LocalDateTime.now().format(formatter);
+			Set<Integer> pumpGrpSet = pumpDstrbIdMap != null
+					? new LinkedHashSet<>(pumpDstrbIdMap.keySet()) : new LinkedHashSet<>();
+			for (int horizonMin : HORIZONS) {
+				for (Integer id : pumpGrpSet) {
+					try {
+						HashMap<String, String> ditrbMap = pumpDstrbIdMap.get(id);
+						if (ditrbMap == null) continue;
+						String flowId = ditrbMap.get("flow");
+						String pressureId = ditrbMap.get("pressure");
+
+						HashMap<String, Object> p = new HashMap<>();
+						p.put("nowDateTime", nowDateTimeForHorizon);
+						p.put("horizonMin", horizonMin);
+
+						p.put("DSTRB_ID", flowId);
+						List<HashMap<String, Object>> flowList = drvnMapper.prdctFlowPressureByHorizon(p);
+						p.put("DSTRB_ID", pressureId);
+						List<HashMap<String, Object>> pressureList = drvnMapper.prdctFlowPressureByHorizon(p);
+
+						if (flowList == null || flowList.isEmpty() || pressureList == null || pressureList.isEmpty()) {
+							continue;
+						}
+						Object flowValObj = flowList.get(0).get("value");
+						Object pressureValObj = pressureList.get(0).get("value");
+						if (flowValObj == null || pressureValObj == null) continue;
+						double flowH = ((Number) flowValObj).doubleValue();
+						double pressureH = ((Number) pressureValObj).doubleValue();
+						if (flowH == 0.0 || pressureH == 0.0) continue;
+						String tsH = (String) flowList.get(0).get("ts");
+						if (tsH == null) continue;
+
+						if (!wpp_code.equals("gs")) {
+							calcOptimalCombForHorizon(flowH, pressureH, id, tsH, horizonMin);
+						}
+					} catch (Exception e) {
+						log.error("horizon {} 분 / pump_grp {} 처리 실패: {}", horizonMin, id, e.getMessage(), e);
+					}
+				}
+			}
 		} catch (Exception e) {
 			log.error("펌프 조합 스케줄러 전체 실패: {}", e.getMessage(), e);
 		}
@@ -5668,5 +5713,244 @@ public class DrvnConfig {
 		return new double[]{avg, count};
 	}
 
+	/**
+	 * 5단계 horizon 예측 조합 산출용 간소화 메서드.
+	 * insertPumpComb (416-3271) 의 "now" 의존 부수효과를 모두 제거하고 핵심 알고리즘만 추출.
+	 * 도시별 짝홀일 펌프 교체(wm/gr) 분기는 포함, 기타 부수효과(raw 수위 read,
+	 * 직전 펌프 사용 조회, 수동 모드 체크, 알람) 미포함.
+	 * INSERT 대상은 TB_CTR_PUMPYN_PRDCT_RST.
+	 */
+	public void calcOptimalCombForHorizon(double flow, double pressure, int pump_grp, String ts, int horizonMin) {
+		try {
+			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+			DateTimeFormatter idxFormatter = DateTimeFormatter.ofPattern("yyMMddHHmm");
+			LocalDateTime dateTime = LocalDateTime.parse(ts, formatter);
+			String rgstrTime = LocalDateTime.now().withSecond(0).withNano(0).format(formatter);
+
+			HashMap<Integer, Double> pumpLevelInfoMap = pumpLevelInfoGrpMap.get(pump_grp);
+			if (pumpLevelInfoMap == null) {
+				log.warn("[horizon] pumpLevelInfoMap null pump_grp={} horizon={}", pump_grp, horizonMin);
+				return;
+			}
+
+			List<HashMap<String, Object>> calList = drvnMapper.selectPumpCombCal();
+			List<HashMap<String, Object>> grpFilteredList;
+			if (wpp_code.equals("gs")) {
+				grpFilteredList = calList.stream()
+						.filter(map -> String.valueOf(map.get("PUMP_GRP")).equals(String.valueOf(pump_grp)))
+						.filter(map -> Integer.parseInt(String.valueOf(map.get("USE_YN"))) == 1)
+						.collect(Collectors.toList());
+			} else {
+				grpFilteredList = calList.stream()
+						.filter(map -> map.get("PUMP_GRP").equals(pump_grp))
+						.collect(Collectors.toList());
+			}
+			if (grpFilteredList.isEmpty()) return;
+
+			Map<String, Integer> newCidxMap = new HashMap<>();
+			java.util.concurrent.atomic.AtomicInteger cidxCounter = new java.util.concurrent.atomic.AtomicInteger(1);
+			grpFilteredList = grpFilteredList.stream()
+					.map(map -> {
+						HashMap<String, Object> newMap = new HashMap<>(map);
+						String key = String.valueOf(map.get("PUMP_COUNT")) + "_" + String.valueOf(map.get("PUMP_PRIORITY"));
+						if (!newCidxMap.containsKey(key)) {
+							newCidxMap.put(key, cidxCounter.getAndIncrement());
+						}
+						newMap.put("C_IDX", newCidxMap.get(key));
+						return newMap;
+					})
+					.collect(Collectors.toList());
+
+			LinkedHashSet<Integer> uniqueCIdx = new LinkedHashSet<>();
+			for (HashMap<String, Object> maps : grpFilteredList) {
+				uniqueCIdx.add((Integer) maps.get("C_IDX"));
+			}
+
+			List<HashMap<String, Object>> pumpList = setPumpList != null ? setPumpList : new ArrayList<>();
+			if (wpp_code.equals("wm")) {
+				pumpList.forEach(map -> map.put("PUMP_TYP", 1));
+			}
+			List<HashMap<String, Object>> grpList;
+			if (wpp_code.equals("gs")) {
+				grpList = pumpList;
+			} else {
+				grpList = pumpList.stream()
+						.filter(map -> map.containsKey("PUMP_GRP") && map.get("PUMP_GRP").equals(pump_grp))
+						.collect(Collectors.toList());
+			}
+			LinkedHashMap<String, Integer> typeMap = new LinkedHashMap<>();
+			for (HashMap<String, Object> map : grpList) {
+				int pump_idx = (int) map.get("PUMP_IDX");
+				int pump_typ = (int) map.get("PUMP_TYP");
+				typeMap.put(String.valueOf(pump_idx), pump_typ);
+			}
+			if (wpp_code.equals("ba") && pump_grp == 5) {
+				if (!uniqueCIdx.isEmpty()) uniqueCIdx.remove(0);
+			}
+
+			double flowSum = 0, pressSum = 0;
+			int cnt = 0;
+			List<Double> targetflowList = new ArrayList<>();
+			List<Double> targetpressList = new ArrayList<>();
+			List<HashMap<String, Object>> collectData = new ArrayList<>();
+			for (int cidx : uniqueCIdx) {
+				List<HashMap<String, Object>> cIdxFilteredList = grpFilteredList.stream()
+						.filter(map -> map.get("C_IDX").equals(cidx))
+						.collect(Collectors.toList());
+				String pump_comb = null;
+				String freq = null;
+				double min_flow = 0, max_flow = 0;
+				HashMap<String, Object> pressureCal = new HashMap<>();
+				for (HashMap<String, Object> map : cIdxFilteredList) {
+					int c_ord = (int) map.get("C_ORD");
+					double fc_val = (double) map.get("FC_VAL");
+					if (c_ord == 1) {
+						pump_comb = (String) map.get("PUMP_COMB");
+						pressureCal = map;
+						min_flow = fc_val;
+					} else {
+						if (map.get("PUMP_COMB") != null) freq = (String) map.get("PUMP_COMB");
+						max_flow = fc_val;
+					}
+				}
+				if (pump_comb == null) continue;
+				List<String> strList = Arrays.stream(pump_comb.split(",")).map(String::trim).collect(Collectors.toList());
+
+				if (wpp_code.equals("wm")) {
+					int wm_day = dateTime.getDayOfMonth();
+					strList = strList.stream().map(str -> {
+						if (wm_day % 2 == 0 && str.equals("1")) return "2";
+						if (wm_day % 2 == 1 && str.equals("2")) return "1";
+						return str;
+					}).collect(Collectors.toList());
+				}
+				if (wpp_code.equals("gr") && pump_grp == 3) {
+					DayOfWeek dayOfWeek = dateTime.getDayOfWeek();
+					int week = dayOfWeek.getValue();
+					HolidayChecker holidayChecker = new HolidayChecker();
+					Boolean passDayBool = holidayChecker.isPassDay(ts);
+					int wm_day = (passDayBool || week >= 6) ? 3 : dateTime.getDayOfMonth();
+					final int finalDay = wm_day;
+					strList = strList.stream().map(str -> {
+						if (finalDay % 2 == 0 && str.equals("11")) return "10";
+						return str;
+					}).collect(Collectors.toList());
+				}
+
+				HashMap<String, Double> freqMap = new HashMap<>();
+				if (freq != null && !freq.trim().isEmpty()) {
+					List<String> freqList = Arrays.stream(freq.split(",")).map(String::trim).collect(Collectors.toList());
+					List<String> combIvtPump = new ArrayList<>();
+					for (String pump : strList) {
+						if (pump == null) break;
+						if (typeMap.get(pump) != null && typeMap.get(pump) == 2) combIvtPump.add(pump);
+					}
+					if (!combIvtPump.isEmpty()) {
+						for (int i = 0; i < combIvtPump.size() && i < freqList.size(); i++) {
+							freqMap.put(combIvtPump.get(i), Double.valueOf(freqList.get(i)));
+						}
+					}
+				}
+
+				double pumpLevel = 0.0;
+				for (String pump_idx : strList) {
+					if (pump_idx.isEmpty()) continue;
+					int idx = Integer.parseInt(pump_idx);
+					Double pumpVal = pumpLevelInfoMap.get(idx);
+					if (pumpVal == null) continue;
+					if (typeMap.get(pump_idx) != null && typeMap.get(pump_idx) == 1) {
+						pumpLevel += pumpVal;
+					} else if (freqMap.containsKey(pump_idx)) {
+						pumpLevel += (freqMap.get(pump_idx) / 60) * 1;
+					}
+				}
+
+				List<HashMap<String, Double>> flowPriList = new ArrayList<>();
+				double flusFlow = (max_flow - min_flow > 1000) ? 10 : 1;
+				for (double f = min_flow; f <= max_flow; f += flusFlow) {
+					HashMap<String, Double> calMap = new HashMap<>();
+					double calPressure = pressureCalValue(f, pressureCal, pump_grp);
+					calMap.put("calPressure", calPressure);
+					calMap.put("calFlow", f);
+					flowPriList.add(calMap);
+					cnt++;
+					flowSum += f;
+					pressSum += calPressure;
+					targetflowList.add(f);
+					targetpressList.add(calPressure);
+				}
+				HashMap<String, Object> collectMap = new HashMap<>();
+				collectMap.put("pumpComb", strList);
+				collectMap.put("freq", freqMap);
+				collectMap.put("pumpLevel", pumpLevel);
+				collectMap.put("combIdx", cidx);
+				collectMap.put("calList", flowPriList);
+				collectData.add(collectMap);
+			}
+
+			if (cnt == 0 || collectData.isEmpty()) return;
+
+			double flowAvg = flowSum / cnt;
+			double pressAvg = pressSum / cnt;
+			double pressStd = calculateStdDev(targetpressList, pressAvg);
+			double flowStd = calculateStdDev(targetflowList, flowAvg);
+			if (pressStd == 0 || flowStd == 0) return;
+
+			int closestPointIndex = -1;
+			double minDistance = Double.MAX_VALUE;
+			for (int i = 0; i < collectData.size(); i++) {
+				@SuppressWarnings("unchecked")
+				List<HashMap<String, Double>> flowPriList = (List<HashMap<String, Double>>) collectData.get(i).get("calList");
+				for (HashMap<String, Double> calMap : flowPriList) {
+					double sCurP = (pressure - pressAvg) / pressStd;
+					double sCurQ = (flow - flowAvg) / flowStd;
+					double sPreP = (calMap.get("calPressure") - pressAvg) / pressStd;
+					double sPreQ = (calMap.get("calFlow") - flowAvg) / flowStd;
+					double dx = Math.abs(sCurP - sPreP);
+					double dy = Math.abs(sCurQ - sPreQ);
+					double distance = Math.sqrt(dx * dx + dy * dy);
+					if (distance < minDistance) {
+						minDistance = distance;
+						closestPointIndex = i;
+					}
+				}
+			}
+			if (closestPointIndex < 0) return;
+
+			@SuppressWarnings("unchecked")
+			List<String> returnComb = (List<String>) collectData.get(closestPointIndex).get("pumpComb");
+			@SuppressWarnings("unchecked")
+			HashMap<String, Double> selectedFreqMap = (HashMap<String, Double>) collectData.get(closestPointIndex).get("freq");
+			Set<String> onSet = new HashSet<>(returnComb);
+
+			String insertIdx = dateTime.format(idxFormatter) + "H" + horizonMin;
+			for (HashMap<String, Object> pumpRow : grpList) {
+				int pump_idx = (int) pumpRow.get("PUMP_IDX");
+				int pump_typ = (int) pumpRow.get("PUMP_TYP");
+				String pumpIdxStr = String.valueOf(pump_idx);
+				HashMap<String, Object> map = new HashMap<>();
+				map.put("opt_idx", optIdxTag + insertIdx);
+				map.put("PUMP_GRP", pump_grp);
+				map.put("PUMP_IDX", pump_idx);
+				map.put("PUMP_TYP", pump_typ);
+				map.put("pump_yn", onSet.contains(pumpIdxStr) ? 1 : 0);
+				double pumpFreq = 0;
+				if (pump_typ == 2 && selectedFreqMap != null && selectedFreqMap.containsKey(pumpIdxStr)) {
+					pumpFreq = selectedFreqMap.get(pumpIdxStr);
+				}
+				map.put("freq", pumpFreq);
+				map.put("rgstrTime", rgstrTime);
+				map.put("ts", ts);
+				map.put("horizonMin", horizonMin);
+				map.put("flow", flow);
+				map.put("pressure", pressure);
+				map.put("pwrPrdct", 0);
+				drvnMapper.insertDrvnPumpYnPrdctData(map);
+			}
+		} catch (Exception e) {
+			log.error("calcOptimalCombForHorizon 실패 pump_grp={} horizon={} ts={}: {}",
+					pump_grp, horizonMin, ts, e.getMessage(), e);
+		}
+	}
 
 }

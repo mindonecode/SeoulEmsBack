@@ -500,6 +500,30 @@ public interface DrvnMapper {
 	List<HashMap<String,Object>> selectPumpRunHistoryByGrp(HashMap<String, Object> param);
 
 	/**
+	 * 윈도 시작(startDate) 직전 각 펌프(PMB_TAG)의 마지막 ON/OFF 상태 시드 조회.
+	 * @param param PUMP_GRP, startDate(Timestamp)
+	 * @return [{TAGNAME, VALUE, PUMP_IDX}]
+	 */
+	List<HashMap<String,Object>> selectPumpLastStateBeforeGrp(HashMap<String, Object> param);
+
+	/**
+	 * 임의 horizon 예측 유량/수압 조회 (TB_CTR_TNK_RST).
+	 * @param param DSTRB_ID, nowDateTime, horizonMin (10/60/120/180/360)
+	 */
+	List<HashMap<String,Object>> prdctFlowPressureByHorizon(HashMap<String, Object> param);
+
+	/**
+	 * 5단계 horizon 펌프 예측 조합 INSERT (TB_CTR_PUMPYN_PRDCT_RST).
+	 */
+	void insertDrvnPumpYnPrdctData(HashMap<String, Object> param);
+
+	/**
+	 * 펌프대수차트 미래 segment 용. 각 horizon 별 최근 산출 결과 반환.
+	 * @param param PUMP_GRP, nowDateTime
+	 */
+	List<HashMap<String,Object>> selectPumpRunCountForecast(HashMap<String, Object> param);
+
+	/**
 	 * 다중 태그 × 다중 시점 실측값 조회 (TB_RAWDATA, 10분 정렬).
 	 * @param param tagList(List<String>), startDate(yyyy-MM-dd HH:mm:00), endDate(yyyy-MM-dd HH:mm:00)
 	 * @return [{tag, ts(yyyy-MM-dd HH:mm), value(Object)}]
