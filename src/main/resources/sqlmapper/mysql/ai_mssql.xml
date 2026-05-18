@@ -1998,28 +1998,22 @@
 			FROM
 				TB_RAWDATA_HOUR rdh
 				JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
-			WHERE
-				pti.IS_ALL = '1'
+			WHERE pti.IS_ALL = '1'
+				AND pti.CLSFC != '오존설비'
 				AND pti.mntr_yn = '1'
 				AND rdh.value != 0
-			<if test='time_type =="h" or time_type =="d"'>
-				<![CDATA[
-					AND rdh.ts >= DATE_SUB(CONCAT(#{start_date}, ' 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts <= CONCAT(#{end_date}, ' 23:59:00')
-				]]>
-			</if>
-			<if test='time_type =="m"'>
-				<![CDATA[
-					AND rdh.ts >= DATE_SUB(CONCAT(#{start_date}, '-01 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts <= CONCAT(#{end_date}, '-31 23:59:00')
-				]]>
-			</if>
-			<if test='time_type =="y"'>
-				<![CDATA[
-					AND rdh.ts >= DATE_SUB(CONCAT(#{start_date}, '-01-01 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts <= CONCAT(#{end_date}, '-12-31 23:59:00')
-				]]>
-			</if>
+				<if test='time_type =="h" or time_type =="d"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, ' 00:00:00'), INTERVAL 1 DAY)
+					AND rdh.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
+				</if>
+				<if test='time_type =="m"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, '-01 00:00:00'), INTERVAL 1 DAY)
+					AND rdh.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
+				</if>
+				<if test='time_type =="y"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, '-01-01 00:00:00'), INTERVAL 1 DAY)
+					AND rdh.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
+				</if>
 		),
 		diff_data AS (
 			SELECT
@@ -2051,29 +2045,23 @@
 			ROUND(SUM(diff_data.use_value), 2) AS value
 		FROM diff_data
 		WHERE 1 = 1
-		<if test='time_type =="h" or time_type =="d"'>
-			<![CDATA[
-				AND diff_data.ts >= CONCAT(#{start_date}, ' 00:00:00')
-				AND diff_data.ts <= CONCAT(#{end_date}, ' 23:59:00')
-			]]>
-		</if>
-		<if test='time_type =="m"'>
-			<![CDATA[
-				AND diff_data.ts >= CONCAT(#{start_date}, '-01 00:00:00')
-				AND diff_data.ts <= CONCAT(#{end_date}, '-31 23:59:00')
-			]]>
-		</if>
-		<if test='time_type =="y"'>
-			<![CDATA[
-				AND diff_data.ts >= CONCAT(#{start_date}, '-01-01 00:00:00')
-				AND diff_data.ts <= CONCAT(#{end_date}, '-12-31 23:59:00')
-			]]>
-		</if>
+			<if test='time_type =="h" or time_type =="d"'>
+				AND diff_data.ts &gt;= CONCAT(#{start_date}, ' 00:00:00')
+				AND diff_data.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
+			</if>
+			<if test='time_type =="m"'>
+				AND diff_data.ts &gt;= CONCAT(#{start_date}, '-01 00:00:00')
+				AND diff_data.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
+			</if>
+			<if test='time_type =="y"'>
+				AND diff_data.ts &gt;= CONCAT(#{start_date}, '-01-01 00:00:00')
+				AND diff_data.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
+			</if>
 		GROUP BY
-		<if test='time_type =="h"'>diff_data.ts</if>
-		<if test='time_type =="d"'>DATE(diff_data.ts)</if>
-		<if test='time_type =="m"'>DATE_FORMAT(diff_data.ts, '%Y-%m')</if>
-		<if test='time_type =="y"'>DATE_FORMAT(diff_data.ts, '%Y')</if>
+			<if test='time_type =="h"'>diff_data.ts</if>
+			<if test='time_type =="d"'>DATE(diff_data.ts)</if>
+			<if test='time_type =="m"'>DATE_FORMAT(diff_data.ts, '%Y-%m')</if>
+			<if test='time_type =="y"'>DATE_FORMAT(diff_data.ts, '%Y')</if>
 		ORDER BY MIN(diff_data.ts)
 	</select>
 
@@ -2084,23 +2072,19 @@
 			MAX(PWI_UNIT) as unit
 		FROM
 			(
-				SELECT ts,
+				select ts,
 					value - LAG(value) OVER(ORDER BY ts) as diff_value,
 					PWI_UNIT
-				FROM
+				from
 					(
-						SELECT date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
+						select date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
 							SUM(ROUND(rdh.VALUE*pti.PWI_UNIT_VALUE,2)) AS value,
 							MAX(pti.PWI_UNIT) AS PWI_UNIT
-						FROM TB_RAWDATA_HOUR rdh
-							JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
-						WHERE pti.IS_ALL = '1' AND pti.mntr_yn = '1' AND rdh.value != 0
-							AND
-									<![CDATA[
-											rdh.ts >= DATE_FORMAT(NOW() - INTERVAL 12 MONTH, '%Y-%m-01 00:00:00')
-										AND
-											rdh.ts <= LAST_DAY(NOW())
-									]]>
+						from TB_RAWDATA_HOUR rdh
+							join TB_PEAK_TAG_INF pti on rdh.tagname = pti.PWI_TAG
+						where pti.IS_ALL = '1' and pti.CLSFC != '오존설비' and pti.mntr_yn = '1' and rdh.value != 0
+							and rdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 12 MONTH, '%Y-%m-01 00:00:00')
+							and rdh.ts &lt;= LAST_DAY(NOW())
 						GROUP BY rdh.ts
 					) a
 			) b
@@ -2156,49 +2140,78 @@
 		rri.TIMEZONE
 	</select> -->
 	<select id="selectPwrSumList" parameterType="hashMap" resultType="hashMap">
+		WITH raw_data AS (
+			SELECT
+				rdh.tagname,
+				rdh.ts,
+				rdh.value,
+				pti.PWQ_UNIT_VALUE,
+				LAG(rdh.value) OVER (PARTITION BY rdh.tagname ORDER BY rdh.ts) AS prev_value
+			FROM
+				TB_RAWDATA_HOUR rdh
+				JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
+			WHERE
+				pti.IS_ALL = '1' AND pti.MNTR_YN = '1' AND pti.CLSFC != '오존설비'
+				<if test='range == "dayAgo"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 23:59:59')
+				</if>
+				<if test='range == "day"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(CURDATE(), ' 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(CURDATE(), ' 23:59:59')
+				</if>
+				<if test='range == "week"'>
+					AND rdh.ts &gt;= DATE_SUB(ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 0), INTERVAL 1 HOUR) 
+					AND rdh.ts &lt;= ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 6)
+				</if>
+				<if test='range == "month"'>
+					AND rdh.ts &gt;= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(LAST_DAY(CURDATE()), ' 23:59:59')
+				</if>
+				<if test='range == "year"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(YEAR(CURDATE()), '-01-01 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(YEAR(CURDATE()), '-12-31 23:59:59')
+				</if>
+		),
+		diff_data AS (
+			SELECT
+				raw_data.ts,
+				CASE
+					WHEN raw_data.prev_value IS NULL THEN 0
+					WHEN raw_data.value &lt; raw_data.prev_value THEN 0
+					ELSE (raw_data.value - raw_data.prev_value) * raw_data.PWQ_UNIT_VALUE
+				END AS use_value
+			FROM raw_data
+		)
 		SELECT
-			round(sum(rdh.value * pti.PWQ_UNIT_VALUE), 2) AS value,
-			<if test='range == "dayAgo"'>
-				'dayAgo' AS 'range',
-			</if>
-			<if test='range == "day"'>
-				'day' AS 'range',
-			</if>
-			<if test='range == "week"'>
-				'week' AS 'range',
-			</if>
-			<if test='range == "month"'>
-				'month' AS 'range',
-			</if>
-			<if test='range == "year"'>
-				'year' AS 'range',
-			</if>
-			rri.TIMEZONE as 'timezone',
-			rri.ELCTR_RATE as 'rate',
-			ROUND(sum(rdh.value * pti.PWQ_UNIT_VALUE *rri.ELCTR_RATE), 2) AS cost
+			ROUND(SUM(diff_data.use_value), 2) AS value,
+			<if test='range == "dayAgo"'>'dayAgo' AS 'range',</if>
+			<if test='range == "day"'>'day' AS 'range',</if>
+			<if test='range == "week"'>'week' AS 'range',</if>
+			<if test='range == "month"'>'month' AS 'range',</if>
+			<if test='range == "year"'>'year' AS 'range',</if>
+			rri.TIMEZONE AS 'timezone',
+			rri.ELCTR_RATE AS 'rate',
+			ROUND(SUM(diff_data.use_value * rri.ELCTR_RATE), 2) AS cost
 		FROM
-			TB_RAWDATA_HOUR_INGRT rdh, 
-			TB_RT_RATE_INF rri, 
-			TB_PEAK_TAG_INF pti
-		WHERE rdh.tagname = pti.PWQ_TAG AND pti.IS_ALL = '1' and pti.mntr_yn = '1'
-			AND SUBstring(rdh.ts,12,2) = rri.STN_TM and rri.RATE_IDX ='1' and rri.MNTH = month(CURDATE())
+			diff_data
+			JOIN TB_RT_RATE_INF rri ON SUBSTRING(diff_data.ts, 12, 2) = rri.STN_TM
+		WHERE
+			rri.RATE_IDX = '1' AND rri.MNTH = MONTH(CURDATE())
 			<if test='range == "dayAgo"'>
-				AND rdh.ts BETWEEN CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00')
-				AND CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 23:59:59')
+				AND diff_data.ts &gt;= CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00')
 			</if>
 			<if test='range == "day"'>
-				AND rdh.ts BETWEEN CONCAT(CURDATE(), ' 00:00:00')
-				AND CONCAT(CURDATE(), ' 23:59:59')
+				AND diff_data.ts &gt;= CONCAT(CURDATE(), ' 00:00:00')
 			</if>
 			<if test='range == "week"'>
-				<![CDATA[AND rdh.ts >= ADDDATE( CURDATE(), - WEEKDAY(CURDATE()) + 0 ) AND rdh.ts <= ADDDATE( CURDATE(), - WEEKDAY(CURDATE()) + 6 )]]>
+				AND diff_data.ts &gt;= ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 0)
 			</if>
 			<if test='range == "month"'>
-				AND rdh.ts BETWEEN DATE_FORMAT(CURDATE(), '%Y-%m-01') AND LAST_DAY(CURDATE())
+				AND diff_data.ts &gt;= DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00')
 			</if>
 			<if test='range == "year"'>
-				AND rdh.ts BETWEEN CONCAT(YEAR(CURDATE()), '-01-01 00:00:00')
-				AND CONCAT(YEAR(CURDATE()), '-12-31 23:59:59')
+				AND diff_data.ts &gt;= CONCAT(YEAR(CURDATE()), '-01-01 00:00:00')
 			</if>
 		GROUP BY rri.TIMEZONE
 	</select>
