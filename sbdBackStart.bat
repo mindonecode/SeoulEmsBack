@@ -2,7 +2,8 @@
 cd /d D:\SBD_Proj\SeoulEmsBack\
 
 set JAVA_HOME=C:\Program Files\Java\jdk-17
-set PATH=%JAVA_HOME%\bin;%PATH%
+set NODE_HOME=D:\Program Files\nodejs
+set PATH=%JAVA_HOME%\bin;%NODE_HOME%;%PATH%
 
 echo ===== ENV CHECK START =====
 echo JAVA_HOME=%JAVA_HOME%
