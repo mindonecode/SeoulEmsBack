@@ -1,6 +1,9 @@
 @echo on
 cd /d D:\SBD_Proj\SeoulEmsBack\
 
+set JAVA_HOME=C:\Program Files\Java\jdk-17
+set PATH=%JAVA_HOME%\bin;%PATH%
+
 echo ===== ENV CHECK START =====
 echo JAVA_HOME=%JAVA_HOME%
 where java
