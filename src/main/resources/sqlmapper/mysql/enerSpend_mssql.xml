@@ -216,29 +216,30 @@
 				<if test="tag_type == 'PWI_TAG'">ROUND(b.value * c.PWI_UNIT_VALUE, 2) as value</if>
 				<if test="tag_type != 'PWI_TAG'">b.value as value</if>
 			from TB_RAWDATA_HOUR b
-				<if test="tag_type == 'PWI_TAG'">
-					,
-					TB_PEAK_TAG_INF c
-				</if>
+				<if test="tag_type == 'PWI_TAG'">, TB_PEAK_TAG_INF c</if>
 			where
 				<if test='time_type == "h" or time_type == "d"'>
-					<![CDATA[b.ts >= CONCAT(#{start_date}, ' 00:00:00') AND b.ts <= CONCAT(#{end_date}, ' 23:59:00')]]>
+					b.ts &gt;= CONCAT(#{start_date}, ' 00:00:00') AND b.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
 				</if>
 				<if test='time_type == "m"'>
-					<![CDATA[b.ts >= CONCAT(#{start_date}, '-01 00:00:00') AND b.ts <= CONCAT(#{end_date}, '-31 23:59:00')]]>
+					b.ts &gt;= CONCAT(#{start_date}, '-01 00:00:00') AND b.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
 				</if>
 				<if test='time_type == "y"'>
-					<![CDATA[b.ts >= CONCAT(#{start_date}, '-01-01 00:00:00') AND b.ts <= CONCAT(#{end_date}, '-12-31 23:59:00')]]>
+					b.ts &gt;= CONCAT(#{start_date}, '-01-01 00:00:00') AND b.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
 				</if>
 				and b.tagname IN (
 					select
-					<if test="tag_type == 'PMB_TAG'">PMB_TAG</if>
-					<if test="tag_type == 'PWI_TAG'">PWI_TAG</if>
-					<if test="tag_type == 'PRI_TAG'">PRI_D_TAG</if>
-					<if test="tag_type == 'SPI_TAG'">SPI_TAG</if>
+						<if test="tag_type == 'PMB_TAG'">PMB_TAG</if>
+						<if test="tag_type == 'PWI_TAG'">PWI_TAG</if>
+						<if test="tag_type == 'PRI_TAG'">PRI_D_TAG</if>
+						<if test="tag_type == 'SPI_TAG'">SPI_TAG</if>
 					from TB_CTR_PRF_PUMPMST_INF
 				)
-				<if test="tag_type == 'PWI_TAG'">AND b.tagname = c.PWI_TAG</if>
+				<if test="tag_type == 'PWI_TAG'">
+					and b.tagname = c.PWI_TAG 
+					and c.CLSFC = '송수동' 
+					and c.IS_ALL = '0'
+				</if>
 			group by
 				<if test='time_type == "h"'>b.ts</if>
 				<if test='time_type == "d"'>DATE(b.ts)</if>
