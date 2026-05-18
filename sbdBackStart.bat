@@ -1,6 +1,15 @@
 @echo on
 cd /d D:\SBD_Proj\SeoulEmsBack\
 
+echo ===== ENV CHECK START =====
+echo JAVA_HOME=%JAVA_HOME%
+where java
+where javac
+java -version
+javac -version
+call gradlew.bat --version
+echo ===== ENV CHECK END =====
+
 git reset --hard
 echo git reset
 git pull origin master
