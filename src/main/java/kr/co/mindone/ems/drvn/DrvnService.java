@@ -5556,11 +5556,10 @@ public class DrvnService {
 			LocalDateTime nowHour = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0);
 			long startMs = java.sql.Timestamp.valueOf(nowHour).getTime() - 1440L * 60_000L;
 			long nowMs = System.currentTimeMillis();
-			// 차트 우측 끝(= 분 단위 now + futureMinutes=420) — 마지막 segment 가 여기까지 확장.
-			// 프론트 FUTURE_MIN(=420) 과 매칭. 360 으로 두면 6h horizon 의 prdctTime 이
-			// 우측 끝과 겹쳐 segment 너비 0 → minimum-width bump → 직전 horizon 과 시각 충돌.
-			// 60분 padding 으로 6h segment 가 plateau 너비를 확보.
-			long rightEdgeMin = (nowMs - startMs) / 60_000L + 420L;
+			// 차트 우측 끝(= 분 단위 now + 360분) — 6시간(=HORIZON=360) 컷오프.
+			// HORIZON=360 segment 는 startMin == endMin 으로 너비 0 이 되어 아래 chained 빌드에서 자동 제외됨.
+			// 따라서 직전 horizon(=180) segment 의 endMin 이 HORIZON=360 의 prdctTime(=now+6h) 까지 plateau 로 확장된다.
+			long rightEdgeMin = (nowMs - startMs) / 60_000L + 360L;
 
 			// 1차 패스: 각 horizon 의 (centerMin, weighted, prdctTime, rgstrMs) 수집
 			List<HashMap<String, Object>> pending = new ArrayList<>();
@@ -5628,6 +5627,9 @@ public class DrvnService {
 				long end = (i + 1 < pending.size())
 						? ((Number) pending.get(i + 1).get("centerMin")).longValue()
 						: rightEdgeMin;
+				// 옵션 B: 너비 0 segment 제외. 마지막 HORIZON=360 의 prdctTime 이
+				// rightEdgeMin(=now+6h) 과 겹쳐 start == end 가 되면 표시 의미가 없으므로 skip.
+				if (end <= start) continue;
 				seg.put("startMin", start);
 				seg.put("endMin", end);
 				seg.remove("centerMin");

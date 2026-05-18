@@ -2726,4 +2726,86 @@
 		ORDER BY PRDCT_TIME, DSTRB_ID
 	</select>
 
+	<!--
+	  ===========================================================
+	  10분 주기 예측/실측 유량·펌프조합 스냅샷 (백엔드 분석용, 화면 미노출)
+	  - 적재: DrvnConfig.scheduleFlowCombSnapshotTask
+	  - 테이블: TB_PUMP_FLOW_COMB_SNAPSHOT (tb_pump_flow_comb_snapshot.sql)
+	  ===========================================================
+	-->
+	<!--
+	  예측 유량: TB_CTR_TNK_RST 에서 PRDCT_TIME = rgstr_time + 10분 인 예측값을 가져옴.
+	  예) rgstr_time=14:00 → PRDCT_TIME=14:10 시점의 예측 유량.
+	  기존 prdctFlowPressure 와 동일 로직, ROUND(.,1) 적용.
+	-->
+	<select id="selectLatestPredictedFlowTnk" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			ROUND(tctr.PRDCT_VALUE, 1) AS prdct_flow,
+			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time
+		FROM TB_CTR_TNK_RST tctr
+		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
+			AND tctr.RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
+				WHERE UPPER(DSTRB_ID) = UPPER(#{dstrb_id})
+					AND RGSTR_TIME &lt;= #{rgstr_time}
+			)
+			AND tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 MINUTE)
+		LIMIT 1
+	</select>
+
+	<!--
+	  예측 펌프 조합: TB_CTR_PUMPYN_RST 의 최신 RGSTR_TIME (≤ rgstr_time) 에서 PUMP_YN=1 인 PUMP_IDX CSV.
+	-->
+	<select id="selectLatestPredictedComb" parameterType="hashmap" resultType="String">
+		SELECT GROUP_CONCAT(CASE WHEN t.PUMP_YN = 1 THEN t.PUMP_IDX END ORDER BY t.PUMP_IDX SEPARATOR ',') AS prdct_comb
+		FROM TB_CTR_PUMPYN_RST t
+		WHERE t.PUMP_GRP = #{pump_grp}
+			AND t.RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_PUMPYN_RST
+				WHERE PUMP_GRP = #{pump_grp}
+					AND RGSTR_TIME &lt;= #{rgstr_time}
+			)
+	</select>
+
+	<select id="selectLatestActualFlow" parameterType="hashmap" resultType="hashmap">
+		SELECT DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') AS ts, tr.VALUE AS value
+		FROM TB_RAWDATA tr, TB_CTR_PRF_PUMPMST_INF tcppi
+		WHERE tr.TAGNAME = tcppi.FRI_TAG
+			AND tcppi.PUMP_GRP = #{pump_grp}
+			AND tr.TS &lt;= #{rgstr_time}
+			AND tr.TS &gt; DATE_SUB(#{rgstr_time}, INTERVAL 10 MINUTE)
+		ORDER BY tr.TS DESC
+		LIMIT 1
+	</select>
+
+	<select id="selectLatestActualComb" parameterType="hashmap" resultType="String">
+		SELECT GROUP_CONCAT(t.PUMP_IDX ORDER BY t.PUMP_IDX SEPARATOR ',') AS actl_comb
+		FROM (
+			SELECT cppi.PUMP_IDX, rd.value
+			FROM TB_RAWDATA rd
+			JOIN TB_CTR_PRF_PUMPMST_INF cppi ON rd.TAGNAME = cppi.PMB_TAG
+			WHERE cppi.PUMP_GRP = #{pump_grp}
+				AND rd.TS = (
+					SELECT MAX(sub.TS) FROM TB_RAWDATA sub
+					WHERE sub.TAGNAME = cppi.PMB_TAG
+						AND sub.TS &lt;= #{rgstr_time}
+						AND sub.TS &gt; DATE_SUB(#{rgstr_time}, INTERVAL 10 MINUTE)
+				)
+		) t
+		WHERE t.value = 1
+	</select>
+
+	<insert id="insertFlowCombSnapshot" parameterType="hashmap">
+		INSERT INTO TB_PUMP_FLOW_COMB_SNAPSHOT
+			(RGSTR_TIME, PRDCT_TIME, PUMP_GRP, PRDCT_FLOW, ACTL_FLOW, PRDCT_COMB, ACTL_COMB)
+		VALUES
+			(#{rgstr_time}, #{prdct_time}, #{pump_grp}, #{prdct_flow}, #{actl_flow}, #{prdct_comb}, #{actl_comb})
+		ON DUPLICATE KEY UPDATE
+			PRDCT_TIME = #{prdct_time},
+			PRDCT_FLOW = #{prdct_flow},
+			ACTL_FLOW  = #{actl_flow},
+			PRDCT_COMB = #{prdct_comb},
+			ACTL_COMB  = #{actl_comb}
+	</insert>
+
 </mapper>

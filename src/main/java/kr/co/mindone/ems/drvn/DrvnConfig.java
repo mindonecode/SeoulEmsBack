@@ -5725,7 +5725,12 @@ public class DrvnConfig {
 			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 			DateTimeFormatter idxFormatter = DateTimeFormatter.ofPattern("yyMMddHHmm");
 			LocalDateTime dateTime = LocalDateTime.parse(ts, formatter);
-			String rgstrTime = LocalDateTime.now().withSecond(0).withNano(0).format(formatter);
+			// RGSTR_TIME 을 10분 정각 단위로 floor (예: 13:47:30 → 13:40).
+			// 30초 주기로 호출되어도 같은 10분 안의 산출은 PK 충돌로 ON DUPLICATE KEY UPDATE 되어
+			// 결과적으로 TB_CTR_PUMPYN_PRDCT_RST 에는 :00/:10/:20/... 정각 행만 남는다.
+			LocalDateTime nowMin = LocalDateTime.now().withSecond(0).withNano(0);
+			LocalDateTime rgstrAligned = nowMin.withMinute((nowMin.getMinute() / 10) * 10);
+			String rgstrTime = rgstrAligned.format(formatter);
 
 			HashMap<Integer, Double> pumpLevelInfoMap = pumpLevelInfoGrpMap.get(pump_grp);
 			if (pumpLevelInfoMap == null) {
@@ -5950,6 +5955,93 @@ public class DrvnConfig {
 		} catch (Exception e) {
 			log.error("calcOptimalCombForHorizon 실패 pump_grp={} horizon={} ts={}: {}",
 					pump_grp, horizonMin, ts, e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * 10분 주기 예측/실측 유량·펌프조합 스냅샷 (TB_PUMP_FLOW_COMB_SNAPSHOT 적재).
+	 * - 화면 미노출, 분석용 로그 테이블.
+	 * - RGSTR_TIME : 등록 시각 (10분 경계, 예 14:00).
+	 * - PRDCT_TIME : 예측 대상 시각 = RGSTR_TIME + 10분 (예 14:10).
+	 * - ACTL_FLOW / ACTL_COMB : RGSTR_TIME 시점 실측.
+	 * - PRDCT_FLOW / PRDCT_COMB : PRDCT_TIME 시점 예측 (TB_CTR_TNK_RST 기반).
+	 * - pump_grp 별로 1행씩 INSERT (그룹 N개 → 10분당 N행 누적).
+	 */
+	@Scheduled(cron = "0 0/10 * * * *")
+	public void scheduleFlowCombSnapshotTask() {
+		if (pumpDstrbIdMap == null || pumpDstrbIdMap.isEmpty()) {
+			log.warn("[flow-comb-snapshot] pumpDstrbIdMap 미초기화 — skip");
+			return;
+		}
+
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		LocalDateTime nowAligned = LocalDateTime.now()
+				.withSecond(0)
+				.withNano(0);
+		nowAligned = nowAligned.withMinute((nowAligned.getMinute() / 10) * 10);
+		String rgstrTime = nowAligned.format(formatter);
+		String prdctTime = nowAligned.plusMinutes(10).format(formatter);
+
+		log.info("=== [flow-comb-snapshot] rgstrTime={} prdctTime={} ===", rgstrTime, prdctTime);
+
+		for (Integer pumpGrp : pumpDstrbIdMap.keySet()) {
+			try {
+				HashMap<String, String> ditrbMap = pumpDstrbIdMap.get(pumpGrp);
+				String flowDstrbId = (ditrbMap != null) ? ditrbMap.get("flow") : null;
+
+				HashMap<String, Object> param = new HashMap<>();
+				param.put("pump_grp", pumpGrp);
+				param.put("rgstr_time", rgstrTime);
+				param.put("dstrb_id", flowDstrbId);
+
+				// 예측 유량: TB_CTR_TNK_RST 에서 PRDCT_TIME = RGSTR_TIME+10분 (예: 14:00 → 14:10).
+				Double prdctFlow = null;
+				if (flowDstrbId != null && !flowDstrbId.isEmpty()) {
+					HashMap<String, Object> prdctRow = drvnMapper.selectLatestPredictedFlowTnk(param);
+					if (prdctRow != null) {
+						Object pf = prdctRow.get("prdct_flow");
+						if (pf instanceof Number) prdctFlow = ((Number) pf).doubleValue();
+						else if (pf != null) {
+							try { prdctFlow = Double.parseDouble(pf.toString()); } catch (NumberFormatException ignore) {}
+						}
+					}
+				} else {
+					log.warn("[flow-comb-snapshot] grp={} flow DSTRB_ID 미정의 — prdctFlow=null", pumpGrp);
+				}
+
+				// 예측 조합: TB_CTR_PUMPYN_RST 최신 RGSTR_TIME (≤ rgstrTime) 의 ON 펌프 IDX CSV.
+				String prdctComb = drvnMapper.selectLatestPredictedComb(param);
+
+				// 실측 유량: rgstrTime(=14:00) 직전 10분 윈도우의 최근 FRI_TAG 값.
+				HashMap<String, Object> actlRow = drvnMapper.selectLatestActualFlow(param);
+				Double actlFlow = null;
+				if (actlRow != null) {
+					Object v = actlRow.get("value");
+					if (v instanceof Number) actlFlow = ((Number) v).doubleValue();
+					else if (v != null) {
+						try { actlFlow = Double.parseDouble(v.toString()); } catch (NumberFormatException ignore) {}
+					}
+				}
+
+				// 실측 조합: rgstrTime 시점의 PMB_TAG ON 펌프 CSV.
+				String actlComb = drvnMapper.selectLatestActualComb(param);
+
+				HashMap<String, Object> insertParam = new HashMap<>();
+				insertParam.put("rgstr_time", rgstrTime);
+				insertParam.put("prdct_time", prdctTime);
+				insertParam.put("pump_grp", pumpGrp);
+				insertParam.put("prdct_flow", prdctFlow);
+				insertParam.put("actl_flow", actlFlow);
+				insertParam.put("prdct_comb", prdctComb);
+				insertParam.put("actl_comb", actlComb);
+				drvnMapper.insertFlowCombSnapshot(insertParam);
+
+				log.info("[flow-comb-snapshot] grp={} prdctFlow={} actlFlow={} prdctComb={} actlComb={}",
+						pumpGrp, prdctFlow, actlFlow, prdctComb, actlComb);
+			} catch (Exception e) {
+				log.error("[flow-comb-snapshot] 실패 grp={} rgstrTime={}: {}",
+						pumpGrp, rgstrTime, e.getMessage(), e);
+			}
 		}
 	}
 
