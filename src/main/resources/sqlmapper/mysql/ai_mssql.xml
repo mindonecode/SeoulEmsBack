@@ -1916,8 +1916,8 @@
 				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 WEEK))
 			)
 			AND (
-				(tgi.TNK_NM = '구리' AND rd.VALUE &gt;= 1.5)
-				OR (tgi.TNK_NM != '구리' AND rd.VALUE &gt;= 3)
+				(tgi.TNK_GRP_NM = '구리' AND rd.VALUE &gt;= 1.5)
+				OR (tgi.TNK_GRP_NM != '구리' AND rd.VALUE &gt;= 3)
 			)
 		GROUP BY tgi.TNK_GRP_NM, DATE_GRP, rd.TS
 		ORDER BY rd.TS ASC
