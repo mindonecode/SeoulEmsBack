@@ -174,8 +174,8 @@ public class EnerSpendService {
 	 * @return 요금제정보에 따른 전력요금
 	 */
 	List<HashMap<String, Object>> selectRateInfo(HashMap<String, Object> map) {
-		String mnth = LocalDate.now().format(DateTimeFormatter.ofPattern("MM"));
-		return enerSpendMapper.selectRateInfo(map, mnth);
+		//String mnth = LocalDate.now().format(DateTimeFormatter.ofPattern("MM"));
+		return enerSpendMapper.selectRateInfo(map);
 	}
 
 	/**

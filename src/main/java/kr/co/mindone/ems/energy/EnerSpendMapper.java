@@ -123,7 +123,7 @@ public interface EnerSpendMapper {
 	 * @param map 조회에 필요한 파라미터
 	 * @return 요금제 상세 정보 리스트
 	 */
-	List<HashMap<String, Object>> selectRateInfo(HashMap<String, Object> map, String mnth);
+	List<HashMap<String, Object>> selectRateInfo(HashMap<String, Object> map);
 
 	/**
 	 * 시설의 피크 값을 조회하는 메서드
