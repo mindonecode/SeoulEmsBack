@@ -3152,9 +3152,13 @@ public class DrvnConfig {
 			//     - 공릉 or 북악 중 하나라도 도달 불가 → +1단계
 			//     - 공릉 & 북악 모두 도달 가능       → −1단계
 			//
-			//   [중간부하 M]
-			//     - 공릉 & 북악 모두 수위 > 4m → −1단계
-			//     - 하나라도 수위 ≤ 4m         → +1단계
+			//   [중간부하 M]  최대부하 H 버팀 가능성 판정 (추세 기반 예측):
+			//     1) 최근 5분 변화량: delta = activeAvg(now) − activeAvg(now−5min)  (상승+, 하락−, 변화없음 0)
+			//        delta == 0 또는 활성 평균 0이면 5분씩 거슬러 최대 60분까지 탐색
+			//     2) 시간당 수위변화율 ratePerHour = delta / stepMin × 60  (m/h, 사진의 "×12"는 stepMin=5 케이스)
+			//     3) 22시 예상수위 = curLevel + ratePerHour × remainHours  (remainHours = (오늘 22:00 − now), now≥22:00이면 0)
+			//     4) 두 곳 모두 22시 예상수위 ≥ 4m 유지 가능 → −1단계
+			//        한 곳이라도 유지 불가(또는 변화량 탐색 60분 실패) → +1단계
 			//
 			//   [최대부하 H]
 			//     - 공릉 & 북악 모두 수위 > 4m → #1 (최소대수 조합) 고정
@@ -3229,13 +3233,36 @@ public class DrvnConfig {
 							seoulGnTarget, gnReachable, seoulBaTarget, baReachable);
 
 				} else if ("M".equals(seoulLoad)) {
-					if (gnLevel > seoulMhThreshold && baLevel > seoulMhThreshold) {
+					// 22시까지 두 곳 모두 ≥ seoulMhThreshold 유지 가능한가? (추세 기반 예측)
+					double[] gnSustain = predict22LevelSeoul(seoulGnTags, gnLevel, dateTime);
+					double[] baSustain = predict22LevelSeoul(seoulBaTags, baLevel, dateTime);
+					double gnPred = gnSustain[0];  // 22시 예상수위 (NaN = 변화량 탐색 실패)
+					double baPred = baSustain[0];
+					double gnRate = gnSustain[1];
+					double baRate = baSustain[1];
+					int    gnStep = (int) gnSustain[2];
+					int    baStep = (int) baSustain[2];
+					boolean gnOk = !Double.isNaN(gnPred) && gnPred >= seoulMhThreshold;
+					boolean baOk = !Double.isNaN(baPred) && baPred >= seoulMhThreshold;
+
+					if (gnOk && baOk) {
 						seoulDelta = -1;
-						adjReason  = "M: 둘다 수위>" + seoulMhThreshold + "m";
+						adjReason  = "M: 둘다 22시예상≥" + seoulMhThreshold + "m"
+								+ " (gn=" + String.format("%.3f", gnPred)
+								+ ", ba=" + String.format("%.3f", baPred) + ")";
 					} else {
 						seoulDelta = +1;
-						adjReason  = "M: 하나라도 수위≤" + seoulMhThreshold + "m";
+						adjReason  = "M: 한곳이상 22시예상<" + seoulMhThreshold + "m 또는 탐색실패"
+								+ " (gn=" + (Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred))
+								+ ", ba=" + (Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)) + ")";
 					}
+					logger.info("[SEOUL/M] ts={} pump_grp={} gn(cur={}, rate={}m/h, step={}m, pred22={}) ba(cur={}, rate={}m/h, step={}m, pred22={}) th={}m",
+							ts, pump_grp,
+							String.format("%.3f", gnLevel), String.format("%.4f", gnRate), gnStep,
+							(Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred)),
+							String.format("%.3f", baLevel), String.format("%.4f", baRate), baStep,
+							(Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)),
+							seoulMhThreshold);
 				} else {  // "H" 최대부하
 					if (gnLevel > seoulMhThreshold && baLevel > seoulMhThreshold) {
 						forceFirstComb = true;
@@ -5679,6 +5706,52 @@ public class DrvnConfig {
 		double optLevelMinute = (optLevel / levelPlus) * 60.0;
 		double totalScore     = curScore + optLevelMinute;
 		return totalScore < optMinute;
+	}
+
+	/**
+	 * [Seoul/Dev · 중간부하 M] 22시(최대부하 종료 시각) 예상 수위 산출.
+	 *
+	 * 알고리즘 (사진 "중간부하 M" 정책):
+	 *   1) 최근 5분 활성 평균 변화량 측정. step ∈ {5,10,...,60}분을 차례로 시도해 첫 유효 값 채택.
+	 *      - 활성 평균 개수가 0인 시점이 포함되면 다음 step 으로 진행
+	 *      - delta == 0 이어도 다음 step 으로 진행 (변화 추세 탐색)
+	 *      - 60분까지 못 찾으면 22시 예상수위 NaN 반환 → 호출부가 "버팀 불가"로 처리
+	 *   2) 시간당 변화율 ratePerHour = delta / stepMin × 60 (m/h). 상승 +, 하락 −, 변화없음 0.
+	 *   3) remainHours = max(0, (오늘 22:00 − now)). now ≥ 22:00 이면 0 으로 폴백.
+	 *   4) 22시 예상수위 = curLevel + ratePerHour × remainHours.
+	 *
+	 * @param tags      수위 TAG 배열 (공릉 또는 북악)
+	 * @param curLevel  현재 활성 평균 수위 (호출부에서 이미 산출한 값 재사용)
+	 * @param dateTime  현재 시각
+	 * @return double[3] = {22시 예상수위(NaN=탐색실패), ratePerHour(m/h, 실패시 0), 채택 stepMin(실패시 0)}
+	 */
+	private double[] predict22LevelSeoul(String[] tags, double curLevel, LocalDateTime dateTime) {
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		final int maxBack = 60;
+		double rate = 0.0;
+		int stepUsed = 0;
+		boolean found = false;
+		for (int stepMin = 5; stepMin <= maxBack; stepMin += 5) {
+			LocalDateTime nowT  = dateTime;
+			LocalDateTime prevT = dateTime.minusMinutes(stepMin);
+			double[] n = avgActiveSeoulWaterLevel(tags, nowT.format(formatter),  seoulActiveThreshold);
+			double[] p = avgActiveSeoulWaterLevel(tags, prevT.format(formatter), seoulActiveThreshold);
+			if (n[1] == 0 || p[1] == 0) continue;          // 활성 평균 비정상 → 다음 step
+			double delta = n[0] - p[0];
+			if (Math.abs(delta) <= 1e-9) continue;          // 변화 없음 → 다음 step
+			rate = delta / (double) stepMin * 60.0;         // m/h
+			stepUsed = stepMin;
+			found = true;
+			break;
+		}
+		if (!found) {
+			return new double[]{Double.NaN, 0.0, 0};        // 탐색 실패 → 버팀 불가
+		}
+		LocalDateTime endAt = dateTime.toLocalDate().atTime(22, 0);
+		long remainSec = Duration.between(dateTime, endAt).getSeconds();
+		double remainHours = Math.max(0.0, remainSec / 3600.0);
+		double pred = curLevel + rate * remainHours;
+		return new double[]{pred, rate, stepUsed};
 	}
 
 	/**
