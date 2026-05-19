@@ -4942,7 +4942,7 @@ public class DrvnService {
 	public void setPumpListYn(List<HashMap<String, Object>> updateList) {
 		for(HashMap<String, Object> map:updateList){
 			drvnMapper.setPumpListYn(map);
-
+			drvnMapper.setPumpUseYn(map);
 		}
 	}
 
@@ -5081,7 +5081,11 @@ public class DrvnService {
 			calParam.put("pump_priority", pumpPriority);
 			
 			List<HashMap<String, Object>> getGrpCombCal = drvnMapper.getGroupPumpCal(calParam);
-			int countIdx = (int) getGrpCombCal.get(0).get("COUNT_IDX");
+			int countIdx = 0;
+			 
+			if(getGrpCombCal != null && !getGrpCombCal.isEmpty()) {
+				if ((int) getGrpCombCal.get(0).get("C_ORD") == 1) countIdx = (int) getGrpCombCal.get(0).get("COUNT_IDX");
+			}
 			
 			drvnMapper.updatePumpComb(pumpIDX.toString(), countIdx);
 		}
@@ -5409,36 +5413,74 @@ public class DrvnService {
 	}
 
 	/**
-	 * 최근 24시간 펌프 가동대수 시계열 (10분 버킷, 가중치 적용)
+	 * 24시간 펌프 가동대수 시계열 (10분 스냅샷, 가중치 적용)
 	 *
-	 * <p>각 10분 버킷에서 PUMP_IDX 별로 ON 비율(0~1)을 구하고,
-	 * application properties 의 {@code dstrb.pump.level} 가중치를 곱해 합산한다.
-	 * (PUMP_IDX 1, 7 = 0.5대 / 그 외 = 1대)</p>
+	 * <p>10분 단위로 144개 버킷을 만들고, 각 버킷 끝 시점까지 도착한 PMB 샘플로
+	 * 펌프별 ON/OFF 상태(currentState)를 갱신한 뒤, 가중치 합을 산출한다.
+	 * 평균이 아닌 "그 10분 끝 시점의 RAWDATA 그대로의 가동상태" → 평균으로 깎이지 않고
+	 * 다음 10분 경계에서 변경이 그대로 반영됨.
+	 * (application properties {@code dstrb.pump.level} 가중치: PUMP_IDX 1, 7 = 0.5대 / 그 외 = 1대)</p>
 	 *
 	 * @param pumpGrp 펌프 그룹 (서울 송수펌프는 1)
-	 * @return 144개 버킷의 [startMin(0~1440), endMin, value] 리스트. 0분 = 24시간 전, 1440분 = 현재
+	 * @param daysAgo 기준 시각을 현재로부터 며칠 전으로 이동. 0=현재, 1=1일전, 7=1주전.
+	 *                윈도 = [now - daysAgo*24h - 24h, now - daysAgo*24h]
+	 * @return Map {
+	 *   buckets : 144개 [startMin(0~1440), endMin, value] (0분 = 윈도 시작, 1440분 = 윈도 끝),
+	 *   forecast: daysAgo==0 일 때만 5개 horizon segment [{horizonMin, prdctTime, value, startMin, endMin}]
+	 *             (1일전·1주전 응답에는 빈 배열)
+	 * }
 	 */
-	public List<HashMap<String,Object>> selectPumpRunCountHistory(int pumpGrp){
+	public HashMap<String,Object> selectPumpRunCountHistory(int pumpGrp, int daysAgo){
 		final int totalMinutes = 1440;
 		final int bucketMinutes = 10;
 		final int bucketCount = totalMinutes / bucketMinutes;
 
-		long nowMs = System.currentTimeMillis();
-		long startMs = nowMs - (long) totalMinutes * 60_000L;
+		long endMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
+		long startMs = endMs - (long) totalMinutes * 60_000L;
+		Timestamp startTs = new Timestamp(startMs);
+		Timestamp endTs = new Timestamp(endMs);
 
 		HashMap<String, Object> param = new HashMap<>();
 		param.put("PUMP_GRP", pumpGrp);
+		param.put("startDate", startTs);
+		param.put("endDate", endTs);
 		List<HashMap<String, Object>> rawList = drvnMapper.selectPumpRunHistoryByGrp(param);
 
 		HashMap<Integer, Double> weightMap = pumpLevelInfoGrpMap != null
 				? pumpLevelInfoGrpMap.get(pumpGrp) : null;
 
-		// bucketIndex -> pumpIdx -> {sumValue, count}
-		HashMap<Integer, HashMap<Integer, double[]>> bucketAgg = new HashMap<>();
-		if (rawList != null) {
-			for (HashMap<String, Object> row : rawList) {
+		// 시드: 윈도 시작 직전 각 펌프의 마지막 VALUE 로 currentState 초기화.
+		// PMB 가 상태 변화 위주로 기록되므로 시드 없이는 daysAgo>0 윈도 초입 버킷이
+		// 모두 OFF(0대) 로 잘못 표시될 수 있음.
+		HashMap<String, Object> seedParam = new HashMap<>();
+		seedParam.put("PUMP_GRP", pumpGrp);
+		seedParam.put("startDate", startTs);
+		List<HashMap<String, Object>> seedList = drvnMapper.selectPumpLastStateBeforeGrp(seedParam);
+
+		// rawList 는 SQL 의 ORDER BY rd.TS 로 시간 오름차순 정렬됨.
+		// pumpIdx -> 가장 최근에 본 VALUE (1=ON, 0=OFF)
+		HashMap<Integer, Double> currentState = new HashMap<>();
+		if (seedList != null) {
+			for (HashMap<String, Object> row : seedList) {
+				if (row == null || row.get("PUMP_IDX") == null || row.get("VALUE") == null) continue;
+				int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
+				double value = Double.parseDouble(row.get("VALUE").toString());
+				currentState.put(pumpIdx, value);
+			}
+		}
+		int sampleIdx = 0;
+		int sampleSize = rawList != null ? rawList.size() : 0;
+
+		List<HashMap<String, Object>> result = new ArrayList<>(bucketCount);
+		for (int b = 0; b < bucketCount; b++) {
+			long bucketEndMs = startMs + (long)(b + 1) * bucketMinutes * 60_000L;
+
+			// 버킷 끝 시각까지 도착한 샘플로 currentState 갱신
+			while (sampleIdx < sampleSize) {
+				HashMap<String, Object> row = rawList.get(sampleIdx);
 				if (row == null || row.get("TS") == null || row.get("PUMP_IDX") == null
 						|| row.get("VALUE") == null) {
+					sampleIdx++;
 					continue;
 				}
 				long ts;
@@ -5448,33 +5490,25 @@ public class DrvnService {
 				} else {
 					ts = java.sql.Timestamp.valueOf(tsObj.toString()).getTime();
 				}
-				int bucketIdx = (int) ((ts - startMs) / (bucketMinutes * 60_000L));
-				if (bucketIdx < 0 || bucketIdx >= bucketCount) continue;
-
+				if (ts > bucketEndMs) break;
 				int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
 				double value = Double.parseDouble(row.get("VALUE").toString());
-
-				HashMap<Integer, double[]> perPump = bucketAgg.computeIfAbsent(bucketIdx, k -> new HashMap<>());
-				double[] agg = perPump.computeIfAbsent(pumpIdx, k -> new double[]{0d, 0d});
-				agg[0] += (value > 0 ? 1d : 0d); // ON 횟수
-				agg[1] += 1d;                    // 표본 수
+				currentState.put(pumpIdx, value);
+				sampleIdx++;
 			}
-		}
 
-		List<HashMap<String, Object>> result = new ArrayList<>(bucketCount);
-		for (int b = 0; b < bucketCount; b++) {
+			// 버킷 끝 시점의 스냅샷 → ON 펌프 가중치 합
 			double weighted = 0d;
-			HashMap<Integer, double[]> perPump = bucketAgg.get(b);
-			if (perPump != null && weightMap != null) {
-				for (Map.Entry<Integer, double[]> e : perPump.entrySet()) {
+			if (weightMap != null) {
+				for (Map.Entry<Integer, Double> e : currentState.entrySet()) {
 					Double w = weightMap.get(e.getKey());
 					if (w == null) continue;
-					double[] agg = e.getValue();
-					double ratio = agg[1] > 0 ? agg[0] / agg[1] : 0d;
-					weighted += ratio * w;
+					if (e.getValue() != null && e.getValue() > 0) {
+						weighted += w;
+					}
 				}
 			}
-			weighted = Math.round(weighted * 2d) / 2d; // 0.5 단위 반올림
+			weighted = Math.round(weighted * 2d) / 2d; // 가중치가 0.5 단위이므로 사실상 no-op (방어용)
 
 			HashMap<String, Object> bucket = new HashMap<>();
 			bucket.put("startMin", b * bucketMinutes);
@@ -5482,7 +5516,153 @@ public class DrvnService {
 			bucket.put("value", weighted);
 			result.add(bucket);
 		}
-		return result;
+
+		HashMap<String, Object> response = new HashMap<>();
+		response.put("buckets", result);
+		// 미래 5단계 horizon segment (현재 윈도일 때만)
+		response.put("forecast", daysAgo == 0
+				? buildForecastList(pumpGrp, weightMap)
+				: new ArrayList<>());
+		return response;
+	}
+
+	/**
+	 * 펌프대수차트 미래 6h 영역에 표시할 5단계 horizon 예측 segment.
+	 * 각 horizon 별로 TB_CTR_PUMPYN_PRDCT_RST 최신 산출 결과의 ON 펌프 가중치 합을 계산.
+	 * startMin/endMin 기준: "오늘 정시 floor - 24h" 를 0분으로 하는 분 오프셋.
+	 * <p>각 segment 는 "자기 prdctTime ~ 다음 horizon 의 prdctTime" 까지 plateau 로 연결.
+	 *    마지막 segment 는 차트 우측 끝(=now + 360분) 까지 확장. 실측 segment 와 동일한
+	 *    step-function 외형이 되어 사용자가 "이 시점부터 이 조합 유지" 로 읽을 수 있게 함.</p>
+	 */
+	private List<HashMap<String, Object>> buildForecastList(int pumpGrp, HashMap<Integer, Double> weightMap) {
+		List<HashMap<String, Object>> forecast = new ArrayList<>();
+		if (weightMap == null) return forecast;
+		try {
+			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+			String nowDateTime = LocalDateTime.now().format(formatter);
+			HashMap<String, Object> p = new HashMap<>();
+			p.put("PUMP_GRP", pumpGrp);
+			p.put("nowDateTime", nowDateTime);
+			List<HashMap<String, Object>> rows = drvnMapper.selectPumpRunCountForecast(p);
+			if (rows == null || rows.isEmpty()) return forecast;
+
+			// horizon 별 그룹화 → ON 펌프 가중치 합 산출 (TreeMap → horizonMin 오름차순)
+			Map<Integer, List<HashMap<String, Object>>> byHorizon = new TreeMap<>();
+			Map<Integer, String> prdctTimeByHorizon = new HashMap<>();
+			for (HashMap<String, Object> r : rows) {
+				if (r.get("HORIZON_MIN") == null) continue;
+				int h = ((Number) r.get("HORIZON_MIN")).intValue();
+				byHorizon.computeIfAbsent(h, k -> new ArrayList<>()).add(r);
+				if (r.get("PRDCT_TIME") != null) prdctTimeByHorizon.put(h, r.get("PRDCT_TIME").toString());
+			}
+
+			// 차트 startTime(오늘 정시 floor - 24h) 기준 분 오프셋 계산 — 프론트와 동일 규칙
+			LocalDateTime nowHour = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0);
+			long startMs = java.sql.Timestamp.valueOf(nowHour).getTime() - 1440L * 60_000L;
+			long nowMs = System.currentTimeMillis();
+			// 차트 우측 끝(= 분 단위 now + 360분) — 6시간(=HORIZON=360) 컷오프.
+			// HORIZON=360 segment 는 startMin == endMin 으로 너비 0 이 되어 아래 chained 빌드에서 자동 제외됨.
+			// 따라서 직전 horizon(=180) segment 의 endMin 이 HORIZON=360 의 prdctTime(=now+6h) 까지 plateau 로 확장된다.
+			long rightEdgeMin = (nowMs - startMs) / 60_000L + 360L;
+
+			// 1차 패스: 각 horizon 의 (centerMin, weighted, prdctTime, rgstrMs) 수집
+			List<HashMap<String, Object>> pending = new ArrayList<>();
+			for (Map.Entry<Integer, List<HashMap<String, Object>>> entry : byHorizon.entrySet()) {
+				int horizonMin = entry.getKey();
+				double weighted = 0d;
+				for (HashMap<String, Object> r : entry.getValue()) {
+					Object yn = r.get("PUMP_YN");
+					Object pi = r.get("PUMP_IDX");
+					if (yn == null || pi == null) continue;
+					if (((Number) yn).intValue() <= 0) continue;
+					int pumpIdx = ((Number) pi).intValue();
+					Double w = weightMap.get(pumpIdx);
+					if (w == null) continue;
+					weighted += w;
+				}
+				weighted = Math.round(weighted * 2d) / 2d;
+
+				String prdctTimeStr = prdctTimeByHorizon.get(horizonMin);
+				long prdctMs;
+				if (prdctTimeStr != null) {
+					try {
+						prdctMs = java.sql.Timestamp.valueOf(prdctTimeStr + ":00").getTime();
+					} catch (Exception ex) {
+						prdctMs = nowMs + (long) horizonMin * 60_000L;
+					}
+				} else {
+					prdctMs = nowMs + (long) horizonMin * 60_000L;
+				}
+				long rgstrMs = prdctMs - (long) horizonMin * 60_000L;
+				long centerMin = (prdctMs - startMs) / 60_000L;
+				HashMap<String, Object> seg = new HashMap<>();
+				seg.put("horizonMin", horizonMin);
+				seg.put("prdctTime", prdctTimeStr);
+				seg.put("value", weighted);
+				seg.put("centerMin", centerMin);
+				seg.put("prdctMs", prdctMs);
+				seg.put("rgstrMs", rgstrMs);
+				pending.add(seg);
+			}
+
+			// 1.5차 패스: 동일 scheduler tick 산출물만 유지 + 과거 시점 예측 제외.
+			//   - RGSTR_TIME 정렬 미스: 한 horizon 은 12:21 tick, 다른 horizon 은 12:01 tick 이면
+			//     prdctTime 이 너무 가깝게 배치되어 segment 자연 너비가 0~수 픽셀 → bump 충돌.
+			//   - 최신 rgstrMs 기준 5분 window 안에 있는 horizon 만 표시 → 동일 tick 의 산출물끼리만
+			//     보여서 prdctTime 간격이 정상화(50/60/60/180 분).
+			//   - 과거 시점(prdctMs <= nowMs) 예측은 의미 없으므로 제외.
+			if (!pending.isEmpty()) {
+				long maxRgstrMs = pending.stream()
+						.mapToLong(s -> ((Number) s.get("rgstrMs")).longValue())
+						.max().orElse(0L);
+				long minAllowedRgstrMs = maxRgstrMs - 5L * 60_000L;
+				pending.removeIf(s ->
+						((Number) s.get("rgstrMs")).longValue() < minAllowedRgstrMs
+								|| ((Number) s.get("prdctMs")).longValue() <= nowMs);
+			}
+
+			// 2차 패스: prdctTime 부터 다음 horizon prdctTime 까지 plateau 로 endMin 설정.
+			//   마지막 segment 는 rightEdgeMin 까지 확장 (now+6h+padding).
+			pending.sort((a, b) -> Long.compare((Long) a.get("centerMin"), (Long) b.get("centerMin")));
+			List<HashMap<String, Object>> chained = new ArrayList<>();
+			for (int i = 0; i < pending.size(); i++) {
+				HashMap<String, Object> seg = pending.get(i);
+				long start = ((Number) seg.get("centerMin")).longValue();
+				long end = (i + 1 < pending.size())
+						? ((Number) pending.get(i + 1).get("centerMin")).longValue()
+						: rightEdgeMin;
+				// 옵션 B: 너비 0 segment 제외. 마지막 HORIZON=360 의 prdctTime 이
+				// rightEdgeMin(=now+6h) 과 겹쳐 start == end 가 되면 표시 의미가 없으므로 skip.
+				if (end <= start) continue;
+				seg.put("startMin", start);
+				seg.put("endMin", end);
+				seg.remove("centerMin");
+				seg.remove("prdctMs");
+				seg.remove("rgstrMs");
+				chained.add(seg);
+			}
+
+			// 3차 패스: 인접 동일 value segment 병합 — 실측의 buildStageSegmentsFromBuckets
+			// 와 동일 정책. 5단계 horizon 모두 같은 조합(=같은 펌프대수)이면 한 줄로 표시.
+			// 병합된 segment 의 horizonMin/prdctTime 은 시작 horizon 의 값을 유지.
+			for (HashMap<String, Object> seg : chained) {
+				if (!forecast.isEmpty()) {
+					HashMap<String, Object> last = forecast.get(forecast.size() - 1);
+					double lastVal = ((Number) last.get("value")).doubleValue();
+					double curVal = ((Number) seg.get("value")).doubleValue();
+					long lastEnd = ((Number) last.get("endMin")).longValue();
+					long curStart = ((Number) seg.get("startMin")).longValue();
+					if (lastVal == curVal && lastEnd == curStart) {
+						last.put("endMin", seg.get("endMin"));
+						continue;
+					}
+				}
+				forecast.add(seg);
+			}
+		} catch (Exception e) {
+			log.error("buildForecastList failed pumpGrp={}: {}", pumpGrp, e.getMessage(), e);
+		}
+		return forecast;
 	}
 
 	public void updatePumpCombItem(HashMap<String, Object> map) {

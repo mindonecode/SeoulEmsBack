@@ -98,6 +98,8 @@ public class DrvnConfig {
 	private double seoulBaTarget;           // 북악 07:00 목표 수위 (m)
 	@Value("${seoul.step.mh.threshold:4.0}")
 	private double seoulMhThreshold;        // 중간/최대부하 수위 임계 (m)
+	@Value("${seoul.step.load-adjust.enabled:true}")
+	private boolean seoulLoadAdjustEnabled; // 부하(L/M/H) 기반 ±1단계 조정 on/off. false 시 유클리드 거리 결과(closestPointIndex) 그대로 사용
 	private String[] seoulGnTags;           // @PostConstruct 에서 CSV 파싱
 	private String[] seoulBaTags;
 
@@ -370,6 +372,51 @@ public class DrvnConfig {
 					}
 				} catch (Exception e) {
 					log.error("시간 오프셋 {}분 처리 중 오류 발생: {}", i, e.getMessage(), e);
+				}
+			}
+
+			// 5단계 horizon (10/60/120/180/360) 예측 조합 산출 → TB_CTR_PUMPYN_PRDCT_RST
+			// 기존 10분 로직(TB_CTR_PUMPYN_RST) 과 별도 흐름. 차트 미래 segment 용.
+			// gs(고산)/wpp_code 별 특수 결합은 1차 적용 보류 — 일반 그룹만 처리.
+			final int[] HORIZONS = {10, 60, 120, 180, 360};
+			String nowDateTimeForHorizon = LocalDateTime.now().format(formatter);
+			Set<Integer> pumpGrpSet = pumpDstrbIdMap != null
+					? new LinkedHashSet<>(pumpDstrbIdMap.keySet()) : new LinkedHashSet<>();
+			for (int horizonMin : HORIZONS) {
+				for (Integer id : pumpGrpSet) {
+					try {
+						HashMap<String, String> ditrbMap = pumpDstrbIdMap.get(id);
+						if (ditrbMap == null) continue;
+						String flowId = ditrbMap.get("flow");
+						String pressureId = ditrbMap.get("pressure");
+
+						HashMap<String, Object> p = new HashMap<>();
+						p.put("nowDateTime", nowDateTimeForHorizon);
+						p.put("horizonMin", horizonMin);
+
+						p.put("DSTRB_ID", flowId);
+						List<HashMap<String, Object>> flowList = drvnMapper.prdctFlowPressureByHorizon(p);
+						p.put("DSTRB_ID", pressureId);
+						List<HashMap<String, Object>> pressureList = drvnMapper.prdctFlowPressureByHorizon(p);
+
+						if (flowList == null || flowList.isEmpty() || pressureList == null || pressureList.isEmpty()) {
+							continue;
+						}
+						Object flowValObj = flowList.get(0).get("value");
+						Object pressureValObj = pressureList.get(0).get("value");
+						if (flowValObj == null || pressureValObj == null) continue;
+						double flowH = ((Number) flowValObj).doubleValue();
+						double pressureH = ((Number) pressureValObj).doubleValue();
+						if (flowH == 0.0 || pressureH == 0.0) continue;
+						String tsH = (String) flowList.get(0).get("ts");
+						if (tsH == null) continue;
+
+						if (!wpp_code.equals("gs")) {
+							calcOptimalCombForHorizon(flowH, pressureH, id, tsH, horizonMin);
+						}
+					} catch (Exception e) {
+						log.error("horizon {} 분 / pump_grp {} 처리 실패: {}", horizonMin, id, e.getMessage(), e);
+					}
 				}
 			}
 		} catch (Exception e) {
@@ -3107,9 +3154,13 @@ public class DrvnConfig {
 			//     - 공릉 or 북악 중 하나라도 도달 불가 → +1단계
 			//     - 공릉 & 북악 모두 도달 가능       → −1단계
 			//
-			//   [중간부하 M]
-			//     - 공릉 & 북악 모두 수위 > 4m → −1단계
-			//     - 하나라도 수위 ≤ 4m         → +1단계
+			//   [중간부하 M]  최대부하 H 버팀 가능성 판정 (추세 기반 예측):
+			//     1) 최근 5분 변화량: delta = activeAvg(now) − activeAvg(now−5min)  (상승+, 하락−, 변화없음 0)
+			//        delta == 0 또는 활성 평균 0이면 5분씩 거슬러 최대 60분까지 탐색
+			//     2) 시간당 수위변화율 ratePerHour = delta / stepMin × 60  (m/h, 사진의 "×12"는 stepMin=5 케이스)
+			//     3) 22시 예상수위 = curLevel + ratePerHour × remainHours  (remainHours = (오늘 22:00 − now), now≥22:00이면 0)
+			//     4) 두 곳 모두 22시 예상수위 ≥ 4m 유지 가능 → −1단계
+			//        한 곳이라도 유지 불가(또는 변화량 탐색 60분 실패) → +1단계
 			//
 			//   [최대부하 H]
 			//     - 공릉 & 북악 모두 수위 > 4m → #1 (최소대수 조합) 고정
@@ -3124,7 +3175,20 @@ public class DrvnConfig {
 			//   - 30분 타이머/수동 우선은 기존 TB_MNL_CHN_LOG throttle 로직이 별도로 보장
 			//   - 토/일/공휴일 보정: 일요일·공휴일 → L 강제, 토요일 H → M
 			//   - Seoul 인버터 미보유 → freqMap = null
+			//   - seoul.step.load-adjust.enabled=false 일 때는 부하 분기 전체 스킵 → 유클리드 거리 결과만 사용
 			if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
+					&& collectData != null && !collectData.isEmpty() && !seoulLoadAdjustEnabled) {
+				// === [Seoul/Dev] 부하 조정 OFF: 유클리드 거리(closestPointIndex)의 조합만 그대로 사용 ===
+				Object seoulPcRaw = collectData.get(closestPointIndex).get("pumpComb");
+				if (seoulPcRaw instanceof List) {
+					@SuppressWarnings("unchecked")
+					List<String> seoulPcList = (List<String>) seoulPcRaw;
+					returnComb = new ArrayList<>(seoulPcList);
+				}
+				freqMap = null;  // Seoul 인버터 없음
+				logger.info("[SEOUL] 부하조정 OFF (seoul.step.load-adjust.enabled=false) ts={} pump_grp={} baseIdx={} returnComb={}",
+						ts, pump_grp, closestPointIndex, returnComb);
+			} else if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
 					&& collectData != null && !collectData.isEmpty()) {
 				String seoulLoad = reduceMap.get(dateTime.getMonthValue()).get(dateTime.getHour());
 				HolidayChecker seoulHolidayChecker = new HolidayChecker();
@@ -3184,13 +3248,36 @@ public class DrvnConfig {
 							seoulGnTarget, gnReachable, seoulBaTarget, baReachable);
 
 				} else if ("M".equals(seoulLoad)) {
-					if (gnLevel > seoulMhThreshold && baLevel > seoulMhThreshold) {
+					// 22시까지 두 곳 모두 ≥ seoulMhThreshold 유지 가능한가? (추세 기반 예측)
+					double[] gnSustain = predict22LevelSeoul(seoulGnTags, gnLevel, dateTime);
+					double[] baSustain = predict22LevelSeoul(seoulBaTags, baLevel, dateTime);
+					double gnPred = gnSustain[0];  // 22시 예상수위 (NaN = 변화량 탐색 실패)
+					double baPred = baSustain[0];
+					double gnRate = gnSustain[1];
+					double baRate = baSustain[1];
+					int    gnStep = (int) gnSustain[2];
+					int    baStep = (int) baSustain[2];
+					boolean gnOk = !Double.isNaN(gnPred) && gnPred >= seoulMhThreshold;
+					boolean baOk = !Double.isNaN(baPred) && baPred >= seoulMhThreshold;
+
+					if (gnOk && baOk) {
 						seoulDelta = -1;
-						adjReason  = "M: 둘다 수위>" + seoulMhThreshold + "m";
+						adjReason  = "M: 둘다 22시예상≥" + seoulMhThreshold + "m"
+								+ " (gn=" + String.format("%.3f", gnPred)
+								+ ", ba=" + String.format("%.3f", baPred) + ")";
 					} else {
 						seoulDelta = +1;
-						adjReason  = "M: 하나라도 수위≤" + seoulMhThreshold + "m";
+						adjReason  = "M: 한곳이상 22시예상<" + seoulMhThreshold + "m 또는 탐색실패"
+								+ " (gn=" + (Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred))
+								+ ", ba=" + (Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)) + ")";
 					}
+					logger.info("[SEOUL/M] ts={} pump_grp={} gn(cur={}, rate={}m/h, step={}m, pred22={}) ba(cur={}, rate={}m/h, step={}m, pred22={}) th={}m",
+							ts, pump_grp,
+							String.format("%.3f", gnLevel), String.format("%.4f", gnRate), gnStep,
+							(Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred)),
+							String.format("%.3f", baLevel), String.format("%.4f", baRate), baStep,
+							(Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)),
+							seoulMhThreshold);
 				} else {  // "H" 최대부하
 					if (gnLevel > seoulMhThreshold && baLevel > seoulMhThreshold) {
 						forceFirstComb = true;
@@ -5637,6 +5724,52 @@ public class DrvnConfig {
 	}
 
 	/**
+	 * [Seoul/Dev · 중간부하 M] 22시(최대부하 종료 시각) 예상 수위 산출.
+	 *
+	 * 알고리즘 (사진 "중간부하 M" 정책):
+	 *   1) 최근 5분 활성 평균 변화량 측정. step ∈ {5,10,...,60}분을 차례로 시도해 첫 유효 값 채택.
+	 *      - 활성 평균 개수가 0인 시점이 포함되면 다음 step 으로 진행
+	 *      - delta == 0 이어도 다음 step 으로 진행 (변화 추세 탐색)
+	 *      - 60분까지 못 찾으면 22시 예상수위 NaN 반환 → 호출부가 "버팀 불가"로 처리
+	 *   2) 시간당 변화율 ratePerHour = delta / stepMin × 60 (m/h). 상승 +, 하락 −, 변화없음 0.
+	 *   3) remainHours = max(0, (오늘 22:00 − now)). now ≥ 22:00 이면 0 으로 폴백.
+	 *   4) 22시 예상수위 = curLevel + ratePerHour × remainHours.
+	 *
+	 * @param tags      수위 TAG 배열 (공릉 또는 북악)
+	 * @param curLevel  현재 활성 평균 수위 (호출부에서 이미 산출한 값 재사용)
+	 * @param dateTime  현재 시각
+	 * @return double[3] = {22시 예상수위(NaN=탐색실패), ratePerHour(m/h, 실패시 0), 채택 stepMin(실패시 0)}
+	 */
+	private double[] predict22LevelSeoul(String[] tags, double curLevel, LocalDateTime dateTime) {
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		final int maxBack = 60;
+		double rate = 0.0;
+		int stepUsed = 0;
+		boolean found = false;
+		for (int stepMin = 5; stepMin <= maxBack; stepMin += 5) {
+			LocalDateTime nowT  = dateTime;
+			LocalDateTime prevT = dateTime.minusMinutes(stepMin);
+			double[] n = avgActiveSeoulWaterLevel(tags, nowT.format(formatter),  seoulActiveThreshold);
+			double[] p = avgActiveSeoulWaterLevel(tags, prevT.format(formatter), seoulActiveThreshold);
+			if (n[1] == 0 || p[1] == 0) continue;          // 활성 평균 비정상 → 다음 step
+			double delta = n[0] - p[0];
+			if (Math.abs(delta) <= 1e-9) continue;          // 변화 없음 → 다음 step
+			rate = delta / (double) stepMin * 60.0;         // m/h
+			stepUsed = stepMin;
+			found = true;
+			break;
+		}
+		if (!found) {
+			return new double[]{Double.NaN, 0.0, 0};        // 탐색 실패 → 버팀 불가
+		}
+		LocalDateTime endAt = dateTime.toLocalDate().atTime(22, 0);
+		long remainSec = Duration.between(dateTime, endAt).getSeconds();
+		double remainHours = Math.max(0.0, remainSec / 3600.0);
+		double pred = curLevel + rate * remainHours;
+		return new double[]{pred, rate, stepUsed};
+	}
+
+	/**
 	 * [Seoul/Dev] 특정 시점 기준, 주어진 수위 태그들 중 활성(≥threshold) 수조들의 평균 수위와 개수.
 	 * 호출부는 활성 개수가 0 이면 시간대 기반 fallback 으로 전환한다.
 	 *
@@ -5668,5 +5801,336 @@ public class DrvnConfig {
 		return new double[]{avg, count};
 	}
 
+	/**
+	 * 5단계 horizon 예측 조합 산출용 간소화 메서드.
+	 * insertPumpComb (416-3271) 의 "now" 의존 부수효과를 모두 제거하고 핵심 알고리즘만 추출.
+	 * 도시별 짝홀일 펌프 교체(wm/gr) 분기는 포함, 기타 부수효과(raw 수위 read,
+	 * 직전 펌프 사용 조회, 수동 모드 체크, 알람) 미포함.
+	 * INSERT 대상은 TB_CTR_PUMPYN_PRDCT_RST.
+	 */
+	public void calcOptimalCombForHorizon(double flow, double pressure, int pump_grp, String ts, int horizonMin) {
+		try {
+			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+			DateTimeFormatter idxFormatter = DateTimeFormatter.ofPattern("yyMMddHHmm");
+			LocalDateTime dateTime = LocalDateTime.parse(ts, formatter);
+			// RGSTR_TIME 을 10분 정각 단위로 floor (예: 13:47:30 → 13:40).
+			// 30초 주기로 호출되어도 같은 10분 안의 산출은 PK 충돌로 ON DUPLICATE KEY UPDATE 되어
+			// 결과적으로 TB_CTR_PUMPYN_PRDCT_RST 에는 :00/:10/:20/... 정각 행만 남는다.
+			LocalDateTime nowMin = LocalDateTime.now().withSecond(0).withNano(0);
+			LocalDateTime rgstrAligned = nowMin.withMinute((nowMin.getMinute() / 10) * 10);
+			String rgstrTime = rgstrAligned.format(formatter);
+
+			HashMap<Integer, Double> pumpLevelInfoMap = pumpLevelInfoGrpMap.get(pump_grp);
+			if (pumpLevelInfoMap == null) {
+				log.warn("[horizon] pumpLevelInfoMap null pump_grp={} horizon={}", pump_grp, horizonMin);
+				return;
+			}
+
+			List<HashMap<String, Object>> calList = drvnMapper.selectPumpCombCal();
+			List<HashMap<String, Object>> grpFilteredList;
+			if (wpp_code.equals("gs")) {
+				grpFilteredList = calList.stream()
+						.filter(map -> String.valueOf(map.get("PUMP_GRP")).equals(String.valueOf(pump_grp)))
+						.filter(map -> Integer.parseInt(String.valueOf(map.get("USE_YN"))) == 1)
+						.collect(Collectors.toList());
+			} else {
+				grpFilteredList = calList.stream()
+						.filter(map -> map.get("PUMP_GRP").equals(pump_grp))
+						.collect(Collectors.toList());
+			}
+			if (grpFilteredList.isEmpty()) return;
+
+			Map<String, Integer> newCidxMap = new HashMap<>();
+			java.util.concurrent.atomic.AtomicInteger cidxCounter = new java.util.concurrent.atomic.AtomicInteger(1);
+			grpFilteredList = grpFilteredList.stream()
+					.map(map -> {
+						HashMap<String, Object> newMap = new HashMap<>(map);
+						String key = String.valueOf(map.get("PUMP_COUNT")) + "_" + String.valueOf(map.get("PUMP_PRIORITY"));
+						if (!newCidxMap.containsKey(key)) {
+							newCidxMap.put(key, cidxCounter.getAndIncrement());
+						}
+						newMap.put("C_IDX", newCidxMap.get(key));
+						return newMap;
+					})
+					.collect(Collectors.toList());
+
+			LinkedHashSet<Integer> uniqueCIdx = new LinkedHashSet<>();
+			for (HashMap<String, Object> maps : grpFilteredList) {
+				uniqueCIdx.add((Integer) maps.get("C_IDX"));
+			}
+
+			List<HashMap<String, Object>> pumpList = setPumpList != null ? setPumpList : new ArrayList<>();
+			if (wpp_code.equals("wm")) {
+				pumpList.forEach(map -> map.put("PUMP_TYP", 1));
+			}
+			List<HashMap<String, Object>> grpList;
+			if (wpp_code.equals("gs")) {
+				grpList = pumpList;
+			} else {
+				grpList = pumpList.stream()
+						.filter(map -> map.containsKey("PUMP_GRP") && map.get("PUMP_GRP").equals(pump_grp))
+						.collect(Collectors.toList());
+			}
+			LinkedHashMap<String, Integer> typeMap = new LinkedHashMap<>();
+			for (HashMap<String, Object> map : grpList) {
+				int pump_idx = (int) map.get("PUMP_IDX");
+				int pump_typ = (int) map.get("PUMP_TYP");
+				typeMap.put(String.valueOf(pump_idx), pump_typ);
+			}
+			if (wpp_code.equals("ba") && pump_grp == 5) {
+				if (!uniqueCIdx.isEmpty()) uniqueCIdx.remove(0);
+			}
+
+			double flowSum = 0, pressSum = 0;
+			int cnt = 0;
+			List<Double> targetflowList = new ArrayList<>();
+			List<Double> targetpressList = new ArrayList<>();
+			List<HashMap<String, Object>> collectData = new ArrayList<>();
+			for (int cidx : uniqueCIdx) {
+				List<HashMap<String, Object>> cIdxFilteredList = grpFilteredList.stream()
+						.filter(map -> map.get("C_IDX").equals(cidx))
+						.collect(Collectors.toList());
+				String pump_comb = null;
+				String freq = null;
+				double min_flow = 0, max_flow = 0;
+				HashMap<String, Object> pressureCal = new HashMap<>();
+				for (HashMap<String, Object> map : cIdxFilteredList) {
+					int c_ord = (int) map.get("C_ORD");
+					double fc_val = (double) map.get("FC_VAL");
+					if (c_ord == 1) {
+						pump_comb = (String) map.get("PUMP_COMB");
+						pressureCal = map;
+						min_flow = fc_val;
+					} else {
+						if (map.get("PUMP_COMB") != null) freq = (String) map.get("PUMP_COMB");
+						max_flow = fc_val;
+					}
+				}
+				if (pump_comb == null) continue;
+				List<String> strList = Arrays.stream(pump_comb.split(",")).map(String::trim).collect(Collectors.toList());
+
+				if (wpp_code.equals("wm")) {
+					int wm_day = dateTime.getDayOfMonth();
+					strList = strList.stream().map(str -> {
+						if (wm_day % 2 == 0 && str.equals("1")) return "2";
+						if (wm_day % 2 == 1 && str.equals("2")) return "1";
+						return str;
+					}).collect(Collectors.toList());
+				}
+				if (wpp_code.equals("gr") && pump_grp == 3) {
+					DayOfWeek dayOfWeek = dateTime.getDayOfWeek();
+					int week = dayOfWeek.getValue();
+					HolidayChecker holidayChecker = new HolidayChecker();
+					Boolean passDayBool = holidayChecker.isPassDay(ts);
+					int wm_day = (passDayBool || week >= 6) ? 3 : dateTime.getDayOfMonth();
+					final int finalDay = wm_day;
+					strList = strList.stream().map(str -> {
+						if (finalDay % 2 == 0 && str.equals("11")) return "10";
+						return str;
+					}).collect(Collectors.toList());
+				}
+
+				HashMap<String, Double> freqMap = new HashMap<>();
+				if (freq != null && !freq.trim().isEmpty()) {
+					List<String> freqList = Arrays.stream(freq.split(",")).map(String::trim).collect(Collectors.toList());
+					List<String> combIvtPump = new ArrayList<>();
+					for (String pump : strList) {
+						if (pump == null) break;
+						if (typeMap.get(pump) != null && typeMap.get(pump) == 2) combIvtPump.add(pump);
+					}
+					if (!combIvtPump.isEmpty()) {
+						for (int i = 0; i < combIvtPump.size() && i < freqList.size(); i++) {
+							freqMap.put(combIvtPump.get(i), Double.valueOf(freqList.get(i)));
+						}
+					}
+				}
+
+				double pumpLevel = 0.0;
+				for (String pump_idx : strList) {
+					if (pump_idx.isEmpty()) continue;
+					int idx = Integer.parseInt(pump_idx);
+					Double pumpVal = pumpLevelInfoMap.get(idx);
+					if (pumpVal == null) continue;
+					if (typeMap.get(pump_idx) != null && typeMap.get(pump_idx) == 1) {
+						pumpLevel += pumpVal;
+					} else if (freqMap.containsKey(pump_idx)) {
+						pumpLevel += (freqMap.get(pump_idx) / 60) * 1;
+					}
+				}
+
+				List<HashMap<String, Double>> flowPriList = new ArrayList<>();
+				double flusFlow = (max_flow - min_flow > 1000) ? 10 : 1;
+				for (double f = min_flow; f <= max_flow; f += flusFlow) {
+					HashMap<String, Double> calMap = new HashMap<>();
+					double calPressure = pressureCalValue(f, pressureCal, pump_grp);
+					calMap.put("calPressure", calPressure);
+					calMap.put("calFlow", f);
+					flowPriList.add(calMap);
+					cnt++;
+					flowSum += f;
+					pressSum += calPressure;
+					targetflowList.add(f);
+					targetpressList.add(calPressure);
+				}
+				HashMap<String, Object> collectMap = new HashMap<>();
+				collectMap.put("pumpComb", strList);
+				collectMap.put("freq", freqMap);
+				collectMap.put("pumpLevel", pumpLevel);
+				collectMap.put("combIdx", cidx);
+				collectMap.put("calList", flowPriList);
+				collectData.add(collectMap);
+			}
+
+			if (cnt == 0 || collectData.isEmpty()) return;
+
+			double flowAvg = flowSum / cnt;
+			double pressAvg = pressSum / cnt;
+			double pressStd = calculateStdDev(targetpressList, pressAvg);
+			double flowStd = calculateStdDev(targetflowList, flowAvg);
+			if (pressStd == 0 || flowStd == 0) return;
+
+			int closestPointIndex = -1;
+			double minDistance = Double.MAX_VALUE;
+			for (int i = 0; i < collectData.size(); i++) {
+				@SuppressWarnings("unchecked")
+				List<HashMap<String, Double>> flowPriList = (List<HashMap<String, Double>>) collectData.get(i).get("calList");
+				for (HashMap<String, Double> calMap : flowPriList) {
+					double sCurP = (pressure - pressAvg) / pressStd;
+					double sCurQ = (flow - flowAvg) / flowStd;
+					double sPreP = (calMap.get("calPressure") - pressAvg) / pressStd;
+					double sPreQ = (calMap.get("calFlow") - flowAvg) / flowStd;
+					double dx = Math.abs(sCurP - sPreP);
+					double dy = Math.abs(sCurQ - sPreQ);
+					double distance = Math.sqrt(dx * dx + dy * dy);
+					if (distance < minDistance) {
+						minDistance = distance;
+						closestPointIndex = i;
+					}
+				}
+			}
+			if (closestPointIndex < 0) return;
+
+			@SuppressWarnings("unchecked")
+			List<String> returnComb = (List<String>) collectData.get(closestPointIndex).get("pumpComb");
+			@SuppressWarnings("unchecked")
+			HashMap<String, Double> selectedFreqMap = (HashMap<String, Double>) collectData.get(closestPointIndex).get("freq");
+			Set<String> onSet = new HashSet<>(returnComb);
+
+			String insertIdx = dateTime.format(idxFormatter) + "H" + horizonMin;
+			for (HashMap<String, Object> pumpRow : grpList) {
+				int pump_idx = (int) pumpRow.get("PUMP_IDX");
+				int pump_typ = (int) pumpRow.get("PUMP_TYP");
+				String pumpIdxStr = String.valueOf(pump_idx);
+				HashMap<String, Object> map = new HashMap<>();
+				map.put("opt_idx", optIdxTag + insertIdx);
+				map.put("PUMP_GRP", pump_grp);
+				map.put("PUMP_IDX", pump_idx);
+				map.put("PUMP_TYP", pump_typ);
+				map.put("pump_yn", onSet.contains(pumpIdxStr) ? 1 : 0);
+				double pumpFreq = 0;
+				if (pump_typ == 2 && selectedFreqMap != null && selectedFreqMap.containsKey(pumpIdxStr)) {
+					pumpFreq = selectedFreqMap.get(pumpIdxStr);
+				}
+				map.put("freq", pumpFreq);
+				map.put("rgstrTime", rgstrTime);
+				map.put("ts", ts);
+				map.put("horizonMin", horizonMin);
+				map.put("flow", flow);
+				map.put("pressure", pressure);
+				map.put("pwrPrdct", 0);
+				drvnMapper.insertDrvnPumpYnPrdctData(map);
+			}
+		} catch (Exception e) {
+			log.error("calcOptimalCombForHorizon 실패 pump_grp={} horizon={} ts={}: {}",
+					pump_grp, horizonMin, ts, e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * 10분 주기 예측/실측 유량·펌프조합 스냅샷 (TB_PUMP_FLOW_COMB_SNAPSHOT 적재).
+	 * - 화면 미노출, 분석용 로그 테이블.
+	 * - RGSTR_TIME : 등록 시각 (10분 경계, 예 14:00).
+	 * - PRDCT_TIME : 예측 대상 시각 = RGSTR_TIME + 10분 (예 14:10).
+	 * - ACTL_FLOW / ACTL_COMB : RGSTR_TIME 시점 실측.
+	 * - PRDCT_FLOW / PRDCT_COMB : PRDCT_TIME 시점 예측 (TB_CTR_TNK_RST 기반).
+	 * - pump_grp 별로 1행씩 INSERT (그룹 N개 → 10분당 N행 누적).
+	 */
+	@Scheduled(cron = "0 0/10 * * * *")
+	public void scheduleFlowCombSnapshotTask() {
+		if (pumpDstrbIdMap == null || pumpDstrbIdMap.isEmpty()) {
+			log.warn("[flow-comb-snapshot] pumpDstrbIdMap 미초기화 — skip");
+			return;
+		}
+
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		LocalDateTime nowAligned = LocalDateTime.now()
+				.withSecond(0)
+				.withNano(0);
+		nowAligned = nowAligned.withMinute((nowAligned.getMinute() / 10) * 10);
+		String rgstrTime = nowAligned.format(formatter);
+		String prdctTime = nowAligned.plusMinutes(10).format(formatter);
+
+		log.info("=== [flow-comb-snapshot] rgstrTime={} prdctTime={} ===", rgstrTime, prdctTime);
+
+		for (Integer pumpGrp : pumpDstrbIdMap.keySet()) {
+			try {
+				HashMap<String, String> ditrbMap = pumpDstrbIdMap.get(pumpGrp);
+				String flowDstrbId = (ditrbMap != null) ? ditrbMap.get("flow") : null;
+
+				HashMap<String, Object> param = new HashMap<>();
+				param.put("pump_grp", pumpGrp);
+				param.put("rgstr_time", rgstrTime);
+				param.put("dstrb_id", flowDstrbId);
+
+				// 예측 유량: TB_CTR_TNK_RST 에서 PRDCT_TIME = RGSTR_TIME+10분 (예: 14:00 → 14:10).
+				Double prdctFlow = null;
+				if (flowDstrbId != null && !flowDstrbId.isEmpty()) {
+					HashMap<String, Object> prdctRow = drvnMapper.selectLatestPredictedFlowTnk(param);
+					if (prdctRow != null) {
+						Object pf = prdctRow.get("prdct_flow");
+						if (pf instanceof Number) prdctFlow = ((Number) pf).doubleValue();
+						else if (pf != null) {
+							try { prdctFlow = Double.parseDouble(pf.toString()); } catch (NumberFormatException ignore) {}
+						}
+					}
+				} else {
+					log.warn("[flow-comb-snapshot] grp={} flow DSTRB_ID 미정의 — prdctFlow=null", pumpGrp);
+				}
+
+				// 예측 조합: TB_CTR_PUMPYN_RST 최신 RGSTR_TIME (≤ rgstrTime) 의 ON 펌프 IDX CSV.
+				String prdctComb = drvnMapper.selectLatestPredictedComb(param);
+
+				// 실측 유량: rgstrTime(=14:00) 직전 10분 윈도우의 최근 FRI_TAG 값.
+				HashMap<String, Object> actlRow = drvnMapper.selectLatestActualFlow(param);
+				Double actlFlow = null;
+				if (actlRow != null) {
+					Object v = actlRow.get("value");
+					if (v instanceof Number) actlFlow = ((Number) v).doubleValue();
+					else if (v != null) {
+						try { actlFlow = Double.parseDouble(v.toString()); } catch (NumberFormatException ignore) {}
+					}
+				}
+
+				// 실측 조합: rgstrTime 시점의 PMB_TAG ON 펌프 CSV.
+				String actlComb = drvnMapper.selectLatestActualComb(param);
+
+				HashMap<String, Object> insertParam = new HashMap<>();
+				insertParam.put("rgstr_time", rgstrTime);
+				insertParam.put("prdct_time", prdctTime);
+				insertParam.put("pump_grp", pumpGrp);
+				insertParam.put("prdct_flow", prdctFlow);
+				insertParam.put("actl_flow", actlFlow);
+				insertParam.put("prdct_comb", prdctComb);
+				insertParam.put("actl_comb", actlComb);
+				drvnMapper.insertFlowCombSnapshot(insertParam);
+
+				log.info("[flow-comb-snapshot] grp={} prdctFlow={} actlFlow={} prdctComb={} actlComb={}",
+						pumpGrp, prdctFlow, actlFlow, prdctComb, actlComb);
+			} catch (Exception e) {
+				log.error("[flow-comb-snapshot] 실패 grp={} rgstrTime={}: {}",
+						pumpGrp, rgstrTime, e.getMessage(), e);
+			}
+		}
+	}
 
 }

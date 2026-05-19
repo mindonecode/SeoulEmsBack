@@ -497,7 +497,6 @@ public class DrvnController extends BaseController {
 	@PostMapping("/savePumpComb")
 	public ResponseObject<String> savePumpComb(@RequestBody List<HashMap<String, Object>> updateMap){
 		drvnService.savePumpComb(updateMap);
-		drvnService.changePumpCal(updateMap);
 		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, "조합 상세정보 업데이트");
 	}
 
@@ -544,8 +543,11 @@ public class DrvnController extends BaseController {
 	}
 
 	@GetMapping("/selectPumpRunCountHistory/{pump_grp}")
-	public ResponseObject<List<HashMap<String,Object>>> selectPumpRunCountHistory(@PathVariable int pump_grp){
-		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectPumpRunCountHistory(pump_grp));
+	public ResponseObject<HashMap<String,Object>> selectPumpRunCountHistory(
+			@PathVariable int pump_grp,
+			@RequestParam(required = false, defaultValue = "0") int daysAgo){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS,
+				drvnService.selectPumpRunCountHistory(pump_grp, daysAgo));
 	}
 
 	/**
