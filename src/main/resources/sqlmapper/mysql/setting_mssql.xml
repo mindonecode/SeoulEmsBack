@@ -199,56 +199,57 @@
 			YEAR = #{year}
 	</select>
 	<select id="selectGetSetting" resultType="HashMap" parameterType="HashMap">
-        SELECT
-            year, `1m`, `2m`, `3m`, `4m`, `5m`, `6m`, `7m`, `8m`, `9m`, `10m`, `11m`, `12m`
-        FROM
-            TB_GOALSETTING
-        WHERE TYPE = 'mm'
-        and year IN (#{year} -1, #{year})
-        
-        UNION ALL
-        
-        SELECT
-            'base' AS year,
-            COALESCE(MAX(CASE WHEN month = 1  THEN value END), 0) AS `1m`,
-            COALESCE(MAX(CASE WHEN month = 2  THEN value END), 0) AS `2m`,
-            COALESCE(MAX(CASE WHEN month = 3  THEN value END), 0) AS `3m`,
-            COALESCE(MAX(CASE WHEN month = 4  THEN value END), 0) AS `4m`,
-            COALESCE(MAX(CASE WHEN month = 5  THEN value END), 0) AS `5m`,
-            COALESCE(MAX(CASE WHEN month = 6  THEN value END), 0) AS `6m`,
-            COALESCE(MAX(CASE WHEN month = 7  THEN value END), 0) AS `7m`,
-            COALESCE(MAX(CASE WHEN month = 8  THEN value END), 0) AS `8m`,
-            COALESCE(MAX(CASE WHEN month = 9  THEN value END), 0) AS `9m`,
-            COALESCE(MAX(CASE WHEN month = 10 THEN value END), 0) AS `10m`,
-            COALESCE(MAX(CASE WHEN month = 11 THEN value END), 0) AS `11m`,
-            COALESCE(MAX(CASE WHEN month = 12 THEN value END), 0) AS `12m`
-        FROM (
-            SELECT
-                mm.month AS month,
-                COALESCE(CAST(ROUND(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS SIGNED), 0) AS value
-            FROM (
-                SELECT 
-                    YEAR(rdh.TS) AS year, 
-                    MONTH(rdh.TS) AS month, 
-                    rdh.TAGNAME,
-                    MIN(rdh.TS) AS first_ts, 
-                    MAX(rdh.TS) AS last_ts
-                FROM TB_RAWDATA_HOUR rdh
-                INNER JOIN tb_peak_tag_inf pti 
-                    ON rdh.TAGNAME = pti.PWI_TAG
-                WHERE pti.IS_ALL = '1'
-                AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0
-                AND rdh.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
-                AND rdh.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00')
-                GROUP BY YEAR(rdh.TS), MONTH(rdh.TS), rdh.TAGNAME
-            ) mm 
-            LEFT JOIN TB_RAWDATA_HOUR rd_first 
-                ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
-            LEFT JOIN TB_RAWDATA_HOUR rd_last 
-                ON rd_last.TAGNAME = mm.TAGNAME AND rd_last.TS = mm.last_ts
-            GROUP BY mm.month
-        ) src
-    </select>
+		SELECT
+			CAST(year AS CHAR) AS year,
+			`1m`, `2m`, `3m`, `4m`, `5m`, `6m`, `7m`, `8m`, `9m`, `10m`, `11m`, `12m`
+		FROM
+			TB_GOALSETTING
+		WHERE TYPE = 'mm'
+		AND year IN (#{year} - 1, #{year})
+
+		UNION ALL
+
+		SELECT
+			CAST('base' AS CHAR) AS year,
+			COALESCE(MAX(CASE WHEN month = 1  THEN value END), 0) AS `1m`,
+			COALESCE(MAX(CASE WHEN month = 2  THEN value END), 0) AS `2m`,
+			COALESCE(MAX(CASE WHEN month = 3  THEN value END), 0) AS `3m`,
+			COALESCE(MAX(CASE WHEN month = 4  THEN value END), 0) AS `4m`,
+			COALESCE(MAX(CASE WHEN month = 5  THEN value END), 0) AS `5m`,
+			COALESCE(MAX(CASE WHEN month = 6  THEN value END), 0) AS `6m`,
+			COALESCE(MAX(CASE WHEN month = 7  THEN value END), 0) AS `7m`,
+			COALESCE(MAX(CASE WHEN month = 8  THEN value END), 0) AS `8m`,
+			COALESCE(MAX(CASE WHEN month = 9  THEN value END), 0) AS `9m`,
+			COALESCE(MAX(CASE WHEN month = 10 THEN value END), 0) AS `10m`,
+			COALESCE(MAX(CASE WHEN month = 11 THEN value END), 0) AS `11m`,
+			COALESCE(MAX(CASE WHEN month = 12 THEN value END), 0) AS `12m`
+		FROM (
+			SELECT
+				mm.month AS month,
+				COALESCE(CAST(ROUND(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS SIGNED), 0) AS value
+			FROM (
+				SELECT 
+					YEAR(rdh.TS) AS year, 
+					MONTH(rdh.TS) AS month, 
+					rdh.TAGNAME,
+					MIN(rdh.TS) AS first_ts, 
+					MAX(rdh.TS) AS last_ts
+				FROM TB_RAWDATA_HOUR rdh
+				INNER JOIN tb_peak_tag_inf pti 
+					ON rdh.TAGNAME = pti.PWI_TAG
+				WHERE pti.IS_ALL = '1'
+				AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0
+				AND rdh.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
+				AND rdh.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00')
+				GROUP BY YEAR(rdh.TS), MONTH(rdh.TS), rdh.TAGNAME
+			) mm 
+			LEFT JOIN TB_RAWDATA_HOUR rd_first 
+				ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
+			LEFT JOIN TB_RAWDATA_HOUR rd_last 
+				ON rd_last.TAGNAME = mm.TAGNAME AND rd_last.TS = mm.last_ts
+			GROUP BY mm.month
+		) src
+	</select>
 	
 	<insert id="updateGoal" parameterType="hashMap">
 		INSERT INTO TB_GOALSETTING(
