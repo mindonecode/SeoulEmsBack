@@ -98,6 +98,8 @@ public class DrvnConfig {
 	private double seoulBaTarget;           // 북악 07:00 목표 수위 (m)
 	@Value("${seoul.step.mh.threshold:4.0}")
 	private double seoulMhThreshold;        // 중간/최대부하 수위 임계 (m)
+	@Value("${seoul.step.load-adjust.enabled:true}")
+	private boolean seoulLoadAdjustEnabled; // 부하(L/M/H) 기반 ±1단계 조정 on/off. false 시 유클리드 거리 결과(closestPointIndex) 그대로 사용
 	private String[] seoulGnTags;           // @PostConstruct 에서 CSV 파싱
 	private String[] seoulBaTags;
 
@@ -3173,7 +3175,20 @@ public class DrvnConfig {
 			//   - 30분 타이머/수동 우선은 기존 TB_MNL_CHN_LOG throttle 로직이 별도로 보장
 			//   - 토/일/공휴일 보정: 일요일·공휴일 → L 강제, 토요일 H → M
 			//   - Seoul 인버터 미보유 → freqMap = null
+			//   - seoul.step.load-adjust.enabled=false 일 때는 부하 분기 전체 스킵 → 유클리드 거리 결과만 사용
 			if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
+					&& collectData != null && !collectData.isEmpty() && !seoulLoadAdjustEnabled) {
+				// === [Seoul/Dev] 부하 조정 OFF: 유클리드 거리(closestPointIndex)의 조합만 그대로 사용 ===
+				Object seoulPcRaw = collectData.get(closestPointIndex).get("pumpComb");
+				if (seoulPcRaw instanceof List) {
+					@SuppressWarnings("unchecked")
+					List<String> seoulPcList = (List<String>) seoulPcRaw;
+					returnComb = new ArrayList<>(seoulPcList);
+				}
+				freqMap = null;  // Seoul 인버터 없음
+				logger.info("[SEOUL] 부하조정 OFF (seoul.step.load-adjust.enabled=false) ts={} pump_grp={} baseIdx={} returnComb={}",
+						ts, pump_grp, closestPointIndex, returnComb);
+			} else if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
 					&& collectData != null && !collectData.isEmpty()) {
 				String seoulLoad = reduceMap.get(dateTime.getMonthValue()).get(dateTime.getHour());
 				HolidayChecker seoulHolidayChecker = new HolidayChecker();
