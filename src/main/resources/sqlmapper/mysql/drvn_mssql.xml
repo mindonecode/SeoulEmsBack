@@ -446,6 +446,27 @@
 			and tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 MINUTE)
 		limit 1
 	</select>
+
+	<!--
+	  임의 horizon(분) 예측 조회. prdctFlowPressure 의 일반화 버전.
+	  horizonMin = 10/60/120/180/360 등.
+	-->
+	<select id="prdctFlowPressureByHorizon" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			tctr.PRDCT_VALUE as value,
+			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts
+		from
+			TB_CTR_TNK_RST tctr
+		WHERE
+			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
+			and tctr.RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
+				 WHERE UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
+				   AND RGSTR_TIME &lt;= #{nowDateTime}
+			)
+			and tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL #{horizonMin} MINUTE)
+		limit 1
+	</select>
 	<select id="curFlowPressure" parameterType="hashmap" resultType="hashmap">
 		SELECT
 		VALUE as value,
@@ -1196,7 +1217,61 @@
 		,CHNG_STTS = #{chng_stts}
 		</if>;
 	</insert>
-	
+
+	<!--
+	  5단계 horizon 펌프 예측 조합 INSERT.
+	  insertDrvnPumpYnData (TB_CTR_PUMPYN_RST) 와 동일 형식 + PRDCT_TIME, HORIZON_MIN 추가.
+	  RGSTR_TIME 은 산출 시점(now floor minute), ts 는 예측 대상 시각(PRDCT_TIME).
+	-->
+	<insert id="insertDrvnPumpYnPrdctData" parameterType="hashmap">
+		INSERT INTO TB_CTR_PUMPYN_PRDCT_RST
+		(
+			OPT_IDX, PUMP_GRP, PUMP_IDX, PUMP_TYP, PUMP_YN, FREQ,
+			RGSTR_TIME, PRDCT_TIME, HORIZON_MIN,
+			PRDCT_MEAN, TUBE_PRSR_PRDCT, PWR_PRDCT
+		)
+		VALUES
+		(
+			#{opt_idx}, #{PUMP_GRP}, #{PUMP_IDX}, #{PUMP_TYP}, #{pump_yn}, #{freq},
+			#{rgstrTime}, #{ts}, #{horizonMin},
+			#{flow}, #{pressure}, #{pwrPrdct}
+		)
+		ON DUPLICATE KEY UPDATE
+		PUMP_YN = #{pump_yn},
+		PUMP_TYP = #{PUMP_TYP},
+		PRDCT_TIME = #{ts},
+		PRDCT_MEAN = #{flow},
+		TUBE_PRSR_PRDCT = #{pressure},
+		PWR_PRDCT = #{pwrPrdct},
+		FREQ = #{freq}
+	</insert>
+
+	<!--
+	  펌프대수차트 미래 segment 용. 각 horizon(10/60/120/180/360) 별로
+	  가장 최근 RGSTR_TIME 산출 결과의 펌프별 ON/OFF 를 반환.
+	  가중치 합산은 서비스(DrvnService.buildForecastList) 에서 수행.
+	-->
+	<select id="selectPumpRunCountForecast" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			p.HORIZON_MIN,
+			DATE_FORMAT(p.PRDCT_TIME, '%Y-%m-%d %H:%i') AS PRDCT_TIME,
+			p.PUMP_IDX,
+			p.PUMP_YN,
+			p.PUMP_TYP,
+			p.FREQ
+		FROM TB_CTR_PUMPYN_PRDCT_RST p
+		JOIN (
+			SELECT HORIZON_MIN, MAX(RGSTR_TIME) AS MAX_TS
+			FROM TB_CTR_PUMPYN_PRDCT_RST
+			WHERE PUMP_GRP = #{PUMP_GRP}
+			  AND RGSTR_TIME &lt;= #{nowDateTime}
+			GROUP BY HORIZON_MIN
+		) latest
+		  ON latest.HORIZON_MIN = p.HORIZON_MIN
+		 AND latest.MAX_TS = p.RGSTR_TIME
+		WHERE p.PUMP_GRP = #{PUMP_GRP}
+	</select>
+
 	<insert id="insertInQuiryPumpYnData" parameterType="hashmap">
 		INSERT INTO TB_CTR_PUMPYN_INQUIRY
 			(
@@ -2322,6 +2397,14 @@
 		AND
 		PUMP_PRIORITY = #{PUMP_PRIORITY}
 	</update>
+
+	<update id="setPumpUseYn" parameterType="hashmap">
+		UPDATE TB_PUMP_CAL
+		SET USE_YN = #{USE_YN}
+		WHERE
+		PUMP_COUNT = #{PUMP_COUNT}
+	</update>
+
 	<update id="disableGroupPumpCal" parameterType="hashmap">
 		UPDATE TB_PUMP_CAL
 		SET USE_YN = 0
@@ -2437,8 +2520,38 @@
 		  ON cppi.PMB_TAG = rd.TAGNAME
 		WHERE cppi.PUMP_GRP = #{PUMP_GRP}
 		  AND cppi.USE_YN = '1'
-		  AND rd.TS &gt;= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+		  AND rd.TS &gt;= #{startDate}
+		  AND rd.TS &lt;= #{endDate}
 		ORDER BY rd.TS
+	</select>
+
+	<!--
+	  윈도 시작 직전 각 펌프의 마지막 ON/OFF 상태 시드 조회.
+	  - selectPumpRunHistoryByGrp 의 startDate 직전 시점에 각 PMB_TAG 별 최신 VALUE 1건씩 반환.
+	  - PMB 가 변경 시점 위주로 기록될 때 daysAgo>0 윈도 초입이 OFF 로 잘못 그려지는 문제 방지.
+	-->
+	<select id="selectPumpLastStateBeforeGrp" parameterType="hashmap" resultType="HashMap">
+		SELECT
+			rd.TAGNAME    AS TAGNAME,
+			rd.VALUE      AS VALUE,
+			cppi.PUMP_IDX AS PUMP_IDX
+		FROM TB_RAWDATA rd
+		JOIN TB_CTR_PRF_PUMPMST_INF cppi
+		  ON cppi.PMB_TAG = rd.TAGNAME
+		JOIN (
+			SELECT rd2.TAGNAME AS TAGNAME, MAX(rd2.TS) AS MAX_TS
+			FROM TB_RAWDATA rd2
+			JOIN TB_CTR_PRF_PUMPMST_INF cppi2
+			  ON cppi2.PMB_TAG = rd2.TAGNAME
+			WHERE cppi2.PUMP_GRP = #{PUMP_GRP}
+			  AND cppi2.USE_YN = '1'
+			  AND rd2.TS &lt; #{startDate}
+			GROUP BY rd2.TAGNAME
+		) latest
+		  ON latest.TAGNAME = rd.TAGNAME
+		 AND latest.MAX_TS  = rd.TS
+		WHERE cppi.PUMP_GRP = #{PUMP_GRP}
+		  AND cppi.USE_YN = '1'
 	</select>
 
 	<!--
@@ -2620,5 +2733,87 @@
 			AND PRDCT_TIME = DATE_ADD(RGSTR_TIME, INTERVAL 10 MINUTE)
 		ORDER BY PRDCT_TIME, DSTRB_ID
 	</select>
+
+	<!--
+	  ===========================================================
+	  10분 주기 예측/실측 유량·펌프조합 스냅샷 (백엔드 분석용, 화면 미노출)
+	  - 적재: DrvnConfig.scheduleFlowCombSnapshotTask
+	  - 테이블: TB_PUMP_FLOW_COMB_SNAPSHOT (tb_pump_flow_comb_snapshot.sql)
+	  ===========================================================
+	-->
+	<!--
+	  예측 유량: TB_CTR_TNK_RST 에서 PRDCT_TIME = rgstr_time + 10분 인 예측값을 가져옴.
+	  예) rgstr_time=14:00 → PRDCT_TIME=14:10 시점의 예측 유량.
+	  기존 prdctFlowPressure 와 동일 로직, ROUND(.,1) 적용.
+	-->
+	<select id="selectLatestPredictedFlowTnk" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			ROUND(tctr.PRDCT_VALUE, 1) AS prdct_flow,
+			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time
+		FROM TB_CTR_TNK_RST tctr
+		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
+			AND tctr.RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
+				WHERE UPPER(DSTRB_ID) = UPPER(#{dstrb_id})
+					AND RGSTR_TIME &lt;= #{rgstr_time}
+			)
+			AND tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 MINUTE)
+		LIMIT 1
+	</select>
+
+	<!--
+	  예측 펌프 조합: TB_CTR_PUMPYN_RST 의 최신 RGSTR_TIME (≤ rgstr_time) 에서 PUMP_YN=1 인 PUMP_IDX CSV.
+	-->
+	<select id="selectLatestPredictedComb" parameterType="hashmap" resultType="String">
+		SELECT GROUP_CONCAT(CASE WHEN t.PUMP_YN = 1 THEN t.PUMP_IDX END ORDER BY t.PUMP_IDX SEPARATOR ',') AS prdct_comb
+		FROM TB_CTR_PUMPYN_RST t
+		WHERE t.PUMP_GRP = #{pump_grp}
+			AND t.RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_PUMPYN_RST
+				WHERE PUMP_GRP = #{pump_grp}
+					AND RGSTR_TIME &lt;= #{rgstr_time}
+			)
+	</select>
+
+	<select id="selectLatestActualFlow" parameterType="hashmap" resultType="hashmap">
+		SELECT DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') AS ts, tr.VALUE AS value
+		FROM TB_RAWDATA tr, TB_CTR_PRF_PUMPMST_INF tcppi
+		WHERE tr.TAGNAME = tcppi.FRI_TAG
+			AND tcppi.PUMP_GRP = #{pump_grp}
+			AND tr.TS &lt;= #{rgstr_time}
+			AND tr.TS &gt; DATE_SUB(#{rgstr_time}, INTERVAL 10 MINUTE)
+		ORDER BY tr.TS DESC
+		LIMIT 1
+	</select>
+
+	<select id="selectLatestActualComb" parameterType="hashmap" resultType="String">
+		SELECT GROUP_CONCAT(t.PUMP_IDX ORDER BY t.PUMP_IDX SEPARATOR ',') AS actl_comb
+		FROM (
+			SELECT cppi.PUMP_IDX, rd.value
+			FROM TB_RAWDATA rd
+			JOIN TB_CTR_PRF_PUMPMST_INF cppi ON rd.TAGNAME = cppi.PMB_TAG
+			WHERE cppi.PUMP_GRP = #{pump_grp}
+				AND rd.TS = (
+					SELECT MAX(sub.TS) FROM TB_RAWDATA sub
+					WHERE sub.TAGNAME = cppi.PMB_TAG
+						AND sub.TS &lt;= #{rgstr_time}
+						AND sub.TS &gt; DATE_SUB(#{rgstr_time}, INTERVAL 10 MINUTE)
+				)
+		) t
+		WHERE t.value = 1
+	</select>
+
+	<insert id="insertFlowCombSnapshot" parameterType="hashmap">
+		INSERT INTO TB_PUMP_FLOW_COMB_SNAPSHOT
+			(RGSTR_TIME, PRDCT_TIME, PUMP_GRP, PRDCT_FLOW, ACTL_FLOW, PRDCT_COMB, ACTL_COMB)
+		VALUES
+			(#{rgstr_time}, #{prdct_time}, #{pump_grp}, #{prdct_flow}, #{actl_flow}, #{prdct_comb}, #{actl_comb})
+		ON DUPLICATE KEY UPDATE
+			PRDCT_TIME = #{prdct_time},
+			PRDCT_FLOW = #{prdct_flow},
+			ACTL_FLOW  = #{actl_flow},
+			PRDCT_COMB = #{prdct_comb},
+			ACTL_COMB  = #{actl_comb}
+	</insert>
 
 </mapper>
