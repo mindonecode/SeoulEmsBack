@@ -5423,20 +5423,27 @@ public class DrvnService {
 	 *
 	 * @param pumpGrp 펌프 그룹 (서울 송수펌프는 1)
 	 * @param daysAgo 기준 시각을 현재로부터 며칠 전으로 이동. 0=현재, 1=1일전, 7=1주전.
-	 *                윈도 = [now - daysAgo*24h - 24h, now - daysAgo*24h]
+	 *                윈도 = daysAgo==0 : [now-24h, now]                                (forecast가 미래 6h 채움)
+	 *                       daysAgo>0  : [now - daysAgo*24h - 24h, now - daysAgo*24h + 6h]
+	 *                                    (차트 우측 미래 6h 영역도 이미 과거이므로 실측 raw bucket으로 확보)
 	 * @return Map {
-	 *   buckets : 144개 [startMin(0~1440), endMin, value] (0분 = 윈도 시작, 1440분 = 윈도 끝),
+	 *   buckets : 10분 단위 [startMin, endMin, value]. daysAgo==0 일 때 144개(=24h),
+	 *             daysAgo>0 일 때 180개(=30h, 마지막 36개가 차트의 미래 6h 영역 채움),
 	 *   forecast: daysAgo==0 일 때만 5개 horizon segment [{horizonMin, prdctTime, value, startMin, endMin}]
-	 *             (1일전·1주전 응답에는 빈 배열)
+	 *             (1일전·1주전 응답에는 빈 배열 — 그 시간대는 buckets 의 미래 영역 36개로 이미 표시됨)
 	 * }
 	 */
 	public HashMap<String,Object> selectPumpRunCountHistory(int pumpGrp, int daysAgo){
 		final int totalMinutes = 1440;
 		final int bucketMinutes = 10;
-		final int bucketCount = totalMinutes / bucketMinutes;
+		// 1일전/1주전(daysAgo>0)은 차트의 미래 6h 영역도 이미 과거 = 실측 raw 존재 → 30h 까지 bucket 확장.
+		// 현재(daysAgo==0)는 미래 6h 영역은 forecast 가 채우므로 확장 불필요.
+		final int futureMinutes = (daysAgo > 0) ? 360 : 0;
+		final int bucketCount = (totalMinutes + futureMinutes) / bucketMinutes;
 
-		long endMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
-		long startMs = endMs - (long) totalMinutes * 60_000L;
+		long anchorMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
+		long startMs = anchorMs - (long) totalMinutes * 60_000L;
+		long endMs = anchorMs + (long) futureMinutes * 60_000L;
 		Timestamp startTs = new Timestamp(startMs);
 		Timestamp endTs = new Timestamp(endMs);
 
