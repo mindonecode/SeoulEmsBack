@@ -447,6 +447,8 @@ public interface DrvnMapper {
 
 	void setPumpListYn(HashMap<String, Object> item);
 
+	void setPumpUseYn(HashMap<String, Object> map);
+
 	void disableGroupPumpCal(HashMap<String, Object> changeCal);
 
 	void enableGroupPumpCal(HashMap<String, Object> changeCal);
