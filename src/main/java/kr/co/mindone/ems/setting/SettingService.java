@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.text.DecimalFormat;
+import java.time.Year;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -118,7 +119,8 @@ public class SettingService {
      * @return 목표 전력 정보 리스트
      */
     public List<HashMap<String, Object>> selectGetSetting() {
-        return settingMapper.selectGetSetting();
+        String year = Year.now().toString();
+        return settingMapper.selectGetSetting(year);
     }
     /**
      * 목표 전력정보 업데이트

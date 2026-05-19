@@ -145,24 +145,51 @@
 			AND RATE_IDX IN ('1','2','3')
 			AND STN_TM=#{stn_tm}
 	</update>
-
-	<select id="getUsageData" resultType="hashMap" parameterType="string">
-		<![CDATA[
+	<select id="getUsageData" resultType="HashMap" parameterType="HashMap">
 		SELECT
-			YEAR(rdh.ts) AS year,
-			MONTH(rdh.ts) AS month,
-			sum(ROUND(rdh.VALUE*pti.PWQ_UNIT_VALUE,2)) AS value
-		FROM
-			TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-		WHERE
-			rdh.tagname = pti.PWQ_TAG AND pti.IS_ALL ='1' AND pti.MNTR_YN='1'
-			and DATE_FORMAT(ts,'%Y') = DATE_FORMAT(CONCAT(#{year},'-01-01'),'%Y')
-		GROUP BY
-			YEAR(rdh.ts), MONTH(rdh.ts)
-		ORDER BY
-			YEAR(rdh.ts), MONTH(rdh.ts)
-		 ]]>
+            m.year,
+            m.month,
+            COALESCE(CAST(ROUND(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS SIGNED), 0) AS value
+        FROM (
+            SELECT #{year} + 0 AS year, 1 AS month UNION ALL
+            SELECT #{year} + 0, 2  UNION ALL
+            SELECT #{year} + 0, 3  UNION ALL
+            SELECT #{year} + 0, 4  UNION ALL
+            SELECT #{year} + 0, 5  UNION ALL
+            SELECT #{year} + 0, 6  UNION ALL
+            SELECT #{year} + 0, 7  UNION ALL
+            SELECT #{year} + 0, 8  UNION ALL
+            SELECT #{year} + 0, 9  UNION ALL
+            SELECT #{year} + 0, 10 UNION ALL
+            SELECT #{year} + 0, 11 UNION ALL
+            SELECT #{year} + 0, 12
+        ) m
+        LEFT JOIN (
+            -- [수정 핵심] 하드코딩을 걷어내고 메타 테이블과 INNER JOIN으로 태그를 동적 매칭
+            SELECT
+                YEAR(rd.TS) AS year,
+                MONTH(rd.TS) AS month,
+                rd.TAGNAME,
+                MIN(rd.TS) AS first_ts,
+                MAX(rd.TS) AS last_ts
+            FROM TB_RAWDATA_HOUR rd
+            INNER JOIN tb_peak_tag_inf pti 
+                ON rd.TAGNAME = pti.PWI_TAG -- 메타 테이블의 태그 컬럼명 매칭
+            WHERE pti.IS_ALL = '1'           -- 활성화된 전체 태그 대상 필터
+            -- 숫자로 형변환하여 초기 수집 시점의 0 또는 0.00 오차 데이터 배제
+            AND CAST(rd.VALUE AS DECIMAL(20,4)) &gt; 0.0
+            AND rd.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
+            AND rd.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00')
+            GROUP BY YEAR(rd.TS), MONTH(rd.TS), rd.TAGNAME
+        ) mm ON m.year = mm.year AND m.month = mm.month
+        LEFT JOIN TB_RAWDATA_HOUR rd_first
+            ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
+        LEFT JOIN TB_RAWDATA_HOUR rd_last
+            ON rd_last.TAGNAME = mm.TAGNAME AND rd_last.TS = mm.last_ts
+        GROUP BY m.year, m.month
+        ORDER BY m.year, m.month
 	</select>
+	
 	<select id="getGoalData" resultType="hashMap" parameterType="string">
 		SELECT
 			*
@@ -172,170 +199,62 @@
 			YEAR = #{year}
 	</select>
 	<select id="selectGetSetting" resultType="HashMap" parameterType="HashMap">
-		<![CDATA[
-		SELECT
-			year, 1m,2m,3m,4m,5m,6m,7m,8m,9m,10m,11m,12m
-		FROM
-			TB_GOALSETTING b
-		WHERE TYPE = 'mm'
-		UNION ALL
-		(
-			SELECT
-				base,
-				IFNULL(max(1m), CONVERT(0, UNSIGNED)) as 1m,
-				IFNULL(max(2m), CONVERT(0, UNSIGNED)) as 2m,
-				IFNULL(max(3m), CONVERT(0, UNSIGNED)) as 3m,
-				IFNULL(max(4m), CONVERT(0, UNSIGNED)) as 4m,
-				IFNULL(max(5m), CONVERT(0, UNSIGNED)) as 5m,
-				IFNULL(max(6m), CONVERT(0, UNSIGNED)) as 6m,
-				IFNULL(max(7m), CONVERT(0, UNSIGNED)) as 7m,
-				IFNULL(max(8m), CONVERT(0, UNSIGNED)) as 8m,
-				IFNULL(max(9m), CONVERT(0, UNSIGNED)) as 9m,
-				IFNULL(max(10m), CONVERT(0, UNSIGNED)) as 10m,
-				IFNULL(max(11m), CONVERT(0, UNSIGNED)) as 11m,
-				IFNULL(max(12m), CONVERT(0, UNSIGNED)) as 12m
-			FROM
-			(
-				(SELECT 'base' FROM DUAL) target,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 1m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-01-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-02-01 00:00:00')
-				) a,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 2m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-02-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-03-01 00:00:00')
-				) b,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 3m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-03-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-04-01 00:00:00')
-				) c,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 4m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-04-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-05-01 00:00:00')
-				) d,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 5m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-05-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-06-01 00:00:00')
-				) e,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 6m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-06-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-07-01 00:00:00')
-				) f,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 7m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-07-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-08-01 00:00:00')
-				) g,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 8m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-08-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-09-01 00:00:00')
-				) h,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 9m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-09-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-10-01 00:00:00')
-				) i,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 10m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-10-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-11-01 00:00:00')
-				) j,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 11m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-11-01 00:00:00')
-					and rdh.ts < CONCAT(DATE_FORMAT(NOW(), '%Y'), '-12-01 00:00:00')
-				) k,
-				(SELECT
-					ROUND(sum(rdh.VALUE*pti.PWQ_UNIT_VALUE),2) AS 12m
-					FROM
-					TB_RAWDATA_HOUR_INGRT rdh, TB_PEAK_TAG_INF pti
-					WHERE
-					rdh.tagname = pti.PWQ_TAG
-					and pti.mntr_yn = '1'
-					and pti.IS_ALL ='1'
-					and rdh.ts >= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-12-01 00:00:00')
-					and rdh.ts <= CONCAT(DATE_FORMAT(NOW(), '%Y'), '-12-31 23:59:59')
-				) l
-			)
-		)
-		ORDER BY
-			YEAR desc
-		]]>
+		-- 1. 목표량 조회 (기존 로직 유지)
+        SELECT
+            year, `1m`, `2m`, `3m`, `4m`, `5m`, `6m`, `7m`, `8m`, `9m`, `10m`, `11m`, `12m`
+        FROM
+            TB_GOALSETTING
+        WHERE TYPE = 'mm'
+        and year IN (#{year} -1, #{year})
+        
+        UNION ALL
+        
+        -- 2. 실제 사용량 조회 (하드코딩 제거 및 동적 태그 집계 구조)
+        SELECT
+            #{year} AS year,
+            COALESCE(MAX(CASE WHEN month = 1  THEN value END), 0) AS `1m`,
+            COALESCE(MAX(CASE WHEN month = 2  THEN value END), 0) AS `2m`,
+            COALESCE(MAX(CASE WHEN month = 3  THEN value END), 0) AS `3m`,
+            COALESCE(MAX(CASE WHEN month = 4  THEN value END), 0) AS `4m`,
+            COALESCE(MAX(CASE WHEN month = 5  THEN value END), 0) AS `5m`,
+            COALESCE(MAX(CASE WHEN month = 6  THEN value END), 0) AS `6m`,
+            COALESCE(MAX(CASE WHEN month = 7  THEN value END), 0) AS `7m`,
+            COALESCE(MAX(CASE WHEN month = 8  THEN value END), 0) AS `8m`,
+            COALESCE(MAX(CASE WHEN month = 9  THEN value END), 0) AS `9m`,
+            COALESCE(MAX(CASE WHEN month = 10 THEN value END), 0) AS `10m`,
+            COALESCE(MAX(CASE WHEN month = 11 THEN value END), 0) AS `11m`,
+            COALESCE(MAX(CASE WHEN month = 12 THEN value END), 0) AS `12m`
+        FROM (
+            -- 월별 사용량 도출 최종 연산부
+            SELECT
+                mm.month AS month,
+                COALESCE(CAST(ROUND(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS SIGNED), 0) AS value
+            FROM (
+                -- [여기가 핵심] 제안하신 메타 정보 테이블 조인 및 기간 조건 결합 영역
+                SELECT 
+                    YEAR(rdh.TS) AS year, 
+                    MONTH(rdh.TS) AS month, 
+                    rdh.TAGNAME,
+                    MIN(rdh.TS) AS first_ts, 
+                    MAX(rdh.TS) AS last_ts
+                FROM TB_RAWDATA_HOUR rdh
+                INNER JOIN tb_peak_tag_inf pti 
+                    ON rdh.TAGNAME = pti.PWI_TAG -- 태그명 동적 매칭
+                WHERE pti.IS_ALL = '1'            -- 활성화된 전체 태그 필터 조건
+                AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0 -- 0 값 오류 방지 필터
+                AND rdh.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00') -- 파라미터 기반 시작 기간 조건
+                AND rdh.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00') -- 파라미터 기반 종료 기간 조건
+                GROUP BY YEAR(rdh.TS), MONTH(rdh.TS), rdh.TAGNAME
+            ) mm 
+            -- 값 매칭을 위해 외부 조인 대상도 동일하게 TB_RAWDATA_HOUR 테이블로 교체
+            LEFT JOIN TB_RAWDATA_HOUR rd_first 
+                ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
+            LEFT JOIN TB_RAWDATA_HOUR rd_last 
+                ON rd_last.TAGNAME = mm.TAGNAME AND rd_last.TS = mm.last_ts
+            GROUP BY mm.month
+        ) src
 	</select>
-
+	
 	<insert id="updateGoal" parameterType="hashMap">
 		INSERT INTO TB_GOALSETTING(
 			YEAR

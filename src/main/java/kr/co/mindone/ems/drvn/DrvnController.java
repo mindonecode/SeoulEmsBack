@@ -497,7 +497,6 @@ public class DrvnController extends BaseController {
 	@PostMapping("/savePumpComb")
 	public ResponseObject<String> savePumpComb(@RequestBody List<HashMap<String, Object>> updateMap){
 		drvnService.savePumpComb(updateMap);
-		drvnService.changePumpCal(updateMap);
 		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, "조합 상세정보 업데이트");
 	}
 
