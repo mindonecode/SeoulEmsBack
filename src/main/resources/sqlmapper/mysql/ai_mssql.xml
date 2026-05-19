@@ -2152,17 +2152,9 @@
 				JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
 			WHERE
 				pti.IS_ALL = '1' AND pti.MNTR_YN = '1' AND pti.CLSFC != '오존설비'
-				<if test='range == "dayAgo"'>
-					AND rdh.ts &gt;= DATE_SUB(CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00'), INTERVAL 1 HOUR)
-					AND rdh.ts &lt;= CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 23:59:59')
-				</if>
 				<if test='range == "day"'>
 					AND rdh.ts &gt;= DATE_SUB(CONCAT(CURDATE(), ' 00:00:00'), INTERVAL 1 HOUR)
 					AND rdh.ts &lt;= CONCAT(CURDATE(), ' 23:59:59')
-				</if>
-				<if test='range == "week"'>
-					AND rdh.ts &gt;= DATE_SUB(ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 0), INTERVAL 1 HOUR) 
-					AND rdh.ts &lt;= ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 6)
 				</if>
 				<if test='range == "month"'>
 					AND rdh.ts &gt;= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 1 HOUR)
@@ -2185,9 +2177,7 @@
 		)
 		SELECT
 			ROUND(SUM(diff_data.use_value), 2) AS value,
-			<if test='range == "dayAgo"'>'dayAgo' AS 'range',</if>
 			<if test='range == "day"'>'day' AS 'range',</if>
-			<if test='range == "week"'>'week' AS 'range',</if>
 			<if test='range == "month"'>'month' AS 'range',</if>
 			<if test='range == "year"'>'year' AS 'range',</if>
 			rri.TIMEZONE AS 'timezone',
@@ -2195,17 +2185,11 @@
 			ROUND(SUM(diff_data.use_value * rri.ELCTR_RATE), 2) AS cost
 		FROM
 			diff_data
-			JOIN TB_RT_RATE_INF rri ON SUBSTRING(diff_data.ts, 12, 2) = rri.STN_TM
+			JOIN TB_RT_RATE_INF rri ON CAST(SUBSTRING(diff_data.ts, 12, 2) AS UNSIGNED) = CAST(rri.STN_TM AS UNSIGNED)
 		WHERE
 			rri.RATE_IDX = '1' AND rri.MNTH = MONTH(CURDATE())
-			<if test='range == "dayAgo"'>
-				AND diff_data.ts &gt;= CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00')
-			</if>
 			<if test='range == "day"'>
 				AND diff_data.ts &gt;= CONCAT(CURDATE(), ' 00:00:00')
-			</if>
-			<if test='range == "week"'>
-				AND diff_data.ts &gt;= ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 0)
 			</if>
 			<if test='range == "month"'>
 				AND diff_data.ts &gt;= DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00')
