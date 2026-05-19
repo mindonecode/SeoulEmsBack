@@ -199,7 +199,6 @@
 			YEAR = #{year}
 	</select>
 	<select id="selectGetSetting" resultType="HashMap" parameterType="HashMap">
-		-- 1. 목표량 조회 (기존 로직 유지)
         SELECT
             year, `1m`, `2m`, `3m`, `4m`, `5m`, `6m`, `7m`, `8m`, `9m`, `10m`, `11m`, `12m`
         FROM
@@ -209,9 +208,8 @@
         
         UNION ALL
         
-        -- 2. 실제 사용량 조회 (하드코딩 제거 및 동적 태그 집계 구조)
         SELECT
-            #{year} AS year,
+            'base' AS year,
             COALESCE(MAX(CASE WHEN month = 1  THEN value END), 0) AS `1m`,
             COALESCE(MAX(CASE WHEN month = 2  THEN value END), 0) AS `2m`,
             COALESCE(MAX(CASE WHEN month = 3  THEN value END), 0) AS `3m`,
@@ -225,12 +223,10 @@
             COALESCE(MAX(CASE WHEN month = 11 THEN value END), 0) AS `11m`,
             COALESCE(MAX(CASE WHEN month = 12 THEN value END), 0) AS `12m`
         FROM (
-            -- 월별 사용량 도출 최종 연산부
             SELECT
                 mm.month AS month,
                 COALESCE(CAST(ROUND(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS SIGNED), 0) AS value
             FROM (
-                -- [여기가 핵심] 제안하신 메타 정보 테이블 조인 및 기간 조건 결합 영역
                 SELECT 
                     YEAR(rdh.TS) AS year, 
                     MONTH(rdh.TS) AS month, 
@@ -239,21 +235,20 @@
                     MAX(rdh.TS) AS last_ts
                 FROM TB_RAWDATA_HOUR rdh
                 INNER JOIN tb_peak_tag_inf pti 
-                    ON rdh.TAGNAME = pti.PWI_TAG -- 태그명 동적 매칭
-                WHERE pti.IS_ALL = '1'            -- 활성화된 전체 태그 필터 조건
-                AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0 -- 0 값 오류 방지 필터
-                AND rdh.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00') -- 파라미터 기반 시작 기간 조건
-                AND rdh.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00') -- 파라미터 기반 종료 기간 조건
+                    ON rdh.TAGNAME = pti.PWI_TAG
+                WHERE pti.IS_ALL = '1'
+                AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0
+                AND rdh.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
+                AND rdh.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00')
                 GROUP BY YEAR(rdh.TS), MONTH(rdh.TS), rdh.TAGNAME
             ) mm 
-            -- 값 매칭을 위해 외부 조인 대상도 동일하게 TB_RAWDATA_HOUR 테이블로 교체
             LEFT JOIN TB_RAWDATA_HOUR rd_first 
                 ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
             LEFT JOIN TB_RAWDATA_HOUR rd_last 
                 ON rd_last.TAGNAME = mm.TAGNAME AND rd_last.TS = mm.last_ts
             GROUP BY mm.month
         ) src
-	</select>
+    </select>
 	
 	<insert id="updateGoal" parameterType="hashMap">
 		INSERT INTO TB_GOALSETTING(
