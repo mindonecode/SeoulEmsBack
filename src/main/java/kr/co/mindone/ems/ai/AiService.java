@@ -2040,44 +2040,12 @@ public class AiService {
         int nowOffset = Integer.parseInt(map.get("offset").toString());
         map.put("offset", nowOffset);
         List<HashMap<String, Object>> ctrList = aiMapper.selectPumpCtrHistoryList(map);
-        List<HashMap<String, Object>> aiModeList = aiMapper.selectAiModeList(map);
-
-        // aiModeList를 분까지만 + PUMP_GRP로 key 생성해서 Map으로 변환
-        Map<String, HashMap<String, Object>> aiModeMap = new HashMap<>();
-        for (HashMap<String, Object> aiMap : aiModeList) {
-            Object aiTimeObj = aiMap.get("RGSTR_TIME");
-            String aiTime = null;
-            if (aiTimeObj != null) {
-                aiTime = aiTimeObj.toString();
-            }
-            if (aiTime != null && aiMap.get("PUMP_GRP") != null) {
-                String aiTimeMinute = aiTime.substring(0, 16) + ":00"; // 'YYYY-MM-DD HH:MM:00'
-                String key = aiTimeMinute + "_" + aiMap.get("PUMP_GRP").toString();
-                aiModeMap.put(key, aiMap);
-            }
-        }
 
         // ctrList에 AI_STATUS 추가
         for (HashMap<String, Object> ctrMap : ctrList) {
-            String orderTime = ctrMap.get("ORDER_TIME") != null ? ctrMap.get("ORDER_TIME").toString() : null;
-            Object pumpGrp = ctrMap.get("PUMP_GRP");
             String aiStatus = "AI정보없음";
-
-            if (orderTime != null && pumpGrp != null) {
-                String orderTimeMinute = orderTime.substring(0, 16) + ":00";
-                String key = orderTimeMinute + "_" + pumpGrp.toString();
-
-                HashMap<String, Object> matchAi = aiModeMap.get(key);
-                if (matchAi != null && matchAi.containsKey("AI_MODE")) {
-                    Object aiMode = matchAi.get("AI_MODE");
-                    if ("0".equals(String.valueOf(aiMode))) {
-                        aiStatus = "AI운전";
-                    } else if ("1".equals(String.valueOf(aiMode))) {
-                        aiStatus = "AI추천";
-                    } else {
-                        aiStatus = "AI분석";
-                    }
-                }
+            if (ctrMap.get("AI_STATUS") != null) {
+                aiStatus = ctrMap.get("AI_STATUS").toString();
             }
             ctrMap.put("AI_STATUS", aiStatus);
         }

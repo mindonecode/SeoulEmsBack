@@ -3091,58 +3091,52 @@
 	</select>
 
 	<select id="selectPumpCtrHistoryList" parameterType="hashMap" resultType="hashMap">
-		<![CDATA[
-			select
-				DATE_FORMAT(hct.TIME, '%Y-%m-%d %H:%i:%s') as 'ORDER_TIME' ,
-				cppi.PUMP_NM,
-				hct.TAG,
-				CASE
-					WHEN hct.ANLY_CD = 'RUN' THEN '가동'
-					WHEN hct.ANLY_CD = 'STOP' THEN '중지'
-					WHEN hct.ANLY_CD = 'FREQ' THEN CONCAT('주파수(', CAST(hct.VALUE AS CHAR), ')')
-					ELSE 'None'
-				END as ANLY_CD,
-				CASE
-					WHEN hct.FLAG = '0' THEN '전송 등록'
-					WHEN hct.FLAG = '1' THEN '전송 완료'
-					WHEN hct.FLAG = '2' THEN '제어 완료'
-					ELSE '취소'
-				END as FLAG,
-				DATE_FORMAT(hct.UPDT_TIME, '%Y-%m-%d %H:%i:%s') as UPDT_TIME,
-				CASE
-					WHEN wtc.DEFAULT_VALUE = 0 THEN 'AI운전'
-					WHEN wtc.DEFAULT_VALUE = 1 THEN 'AI추천'
-					ELSE 'AI분석'
-				END AS 'AI_STATUS',
-				cppi.PUMP_GRP,
-				hct.RGSTR_TIME
-			from
-				TB_HMI_CTR_TAG hct,
-				TB_CTR_PRF_PUMPMST_INF cppi,
-				TB_WPP_TAG_CODE wtc
-			where
-				hct.TAG in (cppi.CTR_AUTO_TAG, cppi.CTR_AUTO_STOP_TAG, cppi.CTR_AUTO_FREQ_TAG)
-				and hct.ANLY_CD in ('RUN','STOP','FREQ')
-				and wtc.DISPLAY_ID='EMSPumpControl'
-				and wtc.FUNC_TYP ='PumpStatus'
-				and wtc.TAG_GRP = cppi.PUMP_GRP
-				and hct.TIME>= CONCAT(#{startDate}, ' 00:00:00')
-				and hct.TIME <= CONCAT(#{endDate}, ' 23:59:59')
-				order by hct.TIME DESC
-			LIMIT 60 OFFSET #{offset}
-		]]>
+		SELECT
+			DATE_FORMAT(hct.TIME, '%Y-%m-%d %H:%i:%s') as 'ORDER_TIME' ,
+			cppi.PUMP_NM,
+			hct.TAG,
+			CASE
+				WHEN hct.ANLY_CD = '0' THEN '가동'
+				WHEN hct.ANLY_CD = '1' THEN '중지'
+				WHEN hct.ANLY_CD = '2' THEN CONCAT('주파수(', CAST(hct.VALUE AS CHAR), ')')
+				ELSE 'None'
+			END as ANLY_CD,
+			CASE
+				WHEN hct.FLAG = '0' THEN '전송 등록'
+				WHEN hct.FLAG = '1' THEN '전송 완료'
+				WHEN hct.FLAG = '2' THEN '제어 완료'
+				ELSE '취소'
+			END as FLAG,
+			DATE_FORMAT(hct.UPDT_TIME, '%Y-%m-%d %H:%i:%s') as UPDT_TIME,
+			CASE
+				WHEN hct.AI_STATUS = '0' THEN 'AI운전'
+				WHEN hct.AI_STATUS = '1' THEN 'AI추천'
+				ELSE 'AI분석'
+			END AS 'AI_STATUS',
+			cppi.PUMP_GRP,
+			hct.RGSTR_TIME
+		FROM
+			TB_HMI_CTR_TAG hct,
+			TB_CTR_PRF_PUMPMST_INF cppi,
+			TB_WPP_TAG_CODE wtc
+		WHERE
+			hct.TAG in (cppi.CTR_AUTO_TAG, cppi.CTR_AUTO_STOP_TAG, cppi.CTR_AUTO_FREQ_TAG)
+			and hct.ANLY_CD in ('0','1','2')
+			and wtc.DISPLAY_ID='EMSPumpControl'
+			and wtc.FUNC_TYP ='PumpStatus'
+			and wtc.TAG_GRP = cppi.PUMP_GRP
+			and hct.TIME &gt;= CONCAT(#{startDate}, ' 00:00:00')
+			and hct.TIME &lt;= CONCAT(#{endDate}, ' 23:59:59')
+		ORDER BY hct.TIME DESC
+		LIMIT 60 OFFSET #{offset}
 	</select>
 
 	<select id="selectAiModeList" parameterType="hashmap" resultType="hashmap">
-		<![CDATA[
-			SELECT RGSTR_TIME, PUMP_GRP, AI_MODE, IS_WORK, CUR_PUMP, PRE_PUMP, FLOW_CTR
-			FROM TB_AI_MODE_RST
-			WHERE
-			RGSTR_TIME >= CONCAT(#{startDate}, ' 00:00:00')
-			and RGSTR_TIME <= CONCAT(#{endDate}, ' 23:59:59')
-			ORDER BY RGSTR_TIME
-			;
-		]]>
+		SELECT RGSTR_TIME, PUMP_GRP, AI_MODE, IS_WORK, CUR_PUMP, PRE_PUMP, FLOW_CTR
+		FROM TB_AI_MODE_RST
+		WHERE RGSTR_TIME &gt;= CONCAT(#{startDate}, ' 00:00:00')
+			AND RGSTR_TIME &lt;= CONCAT(#{endDate}, ' 23:59:59')
+		ORDER BY RGSTR_TIME;
 	</select>
 
 	<select id="selectPumpCtrHistoryCount" parameterType="hashMap" resultType="int">
