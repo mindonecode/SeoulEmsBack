@@ -2068,25 +2068,33 @@
 
 	<select id="peak_max" resultType="hashMap">
 		SELECT DATE_FORMAT(ts, '%Y.%m') as peak_date,
-			ROUND(MAX(diff_value) / 60, 3) as value,
+			ROUND(MAX(per_min_value), 2) as value,
 			MAX(PWI_UNIT) as unit
 		FROM
 			(
-				select ts,
-					value - LAG(value) OVER(ORDER BY ts) as diff_value,
-					PWI_UNIT
-				from
+				/* 타임스탬프별로 전체 태그 합산 후 1분당 사용량 집계 */
+				SELECT ts,
+					SUM(per_min_value) AS per_min_value,
+					MAX(PWI_UNIT) AS PWI_UNIT
+				FROM
 					(
-						select date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
-							SUM(ROUND(rdh.VALUE*pti.PWI_UNIT_VALUE,2)) AS value,
-							MAX(pti.PWI_UNIT) AS PWI_UNIT
-						from TB_RAWDATA_HOUR rdh
-							join TB_PEAK_TAG_INF pti on rdh.tagname = pti.PWI_TAG
-						where pti.IS_ALL = '1' and pti.CLSFC != '오존설비' and pti.mntr_yn = '1' and rdh.value != 0
-							and rdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 12 MONTH, '%Y-%m-01 00:00:00')
-							and rdh.ts &lt;= LAST_DAY(NOW())
-						GROUP BY rdh.ts
+						/* 태그별 누적값 차이를 실제 시간 간격(분)으로 나눠 1분당 사용량 계산 */
+						SELECT
+							date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
+							ROUND(
+								(rdh.VALUE - LAG(rdh.VALUE) OVER(PARTITION BY rdh.tagname ORDER BY rdh.ts))
+								/ NULLIF(TIMESTAMPDIFF(MINUTE, LAG(rdh.ts) OVER(PARTITION BY rdh.tagname ORDER BY rdh.ts), rdh.ts), 0)
+								* pti.PWI_UNIT_VALUE,
+							2) AS per_min_value,
+							pti.PWI_UNIT
+						FROM TB_RAWDATA_HOUR rdh
+							JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
+						WHERE pti.IS_ALL = '1' AND pti.CLSFC != '오존설비' AND pti.mntr_yn = '1'
+							AND rdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
+							AND rdh.ts &lt;= LAST_DAY(NOW())
 					) a
+				WHERE per_min_value &gt; 0 AND per_min_value &lt; 2000
+				GROUP BY ts
 			) b
 		GROUP BY peak_date
 		ORDER BY peak_date
