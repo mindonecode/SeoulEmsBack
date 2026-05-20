@@ -149,7 +149,18 @@
 		SELECT
             m.year,
             m.month,
-            COALESCE(CAST(ROUND(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS SIGNED), 0) AS value
+            COALESCE(CAST(ROUND(SUM(
+                CASE
+                    -- NK00AE_E_SV0011GCB_IWH: 롤오버(음수)면 천만 보정
+                    WHEN mm.TAGNAME = 'NK00AE_E_SV0011GCB_IWH'
+                         AND (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &lt; 0
+                        THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) + 10000000 - CAST(rd_first.VALUE AS DECIMAL(20,4))
+                    -- 나머지: 정상 차이 (음수면 0)
+                    WHEN (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &gt;= 0
+                        THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))
+                    ELSE 0
+                END
+            ), 0) AS SIGNED), 0) AS value
         FROM (
             SELECT #{year} + 0 AS year, 1 AS month UNION ALL
             SELECT #{year} + 0, 2  UNION ALL
@@ -176,6 +187,7 @@
             INNER JOIN tb_peak_tag_inf pti 
                 ON rd.TAGNAME = pti.PWI_TAG -- 메타 테이블의 태그 컬럼명 매칭
             WHERE pti.IS_ALL = '1'           -- 활성화된 전체 태그 대상 필터
+            AND rd.TAGNAME LIKE '%\_IWH' ESCAPE '\\'  -- IWH 적산 태그만 (IKW 순시 제외)
             -- 숫자로 형변환하여 초기 수집 시점의 0 또는 0.00 오차 데이터 배제
             AND CAST(rd.VALUE AS DECIMAL(20,4)) &gt; 0.0
             AND rd.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
@@ -226,7 +238,18 @@
 		FROM (
 			SELECT
 				mm.month AS month,
-				COALESCE(CAST(ROUND(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS SIGNED), 0) AS value
+				COALESCE(CAST(ROUND(SUM(
+					CASE
+						-- NK00AE_E_SV0011GCB_IWH: 롤오버(음수)면 천만 보정
+						WHEN mm.TAGNAME = 'NK00AE_E_SV0011GCB_IWH'
+						     AND (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &lt; 0
+							THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) + 10000000 - CAST(rd_first.VALUE AS DECIMAL(20,4))
+						-- 나머지: 정상 차이 (음수면 0)
+						WHEN (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &gt;= 0
+							THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))
+						ELSE 0
+					END
+				), 0) AS SIGNED), 0) AS value
 			FROM (
 				SELECT 
 					YEAR(rdh.TS) AS year, 
@@ -238,6 +261,7 @@
 				INNER JOIN tb_peak_tag_inf pti 
 					ON rdh.TAGNAME = pti.PWI_TAG
 				WHERE pti.IS_ALL = '1'
+				AND rdh.TAGNAME LIKE '%\_IWH' ESCAPE '\\'
 				AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0
 				AND rdh.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
 				AND rdh.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00')
