@@ -1310,41 +1310,116 @@
 			]]>
 	</select>
 	<!-- 최적요금제분석 -->
-	<select id="selectRtRate" parameterType="hashMap" resultType="hashMap">
-		select
-		rtr.ANLY_DATE,
-		rtr.DATA_BS_YMNTH,
-		rtr.RATE_IDX,
-		rtr.DATA_MSN_PRCNT,
-		FORMAT (rtr.TOT_PWR,0) TOT_PWR,
-		FORMAT (rtr.TOT_FEE,0) TOT_FEE,
-		FORMAT (rtr.BASE_FEE,0) BASE_FEE,
-		FORMAT (rtr.ETC_FEE,0) ETC_FEE,
-		FORMAT (rtr.L_PWR,0) L_PWR,
-		FORMAT (rtr.M_PWR,0) M_PWR,
-		FORMAT (rtr.H_PWR,0) H_PWR,
-		FORMAT (rtr.L_ELCTR_FEE,0) L_ELCTR_FEE,
-		FORMAT (rtr.M_ELCTR_FEE,0) M_ELCTR_FEE,
-		FORMAT (rtr.H_ELCTR_FEE,0) H_ELCTR_FEE,
-		rtr.DC_NMB,
-		DATE_FORMAT(rtr.RGSTR_TIME,'%Y-%m-%d %H:%i') as RGSTR_TIME,
-		rtr.FLAG,
-		rmi.LARGE_CTGRY,
-		rmi.MIDDLE_CTGRY,
-		rmi.SMALL_CTGRY,
-		FORMAT (rpr.PWR,0) PWR
-		from
-		TB_RT_RATE_RST rtr,
-		TB_RT_MSTR_INF rmi,
-		TB_RT_POWER_RST rpr
-		where
-		rtr.rate_idx = rmi.rate_idx AND rtr.DATA_BS_YMNTH = rpr.DATA_BS_YMNTH AND rtr.ANLY_DATE = rpr.ANLY_DATE AND
-		rmi.USE_YN = '1'
-				<![CDATA[
-    	 	AND rtr.ANLY_DATE = (SELECT MAX(ANLY_DATE) ANLY FROM TB_RT_RATE_RST WHERE DATA_BS_YMNTH = #{ymnth})
-    	 	and rtr.DATA_BS_YMNTH=#{ymnth}
-    	  	]]>
-	</select>
+	<select id="selectRtRate" resultType="HashMap" parameterType="HashMap">
+		WITH
+		month_total AS (
+			SELECT
+				COALESCE(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS total_kwh
+			FROM (
+				SELECT
+					rdh.TAGNAME,
+					MIN(rdh.TS) AS first_ts,
+					MAX(rdh.TS) AS last_ts
+				FROM TB_RAWDATA_HOUR rdh
+				INNER JOIN tb_peak_tag_inf pti ON rdh.TAGNAME = pti.PWI_TAG
+				WHERE pti.IS_ALL = '1'
+				AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0
+				AND rdh.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d')
+				AND rdh.TS &lt;  STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') + INTERVAL 1 MONTH
+				GROUP BY rdh.TAGNAME
+			) mm
+			LEFT JOIN TB_RAWDATA_HOUR rd_first
+				ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
+			LEFT JOIN TB_RAWDATA_HOUR rd_last
+				ON rd_last.TAGNAME = mm.TAGNAME  AND rd_last.TS = mm.last_ts
+		),
+		diff_data AS (
+			SELECT
+				HOUR(curr.TS) AS hh,
+				CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4)) AS usage_kwh
+			FROM TB_RAWDATA_HOUR curr
+			INNER JOIN tb_peak_tag_inf pti ON curr.TAGNAME = pti.PWI_TAG
+			INNER JOIN TB_RAWDATA_HOUR prev
+				ON prev.TAGNAME = curr.TAGNAME
+			AND prev.TS = DATE_SUB(curr.TS, INTERVAL 1 HOUR)
+			WHERE pti.IS_ALL = '1'
+			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt; 0.0
+			AND CAST(prev.VALUE AS DECIMAL(20,4)) &gt; 0.0
+			AND curr.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d')
+			AND curr.TS &lt;  STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') + INTERVAL 1 MONTH
+			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt;= CAST(prev.VALUE AS DECIMAL(20,4))
+			AND CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4)) &lt; 100000
+		),
+		load_ratio AS (
+			SELECT
+				rate.RATE_IDX,
+				rate.TIMEZONE,
+				rate.ELCTR_RATE,
+				SUM(d.usage_kwh) AS load_kwh
+			FROM diff_data d
+			INNER JOIN TB_RT_RATE_INF rate
+				ON rate.MNTH = SUBSTRING(#{ymnth}, 5, 2)
+			AND CAST(rate.STN_TM AS UNSIGNED) = d.hh
+			AND rate.RATE_IDX IN (1, 2, 3)
+			GROUP BY rate.RATE_IDX, rate.TIMEZONE, rate.ELCTR_RATE
+		),
+		load_calc AS (
+			SELECT
+				lr.RATE_IDX,
+				lr.TIMEZONE,
+				mt.total_kwh,
+				ROUND(mt.total_kwh * lr.load_kwh / SUM(lr.load_kwh) OVER (PARTITION BY lr.RATE_IDX), 0) AS pwr,
+				ROUND(mt.total_kwh * lr.load_kwh / SUM(lr.load_kwh) OVER (PARTITION BY lr.RATE_IDX) * lr.ELCTR_RATE, 0) AS fee
+			FROM load_ratio lr
+			CROSS JOIN month_total mt
+		),
+		pivoted AS (
+			SELECT
+				RATE_IDX,
+				MAX(total_kwh) AS TOT_PWR_RAW,
+				MAX(CASE WHEN TIMEZONE = 'L' THEN pwr END) AS L_PWR_RAW,
+				MAX(CASE WHEN TIMEZONE = 'M' THEN pwr END) AS M_PWR_RAW,
+				MAX(CASE WHEN TIMEZONE = 'H' THEN pwr END) AS H_PWR_RAW,
+				MAX(CASE WHEN TIMEZONE = 'L' THEN fee END) AS L_ELCTR_FEE_RAW,
+				MAX(CASE WHEN TIMEZONE = 'M' THEN fee END) AS M_ELCTR_FEE_RAW,
+				MAX(CASE WHEN TIMEZONE = 'H' THEN fee END) AS H_ELCTR_FEE_RAW
+			FROM load_calc
+			GROUP BY RATE_IDX
+		),
+		load_rows AS (
+			SELECT 'L' AS tz, 1 AS ord UNION ALL
+			SELECT 'M', 2 UNION ALL
+			SELECT 'H', 3
+		)
+		SELECT
+			rmi.LARGE_CTGRY,
+			rmi.MIDDLE_CTGRY,
+			rmi.SMALL_CTGRY,
+			FORMAT(
+				CASE lr.tz
+					WHEN 'L' THEN p.L_PWR_RAW
+					WHEN 'M' THEN p.M_PWR_RAW
+					WHEN 'H' THEN p.H_PWR_RAW
+				END
+			, 0) AS PWR,
+			0 AS DATA_MSN_PRCNT,
+			FORMAT(p.TOT_PWR_RAW, 0) AS TOT_PWR,
+			FORMAT(p.L_PWR_RAW, 0) AS L_PWR,
+			FORMAT(p.M_PWR_RAW, 0) AS M_PWR,
+			FORMAT(p.H_PWR_RAW, 0) AS H_PWR,
+			FORMAT(p.L_ELCTR_FEE_RAW + p.M_ELCTR_FEE_RAW + p.H_ELCTR_FEE_RAW, 0) AS TOT_FEE,
+			0 AS BASE_FEE,
+			0 AS ETC_FEE,
+			FORMAT(p.L_ELCTR_FEE_RAW, 0) AS L_ELCTR_FEE,
+			FORMAT(p.M_ELCTR_FEE_RAW, 0) AS M_ELCTR_FEE,
+			FORMAT(p.H_ELCTR_FEE_RAW, 0) AS H_ELCTR_FEE
+		FROM pivoted p
+		INNER JOIN TB_RT_MSTR_INF rmi
+			ON rmi.RATE_IDX = p.RATE_IDX
+		AND rmi.USE_YN = '1'
+		CROSS JOIN load_rows lr
+		ORDER BY p.RATE_IDX, lr.ord
+		</select>
 
 	<select id="pumpSelect_new" parameterType="hashMap" resultType="hashMap">
 		<![CDATA[

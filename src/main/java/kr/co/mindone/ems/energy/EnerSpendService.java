@@ -16,6 +16,8 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.RequestParam;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 
@@ -172,6 +174,7 @@ public class EnerSpendService {
 	 * @return 요금제정보에 따른 전력요금
 	 */
 	List<HashMap<String, Object>> selectRateInfo(HashMap<String, Object> map) {
+		//String mnth = LocalDate.now().format(DateTimeFormatter.ofPattern("MM"));
 		return enerSpendMapper.selectRateInfo(map);
 	}
 
