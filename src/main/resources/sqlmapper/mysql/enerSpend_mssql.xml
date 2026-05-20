@@ -30,17 +30,36 @@
 					<![CDATA[AND rd.ts >= DATE_SUB(CONCAT(#{start_date},'-01-01 00:00:00'), INTERVAL 1 DAY) AND rd.ts <= concat(#{end_date},'-12-31 23:59:59')]]>
 				</if>
 		),
-			diff_data AS (
+			base_diff AS (
 				SELECT
+					tagname,
 					ts,
 					CLSFC,
 					CASE
 						WHEN RIGHT(tagname, 3) = 'IKW' THEN ROUND(value * PWI_UNIT_VALUE, 6)
 						WHEN prev_ts IS NULL OR prev_value IS NULL THEN 0
 						WHEN value &lt; prev_value THEN 0
+						WHEN (value - prev_value) &gt; 2000 THEN NULL
 						ELSE ROUND((value - prev_value) * PWI_UNIT_VALUE, 6)
-					END AS y
+					END AS raw_y
 				FROM raw_data
+		),
+			filled_diff AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					raw_y,
+					COUNT(raw_y) OVER (PARTITION BY tagname ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS grp
+				FROM base_diff
+		),
+			diff_data AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					COALESCE(raw_y, MAX(raw_y) OVER (PARTITION BY tagname, grp)) AS y
+				FROM filled_diff
 		)
 		SELECT
 			<if test='time_type =="h"'>DATE_FORMAT(ts,'%Y-%m-%d %H:%i')</if>
@@ -98,17 +117,36 @@
 					<![CDATA[AND rd.ts >= DATE_SUB(CONCAT(#{start_date},'-01-01 00:00:00'), INTERVAL 1 DAY) AND rd.ts <= concat(#{end_date},'-12-31 23:59:59')]]>
 				</if>
 		),
-			diff_data AS (
+			base_diff AS (
 				SELECT
+					tagname,
 					ts,
 					CLSFC,
 					CASE
 						WHEN RIGHT(tagname, 3) = 'IKW' THEN ROUND(value * PWI_UNIT_VALUE, 6)
 						WHEN prev_ts IS NULL OR prev_value IS NULL THEN 0
 						WHEN value &lt; prev_value THEN 0
+						WHEN (value - prev_value) &gt; 2000 THEN NULL
 						ELSE ROUND((value - prev_value) * PWI_UNIT_VALUE, 6)
-					END AS y
+					END AS raw_y
 				FROM raw_data
+		),
+			filled_diff AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					raw_y,
+					COUNT(raw_y) OVER (PARTITION BY tagname ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS grp
+				FROM base_diff
+		),
+			diff_data AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					COALESCE(raw_y, MAX(raw_y) OVER (PARTITION BY tagname, grp)) AS y
+				FROM filled_diff
 		)
 		SELECT
 			CLSFC AS zone_code,
@@ -152,16 +190,33 @@
 					<![CDATA[AND rd.ts >= DATE_SUB(CONCAT(#{start_date},'-01-01 00:00:00'), INTERVAL 1 DAY) AND rd.ts <= concat(#{end_date},'-12-31 23:59:59')]]>
 				</if>
 		),
-			diff_data AS (
+			base_diff AS (
 				SELECT
+					tagname,
 					ts,
 					CASE
 						WHEN RIGHT(tagname, 3) = 'IKW' THEN ROUND(value * PWI_UNIT_VALUE, 6)
 						WHEN prev_ts IS NULL OR prev_value IS NULL THEN 0
 						WHEN value &lt; prev_value THEN 0
+						WHEN (value - prev_value) &gt; 2000 THEN NULL
 						ELSE ROUND((value - prev_value) * PWI_UNIT_VALUE, 6)
-					END AS y
+					END AS raw_y
 				FROM raw_data
+		),
+			filled_diff AS (
+				SELECT
+					tagname,
+					ts,
+					raw_y,
+					COUNT(raw_y) OVER (PARTITION BY tagname ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS grp
+				FROM base_diff
+		),
+			diff_data AS (
+				SELECT
+					tagname,
+					ts,
+					COALESCE(raw_y, MAX(raw_y) OVER (PARTITION BY tagname, grp)) AS y
+				FROM filled_diff
 		)
 		SELECT ROUND(COALESCE(SUM(y), 0), 2) AS all_pwq
 		FROM diff_data
@@ -197,17 +252,36 @@
 					<![CDATA[AND rd.ts > DATE_ADD(NOW(), INTERVAL -1 DAY)]]>
 					<![CDATA[AND rd.ts <= NOW()]]>
 		),
-			diff_data AS (
+			base_diff AS (
 				SELECT
+					tagname,
 					ts,
 					CLSFC,
 					CASE
 						WHEN RIGHT(tagname, 3) = 'IKW' THEN ROUND(value * PWI_UNIT_VALUE, 6)
 						WHEN prev_ts IS NULL OR prev_value IS NULL THEN 0
 						WHEN value &lt; prev_value THEN 0
+						WHEN (value - prev_value) &gt; 2000 THEN NULL
 						ELSE ROUND((value - prev_value) * PWI_UNIT_VALUE, 6)
-					END AS y
+					END AS raw_y
 				FROM raw_data
+		),
+			filled_diff AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					raw_y,
+					COUNT(raw_y) OVER (PARTITION BY tagname ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS grp
+				FROM base_diff
+		),
+			diff_data AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					COALESCE(raw_y, MAX(raw_y) OVER (PARTITION BY tagname, grp)) AS y
+				FROM filled_diff
 		),
 		latest_ts AS (
 			SELECT MAX(ts) AS max_ts
@@ -430,17 +504,36 @@
 					AND pti.CLSFC = #{zone_code}
 				</if>
 		),
-			diff_data AS (
+			base_diff AS (
 				SELECT
+					tagname,
 					ts,
 					CLSFC,
 					CASE
 						WHEN RIGHT(tagname, 3) = 'IKW' THEN ROUND(value * PWI_UNIT_VALUE, 6)
 						WHEN prev_ts IS NULL OR prev_value IS NULL THEN 0
 						WHEN value &lt; prev_value THEN 0
+						WHEN (value - prev_value) &gt; 2000 THEN NULL
 						ELSE ROUND((value - prev_value) * PWI_UNIT_VALUE, 6)
-					END AS y
+					END AS raw_y
 				FROM raw_data
+		),
+			filled_diff AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					raw_y,
+					COUNT(raw_y) OVER (PARTITION BY tagname ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS grp
+				FROM base_diff
+		),
+			diff_data AS (
+				SELECT
+					tagname,
+					ts,
+					CLSFC,
+					COALESCE(raw_y, MAX(raw_y) OVER (PARTITION BY tagname, grp)) AS y
+				FROM filled_diff
 		)
 		SELECT
 			DATE_FORMAT(ts, '%Y-%m-%d %H:%i') AS x,
@@ -506,16 +599,33 @@
 				AND pti.IS_ALL = '1'
 				<![CDATA[AND rd.ts >= DATE_SUB(now(), INTERVAL 1 DAY) AND rd.ts <= now()]]>
 		),
-			diff_data AS (
+			base_diff AS (
 				SELECT
+					tagname,
 					ts,
 					CASE
 						WHEN RIGHT(tagname, 3) = 'IKW' THEN ROUND(value * PWI_UNIT_VALUE, 6)
 						WHEN prev_ts IS NULL OR prev_value IS NULL THEN 0
 						WHEN value &lt; prev_value THEN 0
+						WHEN (value - prev_value) &gt; 2000 THEN NULL
 						ELSE ROUND((value - prev_value) * PWI_UNIT_VALUE, 6)
-					END AS y
+					END AS raw_y
 				FROM raw_data
+		),
+			filled_diff AS (
+				SELECT
+					tagname,
+					ts,
+					raw_y,
+					COUNT(raw_y) OVER (PARTITION BY tagname ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS grp
+				FROM base_diff
+		),
+			diff_data AS (
+				SELECT
+					tagname,
+					ts,
+					COALESCE(raw_y, MAX(raw_y) OVER (PARTITION BY tagname, grp)) AS y
+				FROM filled_diff
 		)
 		SELECT
 			COALESCE(ROUND(SUM(y), 2), 0) AS nowPwi,

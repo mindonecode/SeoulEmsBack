@@ -343,12 +343,8 @@ public class AiController extends BaseController {
 		double dayTvalue = 0.0, monthTvalue = 0.0, yearTvalue = 0.0;
 		double dayTrate = 0.0, monthTrate = 0.0, yearTrate = 0.0;
 
-		//map.put("range","dayAgo");
-		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
 		returnMap.put("range", "day");
 		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
-		//map.put("range","week");
-		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
 		returnMap.put("range", "month");
 		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
 		returnMap.put("range", "year");
