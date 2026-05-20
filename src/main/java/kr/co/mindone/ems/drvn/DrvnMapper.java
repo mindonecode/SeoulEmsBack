@@ -576,8 +576,9 @@ public interface DrvnMapper {
 
 	/**
 	 * (10분 스냅샷) 예측 유량 조회 - TB_CTR_TNK_RST.
-	 * snapshot_time=13:50 이면 PRDCT_TIME=14:00 (즉 snapshot+10분) 예측 행 1건 반환.
-	 * @param param dstrb_id, snapshot_time
+	 * RGSTR_TIME / PRDCT_TIME 이 snapshot 과 정확 동치인 행 1건. 없으면 null.
+	 * 대시보드 성능점/예측점 유량과 동일 행을 보장.
+	 * @param param dstrb_id, rgstr_time, prdct_time
 	 * @return {prdct_flow:Double, prdct_time:String}
 	 */
 	HashMap<String, Object> selectLatestPredictedFlowTnk(HashMap<String, Object> param);
@@ -590,8 +591,10 @@ public interface DrvnMapper {
 	String selectLatestPredictedComb(HashMap<String, Object> param);
 
 	/**
-	 * (10분 스냅샷) 최신 실측 유량 조회 (FRI_TAG, TB_RAWDATA).
-	 * @param param pump_grp, snapshot_time
+	 * (10분 스냅샷) 실측 유량 조회 - TB_CTR_TNK_INF.DSTRB_Q_ID 로 매칭한 FRI_TAG 의 TB_RAWDATA 값.
+	 * TS = snapshot.rgstr_time 정확 동치 행 1건. 없으면 null.
+	 * 예측 유량(tnk_rst) 와 동일 지점·동일 시각 보장 → 대시보드 성능점/예측점과 일치.
+	 * @param param dstrb_id, rgstr_time
 	 * @return {ts, value}
 	 */
 	HashMap<String, Object> selectLatestActualFlow(HashMap<String, Object> param);
