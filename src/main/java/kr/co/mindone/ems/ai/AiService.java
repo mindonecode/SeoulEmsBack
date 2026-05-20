@@ -215,12 +215,86 @@ public class AiService {
     }
 
     /**
-     * 배수지의 순간 데이터를 조회하는 메서드
+     * 배수지 유입 유량 및 유입 유량 비중 데이터를 조회하는 메서드
      * @param map 조회에 필요한 파라미터
-     * @return 배수지 순간 데이터 리스트
+     * @return 배수지 유입 유량 및 유입 유량 비중 데이터 리스트
      */
     List < HashMap < String, Object >> tankInstantaneous(HashMap < String, Object > map) {
         return aiMapper.tankInstantaneous(map);
+    }
+
+    /**
+     * 배수지 유입 유량 및 유입 유량 비중 데이터를 조회하는 메서드
+     * @param hour 조회 기간
+     * @return 시간별 배수지 유입 유량 및 비중 데이터 리스트
+     */
+    Map<String, List<Map<String, Object>>> selectTankInFlowAndInFlowRateList(Integer hour) {
+		List<HashMap<String, Object>> list = aiMapper.selectTankInFlowAndInFlowRateList(hour);
+		Map<String, List<Map<String, Object>>> listMap = new TreeMap<>();
+
+		for (HashMap<String, Object> item : list) {
+			String tagName = String.valueOf(item.get("TNK_GRP_NM"));
+			List<Map<String, Object>> tagList = listMap.computeIfAbsent(tagName, k -> new ArrayList<>());
+
+			Map<String, Object> dataMap = new HashMap<>(item);
+			dataMap.remove("TNK_GRP_NM");
+			tagList.add(dataMap);
+		}
+        return listMap;
+    }
+
+    /**
+     * 배수지 수위 추세 데이터를 조회하는 메서드
+     * @param hour 조회 기간
+     * @return 시간별 배수지 수위 추세 데이터 리스트
+     */
+    Map<String, Map<String, List<Map<String, Object>>>> selectWaterLevelTrend(Integer hour) {
+		List<HashMap<String, Object>> list = aiMapper.selectWaterLevelTrend(hour);
+		Map<String, Map<String, List<Map<String, Object>>>> returnMap = new TreeMap<>();
+
+		for (HashMap<String, Object> item : list) {
+			String tagName = String.valueOf(item.get("TNK_GRP_NM"));
+			Map<String, List<Map<String, Object>>> dateGroup = returnMap.computeIfAbsent(tagName, k -> new LinkedHashMap<>());
+
+			String ts = String.valueOf(item.get("TS"));
+			String date = String.valueOf(item.get("DATE_GRP"));
+
+			List<Map<String, Object>> dataList = dateGroup.computeIfAbsent(date, k -> new ArrayList<>());
+
+			Map<String, Object> dataMap = new HashMap<>();
+			dataMap.put("TS", ts);
+			dataMap.put("VALUE", item.get("VALUE"));
+			dataList.add(dataMap);
+		}
+
+        return returnMap;
+    }
+
+    /**
+     * 배수지 수위 현황 데이터를 조회하는 메서드
+     * @param hour 조회 기간
+     * @return 시간별 배수지 수위 현황 데이터 리스트
+     */
+    Map<String, Map<String, List<Map<String, Object>>>> selectWaterLevelCurrent(Integer hour) {
+		List<HashMap<String, Object>> list = aiMapper.selectWaterLevelCurrent(hour);
+		Map<String, Map<String, List<Map<String, Object>>>> returnMap = new TreeMap<>();
+
+		for (HashMap<String, Object> item : list) {
+			String tagName = String.valueOf(item.get("TNK_GRP_NM"));
+			Map<String, List<Map<String, Object>>> dateGroup = returnMap.computeIfAbsent(tagName, k -> new LinkedHashMap<>());
+
+			String ts = String.valueOf(item.get("TS"));
+			String date = String.valueOf(item.get("DATE_GRP"));
+
+			List<Map<String, Object>> dataList = dateGroup.computeIfAbsent(date, k -> new ArrayList<>());
+
+			Map<String, Object> dataMap = new HashMap<>();
+			dataMap.put("TS", ts);
+			dataMap.put("VALUE", item.get("VALUE"));
+			dataList.add(dataMap);
+		}
+
+        return returnMap;
     }
 
     /**
@@ -1932,7 +2006,7 @@ public class AiService {
 
         for (HashMap < String, Object > statusItem: statusList) {
             String nowAiStatus = statusItem.get("AI_STATUS").toString();
-            //부분 AI
+            // AI 추천
             if (nowAiStatus.equals("1")) {
                 aiRecommend = true;
             }
@@ -1950,7 +2024,7 @@ public class AiService {
 
         for (HashMap < String, Object > statusItem: statusList) {
             String nowAiStatus = statusItem.get("AI_STATUS").toString();
-            //부분 AI
+            // AI 운영
             if (nowAiStatus.equals("0")) {
                 aiRecommend = true;
             }
@@ -2701,12 +2775,9 @@ public class AiService {
         result.put("isAiControl",   isAiControl);
 
         List<HashMap<String, Object>> items = new ArrayList<>();
-        if (isAiRecommend) {
-            collectAlarmItems(items, PumpService.AI_RECOMMEND, "recommend");
-        }
-        if (isAiControl) {
-            collectAlarmItems(items, PumpService.AI_CONTROL, "control");
-        }
+        if (isAiRecommend) collectAlarmItems(items, PumpService.AI_RECOMMEND, "recommend");
+        if (isAiControl) collectAlarmItems(items, PumpService.AI_CONTROL, "control");
+        
         result.put("items", items);
         return result;
     }

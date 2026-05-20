@@ -19,6 +19,4 @@ jobs:
           username: ${{ secrets.username }}
           port: ${{ secrets.port }}
           password: ${{ secrets.password }}
-          script: |
-            cd /d D:\SBD_Proj\SeoulEmsBack
-            call sbdBackStart.bat
+          script: D:\SBD_Proj\SeoulEmsBack\sbdBackStart.bat

@@ -5,22 +5,31 @@
 	<!--시설 정보 -->
 	<select id="selectZone" resultType="hashMap" parameterType="hashMap">
 		SELECT
-			zone_idx,
-			zone_code,
-			zone_name,
-			DSC as DCS,
-			USE_YN
+			NULL AS zone_idx,
+			CLSFC AS zone_code,
+			CLSFC AS zone_name,
+			NULL AS DCS,
+			'1' AS USE_YN
 		FROM
-			TB_ZONE
+			TB_PEAK_TAG_INF
 		WHERE
-			1=1
+			MNTR_YN = '1'
+			<if test="isAll != null and isAll != ''">
+				AND IS_ALL = #{isAll}
+			</if>
+			<if test="isAll == null or isAll == ''">
+				AND IS_ALL = '1'
+			</if>
+			AND CLSFC IS NOT NULL
+			AND CLSFC != ''
 		<if test="zone_name != null and zone_name != ''">
-			AND zone_name like CONCAT('%',#{zone_name},'%')
+			AND CLSFC like CONCAT('%',#{zone_name},'%')
 		</if>
 		<if test="use_yn != null and use_yn != ''">
-			AND use_yn = #{use_yn}
+			AND #{use_yn} = '1'
 		</if>
-		order by ZONE_IDX ASC
+		GROUP BY CLSFC
+		ORDER BY CLSFC
 	</select>
 
 	<select id="selectTagList" resultType="hashMap" parameterType="hashMap">

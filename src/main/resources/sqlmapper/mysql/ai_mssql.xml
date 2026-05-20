@@ -1862,31 +1862,29 @@
 	</select>
 
 	<select id="selectTankDataHourList" parameterType="hashMap" resultType="hashMap">
-		
 		SELECT
-		TNK_idx,
-		TNK_NM,
-		TNK_GRP_NM,
-		TNK_GRP_IDX,
-		ts,
-		tagname,
-		SUM(value) as value
+			TNK_idx,
+			TNK_NM,
+			TNK_GRP_NM,
+			TNK_GRP_IDX,
+			ts,
+			tagname,
+			SUM(value) as value
 		FROM (
-		select
-		tgi.TNK_idx,
-		tgi.TNK_NM,
-		tgi.TNK_GRP_NM,
-		tgi.TNK_GRP_IDX,
-		DATE_FORMAT(ts, '%Y-%m-%d %H:%i') ts,
-		tagname,
-		FORMAT (value ,0) value
-		from
-		TB_RAWDATA_HOUR rdh, TB_TNK_GRP_INF tgi
-		WHERE
-		rdh.tagname = tgi.LEI_TAG
+			select
+				tgi.TNK_idx,
+				tgi.TNK_NM,
+				tgi.TNK_GRP_NM,
+				tgi.TNK_GRP_IDX,
+				DATE_FORMAT(ts, '%Y-%m-%d %H:%i') ts,
+				tagname,
+				FORMAT (value ,0) value
+			from TB_RAWDATA_HOUR rdh, 
+				TB_TNK_GRP_INF tgi
+			where rdh.tagname = tgi.LEI_TAG
 				<![CDATA[AND ts >=concat(#{date},' 00:00:00') AND ts <= concat(#{date},' 23:59:00')]]>
-		and tnk_typ = '1'
-		and tgi.USE_YN='1'
+				and tnk_typ = '1'
+				and tgi.USE_YN='1'
 		) a
 		GROUP BY TNK_GRP_NM, ts
 	</select>
@@ -1954,6 +1952,87 @@
 		GROUP BY
 		TNK_GRP_NM
 	</select>
+	<select id="selectTankInFlowAndInFlowRateList" parameterType="Integer" resultType="hashMap">
+		SELECT rd.TS, ROUND(rd.VALUE / 1000, 2) AS VALUE, tgi.TNK_GRP_NM AS TNK_GRP_NM
+		FROM TB_RAWDATA_15MIN rd
+		INNER JOIN (
+			SELECT TNK_GRP_NM, IN_FLW_TAG
+			FROM TB_TNK_GRP_INF
+			WHERE USE_YN = '1'
+			GROUP BY TNK_GRP_IDX
+		) tgi
+			ON rd.TAGNAME = tgi.IN_FLW_TAG
+		WHERE rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+		ORDER BY rd.TS ASC
+	</select>
+	<select id="selectWaterLevelTrend" parameterType="Integer" resultType="hashMap">
+		SELECT DATE_FORMAT(rd.TS, '%Y-%m-%d %H:%i:%s') AS TS, ROUND(AVG(rd.VALUE), 2) AS VALUE, tgi.TNK_GRP_NM,
+			CASE 
+				WHEN rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR) THEN 'now'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 WEEK) THEN '1Week ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 WEEK) THEN '2Week ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 WEEK) THEN '3Week ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 WEEK) THEN '4Week ago'
+			END AS DATE_GRP
+		FROM 
+			<choose>
+        <when test="hour >= 12">TB_RAWDATA_15MIN</when>
+        <otherwise>TB_RAWDATA</otherwise>
+      </choose> rd
+		INNER JOIN TB_TNK_GRP_INF tgi
+			ON rd.TAGNAME = tgi.LEI_TAG
+			AND tgi.USE_YN = '1'
+		WHERE 
+			(
+				rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 WEEK))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 WEEK))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 WEEK))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 WEEK), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 WEEK))
+			)
+			AND (
+				(tgi.TNK_NM = '구리' AND rd.VALUE &gt;= 1.5)
+				OR (tgi.TNK_NM != '구리' AND rd.VALUE &gt;= 3)
+			)
+		GROUP BY tgi.TNK_GRP_NM, DATE_GRP, rd.TS
+		ORDER BY rd.TS ASC
+	</select>
+	<select id="selectWaterLevelCurrent" parameterType="Integer" resultType="hashMap">
+		SELECT DATE_FORMAT(rd.TS, '%Y-%m-%d %H:%i:%s') AS TS, ROUND(AVG(rd.VALUE), 2) AS VALUE, tgi.TNK_GRP_NM,
+			CASE 
+				WHEN rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR) THEN 'now'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN '1Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 DAY) THEN '2Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 DAY) THEN '3Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 DAY) THEN '4Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 5 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 5 DAY) THEN '5Day ago'
+				WHEN rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 6 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 6 DAY) THEN '6Day ago'
+			END AS DATE_GRP
+		FROM 
+			<choose>
+        <when test="hour >= 12">TB_RAWDATA_15MIN</when>
+        <otherwise>TB_RAWDATA</otherwise>
+      </choose> rd
+		INNER JOIN TB_TNK_GRP_INF tgi
+			ON rd.TAGNAME = tgi.LEI_TAG
+			AND tgi.USE_YN = '1'
+		WHERE 
+			(
+				rd.TS &gt;= DATE_SUB(NOW(), INTERVAL #{hour} HOUR)
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 1 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 1 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 2 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 2 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 3 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 3 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 4 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 4 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 5 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 5 DAY))
+				OR (rd.TS &gt;= DATE_SUB(DATE_SUB(NOW(), INTERVAL 6 DAY), INTERVAL #{hour} HOUR) AND rd.TS &lt;= DATE_SUB(NOW(), INTERVAL 6 DAY))
+			)
+			AND (
+				(tgi.TNK_NM = '구리' AND rd.VALUE &gt;= 1.5)
+				OR (tgi.TNK_NM != '구리' AND rd.VALUE &gt;= 3)
+			)
+		GROUP BY tgi.TNK_GRP_NM, DATE_GRP, rd.TS
+		ORDER BY rd.TS ASC
+	</select>
 	<select id="selectPumpPwqList" parameterType="hashMap" resultType="hashMap">
 		SELECT
 		<if test='time_type =="h"'>DATE_FORMAT(rdh.ts,'%Y-%m-%d %H:%i')</if>
@@ -1994,28 +2073,22 @@
 			FROM
 				TB_RAWDATA_HOUR rdh
 				JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
-			WHERE
-				pti.IS_ALL = '1'
+			WHERE pti.IS_ALL = '1'
+				AND pti.CLSFC != '오존설비'
 				AND pti.mntr_yn = '1'
 				AND rdh.value != 0
-			<if test='time_type =="h" or time_type =="d"'>
-				<![CDATA[
-					AND rdh.ts >= DATE_SUB(CONCAT(#{start_date}, ' 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts <= CONCAT(#{end_date}, ' 23:59:00')
-				]]>
-			</if>
-			<if test='time_type =="m"'>
-				<![CDATA[
-					AND rdh.ts >= DATE_SUB(CONCAT(#{start_date}, '-01 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts <= CONCAT(#{end_date}, '-31 23:59:00')
-				]]>
-			</if>
-			<if test='time_type =="y"'>
-				<![CDATA[
-					AND rdh.ts >= DATE_SUB(CONCAT(#{start_date}, '-01-01 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts <= CONCAT(#{end_date}, '-12-31 23:59:00')
-				]]>
-			</if>
+				<if test='time_type =="h" or time_type =="d"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, ' 00:00:00'), INTERVAL 1 DAY)
+					AND rdh.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
+				</if>
+				<if test='time_type =="m"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, '-01 00:00:00'), INTERVAL 1 DAY)
+					AND rdh.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
+				</if>
+				<if test='time_type =="y"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, '-01-01 00:00:00'), INTERVAL 1 DAY)
+					AND rdh.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
+				</if>
 		),
 		diff_data AS (
 			SELECT
@@ -2047,29 +2120,23 @@
 			ROUND(SUM(diff_data.use_value), 2) AS value
 		FROM diff_data
 		WHERE 1 = 1
-		<if test='time_type =="h" or time_type =="d"'>
-			<![CDATA[
-				AND diff_data.ts >= CONCAT(#{start_date}, ' 00:00:00')
-				AND diff_data.ts <= CONCAT(#{end_date}, ' 23:59:00')
-			]]>
-		</if>
-		<if test='time_type =="m"'>
-			<![CDATA[
-				AND diff_data.ts >= CONCAT(#{start_date}, '-01 00:00:00')
-				AND diff_data.ts <= CONCAT(#{end_date}, '-31 23:59:00')
-			]]>
-		</if>
-		<if test='time_type =="y"'>
-			<![CDATA[
-				AND diff_data.ts >= CONCAT(#{start_date}, '-01-01 00:00:00')
-				AND diff_data.ts <= CONCAT(#{end_date}, '-12-31 23:59:00')
-			]]>
-		</if>
+			<if test='time_type =="h" or time_type =="d"'>
+				AND diff_data.ts &gt;= CONCAT(#{start_date}, ' 00:00:00')
+				AND diff_data.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
+			</if>
+			<if test='time_type =="m"'>
+				AND diff_data.ts &gt;= CONCAT(#{start_date}, '-01 00:00:00')
+				AND diff_data.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
+			</if>
+			<if test='time_type =="y"'>
+				AND diff_data.ts &gt;= CONCAT(#{start_date}, '-01-01 00:00:00')
+				AND diff_data.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
+			</if>
 		GROUP BY
-		<if test='time_type =="h"'>diff_data.ts</if>
-		<if test='time_type =="d"'>DATE(diff_data.ts)</if>
-		<if test='time_type =="m"'>DATE_FORMAT(diff_data.ts, '%Y-%m')</if>
-		<if test='time_type =="y"'>DATE_FORMAT(diff_data.ts, '%Y')</if>
+			<if test='time_type =="h"'>diff_data.ts</if>
+			<if test='time_type =="d"'>DATE(diff_data.ts)</if>
+			<if test='time_type =="m"'>DATE_FORMAT(diff_data.ts, '%Y-%m')</if>
+			<if test='time_type =="y"'>DATE_FORMAT(diff_data.ts, '%Y')</if>
 		ORDER BY MIN(diff_data.ts)
 	</select>
 
@@ -2080,23 +2147,19 @@
 			MAX(PWI_UNIT) as unit
 		FROM
 			(
-				SELECT ts,
+				select ts,
 					value - LAG(value) OVER(ORDER BY ts) as diff_value,
 					PWI_UNIT
-				FROM
+				from
 					(
-						SELECT date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
+						select date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
 							SUM(ROUND(rdh.VALUE*pti.PWI_UNIT_VALUE,2)) AS value,
 							MAX(pti.PWI_UNIT) AS PWI_UNIT
-						FROM TB_RAWDATA_HOUR rdh
-							JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
-						WHERE pti.IS_ALL = '1' AND pti.mntr_yn = '1' AND rdh.value != 0
-							AND
-									<![CDATA[
-											rdh.ts >= DATE_FORMAT(NOW() - INTERVAL 12 MONTH, '%Y-%m-01 00:00:00')
-										AND
-											rdh.ts <= LAST_DAY(NOW())
-									]]>
+						from TB_RAWDATA_HOUR rdh
+							join TB_PEAK_TAG_INF pti on rdh.tagname = pti.PWI_TAG
+						where pti.IS_ALL = '1' and pti.CLSFC != '오존설비' and pti.mntr_yn = '1' and rdh.value != 0
+							and rdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 12 MONTH, '%Y-%m-01 00:00:00')
+							and rdh.ts &lt;= LAST_DAY(NOW())
 						GROUP BY rdh.ts
 					) a
 			) b
@@ -2152,51 +2215,80 @@
 		rri.TIMEZONE
 	</select> -->
 	<select id="selectPwrSumList" parameterType="hashMap" resultType="hashMap">
+		WITH raw_data AS (
+			SELECT
+				rdh.tagname,
+				rdh.ts,
+				rdh.value,
+				pti.PWQ_UNIT_VALUE,
+				LAG(rdh.value) OVER (PARTITION BY rdh.tagname ORDER BY rdh.ts) AS prev_value
+			FROM
+				TB_RAWDATA_HOUR rdh
+				JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
+			WHERE
+				pti.IS_ALL = '1' AND pti.MNTR_YN = '1' AND pti.CLSFC != '오존설비'
+				<if test='range == "dayAgo"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 23:59:59')
+				</if>
+				<if test='range == "day"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(CURDATE(), ' 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(CURDATE(), ' 23:59:59')
+				</if>
+				<if test='range == "week"'>
+					AND rdh.ts &gt;= DATE_SUB(ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 0), INTERVAL 1 HOUR) 
+					AND rdh.ts &lt;= ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 6)
+				</if>
+				<if test='range == "month"'>
+					AND rdh.ts &gt;= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(LAST_DAY(CURDATE()), ' 23:59:59')
+				</if>
+				<if test='range == "year"'>
+					AND rdh.ts &gt;= DATE_SUB(CONCAT(YEAR(CURDATE()), '-01-01 00:00:00'), INTERVAL 1 HOUR)
+					AND rdh.ts &lt;= CONCAT(YEAR(CURDATE()), '-12-31 23:59:59')
+				</if>
+		),
+		diff_data AS (
+			SELECT
+				raw_data.ts,
+				CASE
+					WHEN raw_data.prev_value IS NULL THEN 0
+					WHEN raw_data.value &lt; raw_data.prev_value THEN 0
+					ELSE (raw_data.value - raw_data.prev_value) * raw_data.PWQ_UNIT_VALUE
+				END AS use_value
+			FROM raw_data
+		)
 		SELECT
-		round(sum(rdh.value * pti.PWQ_UNIT_VALUE), 2) AS value,
-		<if test='range == "dayAgo"'>
-			'dayAgo' AS 'range',
-		</if>
-		<if test='range == "day"'>
-			'day' AS 'range',
-		</if>
-		<if test='range == "week"'>
-			'week' AS 'range',
-		</if>
-		<if test='range == "month"'>
-			'month' AS 'range',
-		</if>
-		<if test='range == "year"'>
-			'year' AS 'range',
-		</if>
-		rri.TIMEZONE as 'timezone',
-		rri.ELCTR_RATE as 'rate',
-		ROUND(sum(rdh.value * pti.PWQ_UNIT_VALUE *rri.ELCTR_RATE), 2) AS cost
+			ROUND(SUM(diff_data.use_value), 2) AS value,
+			<if test='range == "dayAgo"'>'dayAgo' AS 'range',</if>
+			<if test='range == "day"'>'day' AS 'range',</if>
+			<if test='range == "week"'>'week' AS 'range',</if>
+			<if test='range == "month"'>'month' AS 'range',</if>
+			<if test='range == "year"'>'year' AS 'range',</if>
+			rri.TIMEZONE AS 'timezone',
+			rri.ELCTR_RATE AS 'rate',
+			ROUND(SUM(diff_data.use_value * rri.ELCTR_RATE), 2) AS cost
 		FROM
-		TB_RAWDATA_HOUR_INGRT rdh, TB_RT_RATE_INF rri, TB_PEAK_TAG_INF pti
+			diff_data
+			JOIN TB_RT_RATE_INF rri ON SUBSTRING(diff_data.ts, 12, 2) = rri.STN_TM
 		WHERE
-		rdh.tagname = pti.PWQ_TAG AND pti.IS_ALL = '1' and pti.mntr_yn = '1'
-		AND SUBstring(rdh.ts,12,2) = rri.STN_TM and rri.RATE_IDX ='1' and rri.MNTH = month(CURDATE())
-		<if test='range == "dayAgo"'>
-			AND rdh.ts BETWEEN CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00')
-			AND CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 23:59:59')
-		</if>
-		<if test='range == "day"'>
-			AND rdh.ts BETWEEN CONCAT(CURDATE(), ' 00:00:00')
-			AND CONCAT(CURDATE(), ' 23:59:59')
-		</if>
-		<if test='range == "week"'>
-			<![CDATA[AND rdh.ts >= ADDDATE( CURDATE(), - WEEKDAY(CURDATE()) + 0 ) AND rdh.ts <= ADDDATE( CURDATE(), - WEEKDAY(CURDATE()) + 6 )]]>
-		</if>
-		<if test='range == "month"'>
-			AND rdh.ts BETWEEN DATE_FORMAT(CURDATE(), '%Y-%m-01') AND LAST_DAY(CURDATE())
-		</if>
-		<if test='range == "year"'>
-			AND rdh.ts BETWEEN CONCAT(YEAR(CURDATE()), '-01-01 00:00:00')
-			AND CONCAT(YEAR(CURDATE()), '-12-31 23:59:59')
-		</if>
-		GROUP BY
-		rri.TIMEZONE
+			rri.RATE_IDX = '1' AND rri.MNTH = MONTH(CURDATE())
+			<if test='range == "dayAgo"'>
+				AND diff_data.ts &gt;= CONCAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), ' 00:00:00')
+			</if>
+			<if test='range == "day"'>
+				AND diff_data.ts &gt;= CONCAT(CURDATE(), ' 00:00:00')
+			</if>
+			<if test='range == "week"'>
+				AND diff_data.ts &gt;= ADDDATE(CURDATE(), - WEEKDAY(CURDATE()) + 0)
+			</if>
+			<if test='range == "month"'>
+				AND diff_data.ts &gt;= DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00')
+			</if>
+			<if test='range == "year"'>
+				AND diff_data.ts &gt;= CONCAT(YEAR(CURDATE()), '-01-01 00:00:00')
+			</if>
+		GROUP BY rri.TIMEZONE
 	</select>
 
 	<select id="selectPumpStatus" parameterType="String" resultType="java.util.LinkedHashMap">
@@ -2653,23 +2745,22 @@
 	</select>
 
 	<select id="selectPumpList" resultType="hashMap">
-    select
-    PUMP_IDX,
-    PUMP_GRP,
-    TNK_GRP_IDX,
-    PUMP_GRP_IDX,
-    PUMP_GRP_NM,
-    PUMP_GRP_DSC,
-    PUMP_NM,
-    PUMP_TYP,
-    PUMP_TYP_DSC,
-    EMS_MIN_WPP_TAG,
-    EMS_MIN_WPJ_TAG,
-    DUTY_H,
-    DUTY_Q
-    from
-    TB_CTR_PRF_PUMPMST_INF
-    order by PUMP_GRP_IDX, PUMP_IDX
+    SELECT
+    	PUMP_IDX,
+    	PUMP_GRP,
+    	TNK_GRP_IDX,
+    	PUMP_GRP_IDX,
+    	PUMP_GRP_NM,
+    	PUMP_GRP_DSC,
+    	PUMP_NM,
+    	PUMP_TYP,
+    	PUMP_TYP_DSC,
+    	EMS_MIN_WPP_TAG,
+    	EMS_MIN_WPJ_TAG,
+    	DUTY_H,
+    	DUTY_Q
+    FROM TB_CTR_PRF_PUMPMST_INF
+    ORDER BY PUMP_GRP_IDX, PUMP_IDX
 	</select>
 
 
@@ -2910,13 +3001,10 @@
 	</select>
 
 	<select id="selectAiStatus" resultType="hashMap">
-    SELECT
-    TAG_GRP as PUMP_GRP,
-    DEFAULT_VALUE as AI_STATUS
-    FROM
-    TB_WPP_TAG_CODE
-    WHERE
-    FUNC_TYP = 'PumpStatus'
+    SELECT TAG_GRP as PUMP_GRP, DEFAULT_VALUE as AI_STATUS
+    FROM TB_WPP_TAG_CODE
+    WHERE FUNC_TYP = 'PumpStatus'
+    <!-- WHERE FUNC_TYP = 'TestPumpStatus' -->
     ORDER BY PUMP_GRP
 	</select>
 
@@ -2948,16 +3036,11 @@
 	</select>
 
 	<select id="selectPumpEmergencyStatus" parameterType="String" resultType="String">
-    select
-    DEFAULT_VALUE
-    from
-    TB_WPP_TAG_CODE
-    where
-    TAG_GRP = 'EMS'
-    and
-    TAG_DSC = 'emerStatus'
-    and
-    TAG_UNIT = #{pumpGrp}
+    SELECT DEFAULT_VALUE
+    FROM TB_WPP_TAG_CODE
+    WHERE TAG_GRP = 'EMS'
+    	AND TAG_DSC = 'emerStatus'
+    	AND TAG_UNIT = #{pumpGrp}
 	</select>
 
 	<select id="selectAIPumpData" resultType="hashMap" parameterType="int">
@@ -3257,64 +3340,47 @@
 		  호출자(createPumpCombStatus) 는 cur_freq/pre_freq null 가드가 이미 있어 호환됨.
 		-->
 		SELECT
-		DATE_FORMAT(rst.RGSTR_TIME, '%Y-%m-%d %H:%i:%s') as rgstr_time,
-		rst.PUMP_YN_RST as 'pre_comb',
-		raw.PUMP_USE_RST as 'cur_comb',
-		rst.FLOW_CTR
-		FROM
-		(
-		SELECT
-		A.RGSTR_TIME,
-		GROUP_CONCAT(CASE WHEN A.PUMP_YN = 1 THEN A.PUMP_IDX END ORDER BY A.PUMP_IDX ASC) AS PUMP_YN_RST,
-		A.FLOW_CTR
+			DATE_FORMAT(rst.RGSTR_TIME, '%Y-%m-%d %H:%i:%s') as rgstr_time,
+			rst.PUMP_YN_RST as 'pre_comb',
+			raw.PUMP_USE_RST as 'cur_comb',
+			rst.FLOW_CTR
 		FROM (
-		SELECT
-		t1.PUMP_IDX,
-		COALESCE(t2.PUMP_YN, t1.PUMP_YN) AS PUMP_YN,
-		COALESCE(t2.RGSTR_TIME, t1.RGSTR_TIME) AS RGSTR_TIME,
-		COALESCE(t2.RATE_CTGRY, 'None') AS RATE_CTGRY,
-		COALESCE(t2.FLOW_CTR, 'None') AS FLOW_CTR,
-		CASE
-		WHEN t2.OPT_IDX is not null THEN 1
-		ELSE 0
-		END AS FLAG
-		FROM
-		TB_CTR_PUMPYN_RST t1
-		LEFT JOIN
-		TB_CTR_PUMPYN_INQUIRY t2
-		ON
-		t1.OPT_IDX = t2.OPT_IDX
-		AND
-		t1.PUMP_IDX = t2.PUMP_IDX
-		AND
-		t1.RGSTR_TIME = t2.RGSTR_TIME
-		WHERE
-		t1.PUMP_GRP = #{pump_grp}
-		AND
-		t1.RGSTR_TIME = (
-				select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST where RGSTR_TIME &lt;= #{nowDate} and RGSTR_TIME &gt; DATE_SUB(#{nowDate}, interval 15 minute)
-			)
-		) A
-		GROUP BY
-		A.RGSTR_TIME
+			SELECT
+				A.RGSTR_TIME,
+				GROUP_CONCAT(CASE WHEN A.PUMP_YN = 1 THEN A.PUMP_IDX END ORDER BY A.PUMP_IDX ASC) AS PUMP_YN_RST,
+				A.FLOW_CTR
+			FROM (
+				SELECT
+					t1.PUMP_IDX,
+					COALESCE(t2.PUMP_YN, t1.PUMP_YN) AS PUMP_YN,
+					COALESCE(t2.RGSTR_TIME, t1.RGSTR_TIME) AS RGSTR_TIME,
+					COALESCE(t2.RATE_CTGRY, 'None') AS RATE_CTGRY,
+					COALESCE(t2.FLOW_CTR, 'None') AS FLOW_CTR,
+					CASE WHEN t2.OPT_IDX is not null 
+						THEN 1
+						ELSE 0
+						END AS FLAG
+				FROM TB_CTR_PUMPYN_RST t1 
+					LEFT JOIN TB_CTR_PUMPYN_INQUIRY t2 
+						ON t1.OPT_IDX = t2.OPT_IDX
+						AND t1.PUMP_IDX = t2.PUMP_IDX
+						AND t1.RGSTR_TIME = t2.RGSTR_TIME
+				WHERE t1.PUMP_GRP = #{pump_grp}
+					AND t1.RGSTR_TIME = (
+						select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST where RGSTR_TIME &lt;= #{nowDate} and RGSTR_TIME &gt; DATE_SUB(#{nowDate}, interval 15 minute)
+					)
+			) A
+			GROUP BY A.RGSTR_TIME
 		) rst
-		LEFT JOIN
-		(
-		SELECT
-		tr.TS as TS,
-		GROUP_CONCAT(CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END ORDER BY tc.PUMP_IDX ASC) AS PUMP_USE_RST
-		FROM
-		TB_RAWDATA tr
-		JOIN
-		TB_CTR_PRF_PUMPMST_INF tc
-		ON
-		tr.TAGNAME = tc.PMB_TAG
-		WHERE
-		tc.PUMP_GRP = #{pump_grp}
-		AND
-		tr.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{nowDate} and TS &gt; DATE_SUB(#{nowDate}, interval 15 minute))
-		GROUP BY
-		tr.TS
+		LEFT JOIN (
+			SELECT tr.TS as TS,
+				GROUP_CONCAT(CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END ORDER BY tc.PUMP_IDX ASC) AS PUMP_USE_RST
+			FROM TB_RAWDATA tr
+				JOIN TB_CTR_PRF_PUMPMST_INF tc
+				ON tr.TAGNAME = tc.PMB_TAG
+			WHERE tc.PUMP_GRP = #{pump_grp}
+				AND tr.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{nowDate} and TS &gt; DATE_SUB(#{nowDate}, interval 15 minute))
+			GROUP BY tr.TS
 		) raw
 		<!--
 		  ON 1=1 (cross join):
@@ -3324,10 +3390,8 @@
 		    1=1 결합으로도 결과 행이 폭주하지 않으며 cur_comb 항상 채워짐.
 		-->
 		ON 1 = 1
-		GROUP BY
-		rst.RGSTR_TIME
-		ORDER BY
-		rst.RGSTR_TIME;
+		GROUP BY rst.RGSTR_TIME
+		ORDER BY rst.RGSTR_TIME;
 	</select>
 
 	<select id="getAIPumpTime" resultType="String">
