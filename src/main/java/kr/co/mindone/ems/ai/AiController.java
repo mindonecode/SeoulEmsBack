@@ -249,6 +249,49 @@ public class AiController extends BaseController {
 
 		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, returnMap);
 	}
+
+	/**
+	 * 배수지 유입유량 및 유입 유량 비중
+	 * @param hour 조회 기간
+	 * @return 배수지 유입 유량 및 유입 유량 비중 데이터 리스트
+	 */
+	@Operation(summary = "배수지 유입유량 및 유입 유량 비중", description = "selectTankInFlow")
+	@GetMapping("/selectTankInFlow")
+	public ResponseObject < Map < String, Object >> selectTankInFlow(@RequestParam(value = "hour", defaultValue = "6") Integer hour) {
+		Map < String, Object > returnMap = new HashMap < > ();
+
+		returnMap.put("inflow_list", aiService.selectTankInFlowAndInFlowRateList(hour));
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, returnMap);
+	}
+
+	/**
+	 * 배수지 수위 추세
+	 * @param hour 조회 기간
+	 * @return 배수지 수위 추세 데이터 리스트
+	 */
+	@Operation(summary = "배수지 수위 추세", description = "selectWaterLevelTrend")
+	@GetMapping("/selectWaterLevelTrend")
+	public ResponseObject < Map < String, Object >> selectWaterLevelTrend(@RequestParam(value = "hour", defaultValue = "6") Integer hour) {
+		Map < String, Object > returnMap = new HashMap < > ();
+
+		returnMap.put("water_level_list", aiService.selectWaterLevelTrend(hour));
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, returnMap);
+	}
+
+	/**
+	 * 배수지 수위 현황
+	 * @param hour 조회 기간
+	 * @return 배수지 수위 현황 데이터 리스트
+	 */
+	@Operation(summary = "배수지 수위 현황", description = "selectWaterLevelCurrent")
+	@GetMapping("/selectWaterLevelCurrent")
+	public ResponseObject < Map < String, Object >> selectWaterLevelCurrent(@RequestParam(value = "hour", defaultValue = "6") Integer hour) {
+		Map < String, Object > returnMap = new HashMap < > ();
+
+		returnMap.put("water_level_list", aiService.selectWaterLevelCurrent(hour));
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, returnMap);
+	}
+	
 	/**
 	 * 펌프 목록 호출
 	 * @param map 펌프 그룹에 대한 필터 조건
@@ -300,12 +343,8 @@ public class AiController extends BaseController {
 		double dayTvalue = 0.0, monthTvalue = 0.0, yearTvalue = 0.0;
 		double dayTrate = 0.0, monthTrate = 0.0, yearTrate = 0.0;
 
-		//map.put("range","dayAgo");
-		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
 		returnMap.put("range", "day");
 		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
-		//map.put("range","week");
-		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
 		returnMap.put("range", "month");
 		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
 		returnMap.put("range", "year");

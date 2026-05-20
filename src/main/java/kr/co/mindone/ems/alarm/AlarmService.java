@@ -79,6 +79,10 @@ public class AlarmService {
 		nowDateMap.put("date", formattedDate);
 		//매 분마다
 		List < HashMap < String, Object >> peakGoal = settingMapper.selectPeakGoal();
+		if (peakGoal == null || peakGoal.isEmpty()) {
+			// 목표피크 설정이 비어있으면 알람 비교 불가 → 조용히 스킵.
+			return;
+		}
 		String peakGoalStringValue = (String) peakGoal.get(0).get("value");
 
 		//전력 알람 링크

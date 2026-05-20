@@ -543,8 +543,11 @@ public class DrvnController extends BaseController {
 	}
 
 	@GetMapping("/selectPumpRunCountHistory/{pump_grp}")
-	public ResponseObject<List<HashMap<String,Object>>> selectPumpRunCountHistory(@PathVariable int pump_grp){
-		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectPumpRunCountHistory(pump_grp));
+	public ResponseObject<HashMap<String,Object>> selectPumpRunCountHistory(
+			@PathVariable int pump_grp,
+			@RequestParam(required = false, defaultValue = "0") int daysAgo){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS,
+				drvnService.selectPumpRunCountHistory(pump_grp, daysAgo));
 	}
 
 	/**

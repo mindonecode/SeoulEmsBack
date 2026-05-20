@@ -502,6 +502,30 @@ public interface DrvnMapper {
 	List<HashMap<String,Object>> selectPumpRunHistoryByGrp(HashMap<String, Object> param);
 
 	/**
+	 * 윈도 시작(startDate) 직전 각 펌프(PMB_TAG)의 마지막 ON/OFF 상태 시드 조회.
+	 * @param param PUMP_GRP, startDate(Timestamp)
+	 * @return [{TAGNAME, VALUE, PUMP_IDX}]
+	 */
+	List<HashMap<String,Object>> selectPumpLastStateBeforeGrp(HashMap<String, Object> param);
+
+	/**
+	 * 임의 horizon 예측 유량/수압 조회 (TB_CTR_TNK_RST).
+	 * @param param DSTRB_ID, nowDateTime, horizonMin (10/60/120/180/360)
+	 */
+	List<HashMap<String,Object>> prdctFlowPressureByHorizon(HashMap<String, Object> param);
+
+	/**
+	 * 5단계 horizon 펌프 예측 조합 INSERT (TB_CTR_PUMPYN_PRDCT_RST).
+	 */
+	void insertDrvnPumpYnPrdctData(HashMap<String, Object> param);
+
+	/**
+	 * 펌프대수차트 미래 segment 용. 각 horizon 별 최근 산출 결과 반환.
+	 * @param param PUMP_GRP, nowDateTime
+	 */
+	List<HashMap<String,Object>> selectPumpRunCountForecast(HashMap<String, Object> param);
+
+	/**
 	 * 다중 태그 × 다중 시점 실측값 조회 (TB_RAWDATA, 10분 정렬).
 	 * @param param tagList(List<String>), startDate(yyyy-MM-dd HH:mm:00), endDate(yyyy-MM-dd HH:mm:00)
 	 * @return [{tag, ts(yyyy-MM-dd HH:mm), value(Object)}]
@@ -523,6 +547,14 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectMultiTagPrdctRange(HashMap<String, Object> param);
 
 	/**
+	 * 다중 태그 × 다중 PRDCT_TIME 의 "10분 horizon" 예측값 조회 (TB_CTR_TNK_RST).
+	 * PRDCT_TIME = RGSTR_TIME + 10분 조건을 만족하는 행만 반환 → 실측과의 정확도 비교용.
+	 * @param param tagList(List<String>), prdctTimeList(List<String>)
+	 * @return [{tag, ts(yyyy-MM-dd HH:mm), value(Object)}]
+	 */
+	List<HashMap<String, Object>> selectMultiTagPrdct10minHorizon(HashMap<String, Object> param);
+
+	/**
 	 * 시점별 펌프 가동 여부 실측 조회 (PMB_TAG via TB_RAWDATA).
 	 * @param param pumpGrp, startDate, endDate
 	 * @return [{ts, pumpIdx, pumpYn}]
@@ -541,5 +573,40 @@ public interface DrvnMapper {
 	 * @return [{pumpIdx, pumpYn}]
 	 */
 	List<HashMap<String, Object>> selectLatestPumpYnPrdct(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 예측 유량 조회 - TB_CTR_TNK_RST.
+	 * snapshot_time=13:50 이면 PRDCT_TIME=14:00 (즉 snapshot+10분) 예측 행 1건 반환.
+	 * @param param dstrb_id, snapshot_time
+	 * @return {prdct_flow:Double, prdct_time:String}
+	 */
+	HashMap<String, Object> selectLatestPredictedFlowTnk(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 예측 펌프 조합 CSV 조회 - TB_CTR_PUMPYN_RST 최신 RGSTR_TIME.
+	 * @param param pump_grp, snapshot_time
+	 * @return "1,3,4,6" (모두 OFF면 null)
+	 */
+	String selectLatestPredictedComb(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 최신 실측 유량 조회 (FRI_TAG, TB_RAWDATA).
+	 * @param param pump_grp, snapshot_time
+	 * @return {ts, value}
+	 */
+	HashMap<String, Object> selectLatestActualFlow(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 최신 실측 펌프 조합 CSV 조회 (PMB_TAG, TB_RAWDATA).
+	 * @param param pump_grp, snapshot_time
+	 * @return "1,3,4,6" (펌프 모두 OFF면 null)
+	 */
+	String selectLatestActualComb(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) TB_PUMP_FLOW_COMB_SNAPSHOT 적재 (멱등).
+	 * @param param snapshot_time, pump_grp, prdct_flow, actl_flow, prdct_comb, actl_comb
+	 */
+	int insertFlowCombSnapshot(HashMap<String, Object> param);
 
 }
