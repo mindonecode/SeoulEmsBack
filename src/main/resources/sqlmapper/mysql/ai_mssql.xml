@@ -2068,77 +2068,38 @@
 
 	<select id="peak_max" resultType="hashMap">
 		SELECT DATE_FORMAT(ts, '%Y.%m') as peak_date,
-			ROUND(MAX(diff_value) / 60, 3) as value,
+			ROUND(MAX(per_min_value), 2) as value,
 			MAX(PWI_UNIT) as unit
 		FROM
 			(
-				select ts,
-					value - LAG(value) OVER(ORDER BY ts) as diff_value,
-					PWI_UNIT
-				from
+				/* 타임스탬프별로 전체 태그 합산 후 1분당 사용량 집계 */
+				SELECT ts,
+					SUM(per_min_value) AS per_min_value,
+					MAX(PWI_UNIT) AS PWI_UNIT
+				FROM
 					(
-						select date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
-							SUM(ROUND(rdh.VALUE*pti.PWI_UNIT_VALUE,2)) AS value,
-							MAX(pti.PWI_UNIT) AS PWI_UNIT
-						from TB_RAWDATA_HOUR rdh
-							join TB_PEAK_TAG_INF pti on rdh.tagname = pti.PWI_TAG
-						where pti.IS_ALL = '1' and pti.CLSFC != '오존설비' and pti.mntr_yn = '1' and rdh.value != 0
-							and rdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 12 MONTH, '%Y-%m-01 00:00:00')
-							and rdh.ts &lt;= LAST_DAY(NOW())
-						GROUP BY rdh.ts
+						/* 태그별 누적값 차이를 실제 시간 간격(분)으로 나눠 1분당 사용량 계산 */
+						SELECT
+							date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
+							ROUND(
+								(rdh.VALUE - LAG(rdh.VALUE) OVER(PARTITION BY rdh.tagname ORDER BY rdh.ts))
+								/ NULLIF(TIMESTAMPDIFF(MINUTE, LAG(rdh.ts) OVER(PARTITION BY rdh.tagname ORDER BY rdh.ts), rdh.ts), 0)
+								* pti.PWI_UNIT_VALUE,
+							2) AS per_min_value,
+							pti.PWI_UNIT
+						FROM TB_RAWDATA_HOUR rdh
+							JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
+						WHERE pti.IS_ALL = '1' AND pti.CLSFC != '오존설비' AND pti.mntr_yn = '1'
+							AND rdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
+							AND rdh.ts &lt;= LAST_DAY(NOW())
 					) a
+				WHERE per_min_value &gt; 0 AND per_min_value &lt; 2000
+				GROUP BY ts
 			) b
 		GROUP BY peak_date
 		ORDER BY peak_date
 	</select>
 
-	<!-- <select id="testSelectPwrSumList" parameterType="hashMap" resultType="hashMap">
-		SELECT
-		round(sum(rdh.value * pti.PWQ_UNIT_VALUE), 2) AS value,
-		<if test='range == "dayAgo"'>
-			'dayAgo' AS 'range',
-		</if>
-		<if test='range == "day"'>
-			'day' AS 'range',
-		</if>
-		<if test='range == "week"'>
-			'week' AS 'range',
-		</if>
-		<if test='range == "month"'>
-			'month' AS 'range',
-		</if>
-		<if test='range == "year"'>
-			'year' AS 'range',
-		</if>
-		rri.TIMEZONE as 'timezone',
-		rri.ELCTR_RATE as 'rate',
-		ROUND(sum(rdh.value * pti.PWQ_UNIT_VALUE *rri.ELCTR_RATE), 2) AS cost
-		FROM
-		TB_RAWDATA_HOUR_INGRT rdh, TB_RT_RATE_INF rri, TB_PEAK_TAG_INF pti
-		WHERE
-		rdh.tagname = pti.PWQ_TAG AND pti.IS_ALL = '1' and pti.mntr_yn = '1'
-		AND SUBSTRING(rdh.ts,12,2) = rri.STN_TM and rri.RATE_IDX ='1' and rri.MNTH = month('2026-03-30 00:00:00')
-		<if test='range == "dayAgo"'>
-			AND rdh.ts BETWEEN CONCAT(DATE_SUB('2026-03-30 00:00:00', INTERVAL 1 DAY), ' 00:00:00')
-			AND CONCAT(DATE_SUB('2026-03-30 00:00:00', INTERVAL 1 DAY), ' 23:59:59')
-		</if>
-		<if test='range == "day"'>
-			AND rdh.ts BETWEEN CONCAT('2026-03-30 00:00:00', ' 00:00:00')
-			AND CONCAT('2026-03-30 00:00:00', ' 23:59:59')
-		</if>
-		<if test='range == "week"'>
-			<![CDATA[AND rdh.ts >= ADDDATE( '2026-03-30 00:00:00', - WEEKDAY('2026-03-30 00:00:00') + 0 ) AND rdh.ts <= ADDDATE( '2026-03-30 00:00:00', - WEEKDAY('2026-03-30 00:00:00') + 6 )]]>
-		</if>
-		<if test='range == "month"'>
-			AND rdh.ts BETWEEN DATE_FORMAT('2026-03-30 00:00:00', '%Y-%m-01') AND LAST_DAY('2026-03-30 00:00:00')
-		</if>
-		<if test='range == "year"'>
-			AND rdh.ts BETWEEN CONCAT(YEAR('2026-03-30 00:00:00'), '-01-01 00:00:00')
-			AND CONCAT(YEAR('2026-03-30 00:00:00'), '-12-31 23:59:59')
-		</if>
-		GROUP BY
-		rri.TIMEZONE
-	</select> -->
 	<select id="selectPwrSumList" parameterType="hashMap" resultType="hashMap">
 		WITH raw_data AS (
 			SELECT
