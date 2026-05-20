@@ -303,7 +303,53 @@ public class AiService {
      * @return 전력 데이터 리스트
      */
     List < HashMap < String, Object >> selectElcPwqList(HashMap < String, Object > map) {
-        return aiMapper.selectElcPwqList(map);
+        List<HashMap<String, Object>> list = aiMapper.selectElcPwqList(map);
+        
+        // 비정상 값(2000 이상)이면 이전 값 중 가장 최근 정상값으로 대체하기
+        Double lastValidValue = null;
+        
+        for (int i = 0; i < list.size(); i++) {
+            HashMap<String, Object> item = list.get(i);
+            String valueKey = item.containsKey("value") ? "value" : (item.containsKey("VALUE") ? "VALUE" : null);
+            if (valueKey != null && item.get(valueKey) != null) {
+                try {
+                    double currentValue = Double.parseDouble(item.get(valueKey).toString());
+                    if (currentValue >= 2000) {
+                        if (lastValidValue != null) {
+                            item.put(valueKey, lastValidValue);
+                        } else {
+                            // 이전 값이 없으면 이후 값 중 가장 최근 정상값으로 대체하기
+                            Double nextValidValue = null;
+                            for (int j = i + 1; j < list.size(); j++) {
+                                HashMap<String, Object> nextItem = list.get(j);
+                                String nextValueKey = nextItem.containsKey("value") ? "value" : (nextItem.containsKey("VALUE") ? "VALUE" : null);
+                                if (nextValueKey != null && nextItem.get(nextValueKey) != null) {
+                                    try {
+                                        double nextVal = Double.parseDouble(nextItem.get(nextValueKey).toString());
+                                        if (nextVal < 2000) {
+                                            nextValidValue = nextVal;
+                                            break;
+                                        }
+                                    } catch (NumberFormatException e) {
+                                        // 무시
+                                    }
+                                }
+                            }
+                            if (nextValidValue != null) {
+                                item.put(valueKey, nextValidValue);
+                                lastValidValue = nextValidValue;
+                            }
+                        }
+                    } else {
+                        lastValidValue = currentValue;
+                    }
+                } catch (NumberFormatException e) {
+                    // 파싱 에러 무시
+                }
+            }
+        }
+        
+        return list;
     }
 
     /**
