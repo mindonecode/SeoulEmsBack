@@ -1312,9 +1312,21 @@
 	<!-- 최적요금제분석 -->
 	<select id="selectRtRate" resultType="HashMap" parameterType="HashMap">
 		WITH
+		-- 1. 당월 총 사용량 (NK00AE_E_SV0011GCB_IWH만 롤오버 보정)
 		month_total AS (
 			SELECT
-				COALESCE(SUM(CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))), 0) AS total_kwh
+				COALESCE(SUM(
+					CASE
+						-- NK00AE_E_SV0011GCB_IWH: 롤오버(음수)면 천만 보정
+						WHEN mm.TAGNAME = 'NK00AE_E_SV0011GCB_IWH'
+							AND (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &lt; 0
+							THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) + 10000000 - CAST(rd_first.VALUE AS DECIMAL(20,4))
+						-- 나머지: 정상 차이 (음수면 0)
+						WHEN (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &gt;= 0
+							THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))
+						ELSE 0
+					END
+				), 0) AS total_kwh
 			FROM (
 				SELECT
 					rdh.TAGNAME,
@@ -1323,6 +1335,7 @@
 				FROM TB_RAWDATA_HOUR rdh
 				INNER JOIN tb_peak_tag_inf pti ON rdh.TAGNAME = pti.PWI_TAG
 				WHERE pti.IS_ALL = '1'
+				AND rdh.TAGNAME LIKE '%\_IWH' ESCAPE '\\'
 				AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0
 				AND rdh.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d')
 				AND rdh.TS &lt;  STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') + INTERVAL 1 MONTH
@@ -1333,6 +1346,27 @@
 			LEFT JOIN TB_RAWDATA_HOUR rd_last
 				ON rd_last.TAGNAME = mm.TAGNAME  AND rd_last.TS = mm.last_ts
 		),
+		-- 2. 요금 적용 전력 산출을 위한 최근 12개월(조회월 포함) 최고 피크 kW 추적 CTE
+		historical_hourly_shm AS (
+			SELECT
+				curr.TS,
+				SUM(CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4))) AS hourly_total_kw
+			FROM TB_RAWDATA_HOUR curr
+			INNER JOIN tb_peak_tag_inf pti ON curr.TAGNAME = pti.PWI_TAG
+			INNER JOIN TB_RAWDATA_HOUR prev 
+				ON prev.TAGNAME = curr.TAGNAME AND prev.TS = DATE_SUB(curr.TS, INTERVAL 1 HOUR)
+			WHERE pti.IS_ALL = '1'
+			AND curr.TAGNAME LIKE '%\_IWH' ESCAPE '\\'
+			AND curr.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') - INTERVAL 11 MONTH
+			AND curr.TS &lt;  STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') + INTERVAL 1 MONTH
+			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt;= CAST(prev.VALUE AS DECIMAL(20,4))
+			AND CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4)) &lt; 100000
+			GROUP BY curr.TS
+		),
+		billing_demand AS (
+			SELECT COALESCE(MAX(hourly_total_kw), 0) AS max_12m_kw FROM historical_hourly_shm
+		),
+		-- 3. 시간대별 부하량 계산을 위한 당월 시간별 차이값 집계
 		diff_data AS (
 			SELECT
 				HOUR(curr.TS) AS hh,
@@ -1340,9 +1374,9 @@
 			FROM TB_RAWDATA_HOUR curr
 			INNER JOIN tb_peak_tag_inf pti ON curr.TAGNAME = pti.PWI_TAG
 			INNER JOIN TB_RAWDATA_HOUR prev
-				ON prev.TAGNAME = curr.TAGNAME
-			AND prev.TS = DATE_SUB(curr.TS, INTERVAL 1 HOUR)
+				ON prev.TAGNAME = curr.TAGNAME AND prev.TS = DATE_SUB(curr.TS, INTERVAL 1 HOUR)
 			WHERE pti.IS_ALL = '1'
+			AND curr.TAGNAME LIKE '%\_IWH' ESCAPE '\\'
 			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt; 0.0
 			AND CAST(prev.VALUE AS DECIMAL(20,4)) &gt; 0.0
 			AND curr.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d')
@@ -1350,6 +1384,7 @@
 			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt;= CAST(prev.VALUE AS DECIMAL(20,4))
 			AND CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4)) &lt; 100000
 		),
+		-- 4. 해당 월 단가 매핑
 		load_ratio AS (
 			SELECT
 				rate.RATE_IDX,
@@ -1391,6 +1426,7 @@
 			SELECT 'M', 2 UNION ALL
 			SELECT 'H', 3
 		)
+		-- 5. 최종 대시보드 규격 출력
 		SELECT
 			rmi.LARGE_CTGRY,
 			rmi.MIDDLE_CTGRY,
@@ -1399,7 +1435,7 @@
 				CASE lr.tz
 					WHEN 'L' THEN p.L_PWR_RAW
 					WHEN 'M' THEN p.M_PWR_RAW
-					WHEN 'H' THEN p.H_PWR_RAW
+					WHEN 'H' THEN bd.max_12m_kw
 				END
 			, 0) AS PWR,
 			0 AS DATA_MSN_PRCNT,
@@ -1407,19 +1443,18 @@
 			FORMAT(p.L_PWR_RAW, 0) AS L_PWR,
 			FORMAT(p.M_PWR_RAW, 0) AS M_PWR,
 			FORMAT(p.H_PWR_RAW, 0) AS H_PWR,
-			FORMAT(p.L_ELCTR_FEE_RAW + p.M_ELCTR_FEE_RAW + p.H_ELCTR_FEE_RAW, 0) AS TOT_FEE,
-			0 AS BASE_FEE,
+			FORMAT(p.L_ELCTR_FEE_RAW + p.M_ELCTR_FEE_RAW + p.H_ELCTR_FEE_RAW + (7220 * bd.max_12m_kw), 0) AS TOT_FEE,
+			FORMAT(7220 * bd.max_12m_kw, 0) AS BASE_FEE,
 			0 AS ETC_FEE,
 			FORMAT(p.L_ELCTR_FEE_RAW, 0) AS L_ELCTR_FEE,
 			FORMAT(p.M_ELCTR_FEE_RAW, 0) AS M_ELCTR_FEE,
 			FORMAT(p.H_ELCTR_FEE_RAW, 0) AS H_ELCTR_FEE
 		FROM pivoted p
-		INNER JOIN TB_RT_MSTR_INF rmi
-			ON rmi.RATE_IDX = p.RATE_IDX
-		AND rmi.USE_YN = '1'
+		INNER JOIN TB_RT_MSTR_INF rmi ON rmi.RATE_IDX = p.RATE_IDX AND rmi.USE_YN = '1'
 		CROSS JOIN load_rows lr
-		ORDER BY p.RATE_IDX, lr.ord
-		</select>
+		CROSS JOIN billing_demand bd
+		ORDER BY p.RATE_IDX, lr.ord;	
+	</select>
 
 	<select id="pumpSelect_new" parameterType="hashMap" resultType="hashMap">
 		<![CDATA[
@@ -1448,8 +1483,7 @@
 	</select>
 
 	<select id="pumpPrdctSelect" parameterType="hashMap" resultType="hashMap">
-		<![CDATA[
-			select
+		select
 				ctr.OPT_IDX,
 				cppi.PUMP_IDX,
 				cppi.PUMP_NM,
@@ -1493,25 +1527,25 @@
 					where
 						cor.OPT_IDX  = cpr.OPT_IDX
 						AND cor.PUMP_GRP = cpr.PUMP_GRP
-						AND cor.PRDCT_TIME > concat(DATE_FORMAT(NOW(), '%Y-%m-%d'),' 00:00:00')
-						AND cor.PRDCT_TIME < concat(DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 DAY), '%Y-%m-%d'),' 00:00:00')
+						AND cor.PRDCT_TIME &gt; concat(DATE_FORMAT(NOW(), '%Y-%m-%d'),' 00:00:00')
+						AND cor.PRDCT_TIME &lt; concat(DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 DAY), '%Y-%m-%d'),' 00:00:00')
 						AND cor.PUMP_GRP = #{pump_grp}
 						AND cor.ANLY_TIME =
 						(
 							SELECT MAX(ANLY_TIME) FROM TB_CTR_OPT_RST
 							WHERE
-							PRDCT_TIME > concat(DATE_FORMAT(NOW(), '%Y-%m-%d'),' 00:00:00')
-							AND PRDCT_TIME < concat(DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 DAY), '%Y-%m-%d'),' 00:00:00')
+							PRDCT_TIME &gt; concat(DATE_FORMAT(NOW(), '%Y-%m-%d'),' 00:00:00')
+							AND PRDCT_TIME &lt; concat(DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 DAY), '%Y-%m-%d'),' 00:00:00')
 							AND PUMP_GRP = #{pump_grp}
 						)
 						AND cor.PRDCT_TIME =
 						(
 							SELECT MAX(PRDCT_TIME) FROM TB_CTR_OPT_RST
 							WHERE
-							PRDCT_TIME >= DATE_SUB(NOW(), INTERVAL 60 MINUTE)
-								AND PRDCT_TIME <= DATE_ADD(NOW(), INTERVAL 60 MINUTE)
-								AND PRDCT_TIME > concat(DATE_FORMAT(NOW(), '%Y-%m-%d'),' 00:00:00')
-							AND PRDCT_TIME < concat(DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 DAY), '%Y-%m-%d'),' 00:00:00')
+							PRDCT_TIME &gt;= DATE_SUB(NOW(), INTERVAL 60 MINUTE)
+								AND PRDCT_TIME &lt;= DATE_ADD(NOW(), INTERVAL 60 MINUTE)
+								AND PRDCT_TIME &gt; concat(DATE_FORMAT(NOW(), '%Y-%m-%d'),' 00:00:00')
+							AND PRDCT_TIME &lt; concat(DATE_FORMAT(DATE_ADD(NOW(), INTERVAL 1 DAY), '%Y-%m-%d'),' 00:00:00')
 
 							AND PUMP_GRP = #{pump_grp}
 						)
@@ -1521,8 +1555,7 @@
 				AND cppi.PUMP_GRP = #{pump_grp}
 				AND LEI_IDX = 1
 			ORDER BY
-				ctr.ANLY_TIME,ctr.PRDCT_TIME_DIFF
-			]]>
+				ctr.ANLY_TIME,ctr.PRDCT_TIME_DIFF	
 	</select>
 
 	<select id="pumpUsageList" resultType="hashMap">
