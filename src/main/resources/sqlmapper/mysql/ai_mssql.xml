@@ -1987,117 +1987,47 @@
 	</select>
 
 	<select id="selectElcPwqList" parameterType="hashMap" resultType="hashMap">
-		WITH raw_data AS (
-			SELECT
-				rdh.tagname,
-				rdh.ts,
-				rdh.value,
-				pti.PWI_UNIT_VALUE,
-				LAG(rdh.ts) OVER (PARTITION BY rdh.tagname ORDER BY rdh.ts) AS prev_ts,
-				LAG(rdh.value) OVER (PARTITION BY rdh.tagname ORDER BY rdh.ts) AS prev_value
-			FROM
-				TB_RAWDATA_HOUR rdh
-				JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
-			WHERE pti.IS_ALL = '1'
-				AND pti.CLSFC != '오존설비'
-				AND pti.mntr_yn = '1'
-				AND rdh.value != 0
-				<if test='time_type =="h" or time_type =="d"'>
-					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, ' 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
-				</if>
-				<if test='time_type =="m"'>
-					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, '-01 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
-				</if>
-				<if test='time_type =="y"'>
-					AND rdh.ts &gt;= DATE_SUB(CONCAT(#{start_date}, '-01-01 00:00:00'), INTERVAL 1 DAY)
-					AND rdh.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
-				</if>
-		),
-		diff_data AS (
-			SELECT
-				raw_data.ts,
-				CASE
-					WHEN raw_data.prev_ts IS NULL OR raw_data.prev_value IS NULL THEN 0
-					WHEN TIMESTAMPDIFF(MINUTE, raw_data.prev_ts, raw_data.ts) &lt; 0 THEN 0
-					WHEN raw_data.value &lt; raw_data.prev_value THEN 0
-					<if test='time_type =="h"'>
-						ELSE ROUND(
-							((raw_data.value - raw_data.prev_value) / TIMESTAMPDIFF(MINUTE, raw_data.prev_ts, raw_data.ts))
-							* raw_data.PWI_UNIT_VALUE
-						, 6)
-					</if>
-					<if test='time_type =="d" or time_type =="m" or time_type =="y"'>
-						ELSE ROUND(
-							(raw_data.value - raw_data.prev_value) * raw_data.PWI_UNIT_VALUE
-						, 6)
-					</if>
-				END AS use_value
-			FROM raw_data
-		)
 		SELECT
-			<if test='time_type =="h"'>DATE_FORMAT(MIN(diff_data.ts),'%Y-%m-%d %H:%i')</if>
-			<if test='time_type =="d"'>DATE_FORMAT(MIN(diff_data.ts),'%Y-%m-%d')</if>
-			<if test='time_type =="m"'>DATE_FORMAT(MIN(diff_data.ts),'%Y-%m')</if>
-			<if test='time_type =="y"'>DATE_FORMAT(MIN(diff_data.ts),'%Y')</if>
+			<if test='time_type =="h"'>DATE_FORMAT(MIN(rd.ts),'%Y-%m-%d %H:%i')</if>
+			<if test='time_type =="d"'>DATE_FORMAT(MIN(rd.ts),'%Y-%m-%d')</if>
+			<if test='time_type =="m"'>DATE_FORMAT(MIN(rd.ts),'%Y-%m')</if>
+			<if test='time_type =="y"'>DATE_FORMAT(MIN(rd.ts),'%Y')</if>
 			AS ts,
-			ROUND(SUM(diff_data.use_value), 2) AS value
-		FROM diff_data
-		WHERE 1 = 1
+			ROUND(rd.VALUE, 2) AS value
+		FROM TB_RAWDATA rd
+			JOIN TB_PEAK_TAG_INF pti ON rd.tagname = pti.PWI_TAG
+		WHERE pti.PWI_TAG = 'PK00KE_E_SVHV4NSVCB_IKW'
 			<if test='time_type =="h" or time_type =="d"'>
-				AND diff_data.ts &gt;= CONCAT(#{start_date}, ' 00:00:00')
-				AND diff_data.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
+				AND rd.ts &gt;= CONCAT(#{start_date}, ' 00:00:00')
+				AND rd.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
 			</if>
 			<if test='time_type =="m"'>
-				AND diff_data.ts &gt;= CONCAT(#{start_date}, '-01 00:00:00')
-				AND diff_data.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
+				AND rd.ts &gt;= CONCAT(#{start_date}, '-01 00:00:00')
+				AND rd.ts &lt;= CONCAT(#{end_date}, '-31 23:59:00')
 			</if>
 			<if test='time_type =="y"'>
-				AND diff_data.ts &gt;= CONCAT(#{start_date}, '-01-01 00:00:00')
-				AND diff_data.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
+				AND rd.ts &gt;= CONCAT(#{start_date}, '-01-01 00:00:00')
+				AND rd.ts &lt;= CONCAT(#{end_date}, '-12-31 23:59:00')
 			</if>
 		GROUP BY
-			<if test='time_type =="h"'>diff_data.ts</if>
-			<if test='time_type =="d"'>DATE(diff_data.ts)</if>
-			<if test='time_type =="m"'>DATE_FORMAT(diff_data.ts, '%Y-%m')</if>
-			<if test='time_type =="y"'>DATE_FORMAT(diff_data.ts, '%Y')</if>
-		ORDER BY MIN(diff_data.ts)
+			<if test='time_type =="h"'>rd.ts</if>
+			<if test='time_type =="d"'>DATE(rd.ts)</if>
+			<if test='time_type =="m"'>DATE_FORMAT(rd.ts, '%Y-%m')</if>
+			<if test='time_type =="y"'>DATE_FORMAT(rd.ts, '%Y')</if>
+		ORDER BY MIN(rd.ts)
 	</select>
 
-
 	<select id="peak_max" resultType="hashMap">
-		SELECT DATE_FORMAT(ts, '%Y.%m') as peak_date,
-			ROUND(MAX(per_min_value), 2) as value,
-			MAX(PWI_UNIT) as unit
-		FROM
-			(
-				/* 타임스탬프별로 전체 태그 합산 후 1분당 사용량 집계 */
-				SELECT ts,
-					SUM(per_min_value) AS per_min_value,
-					MAX(PWI_UNIT) AS PWI_UNIT
-				FROM
-					(
-						/* 태그별 누적값 차이를 실제 시간 간격(분)으로 나눠 1분당 사용량 계산 */
-						SELECT
-							date_format(rdh.ts, '%Y-%m-%d %H:%i:00') AS ts,
-							ROUND(
-								(rdh.VALUE - LAG(rdh.VALUE) OVER(PARTITION BY rdh.tagname ORDER BY rdh.ts))
-								/ NULLIF(TIMESTAMPDIFF(MINUTE, LAG(rdh.ts) OVER(PARTITION BY rdh.tagname ORDER BY rdh.ts), rdh.ts), 0)
-								* pti.PWI_UNIT_VALUE,
-							2) AS per_min_value,
-							pti.PWI_UNIT
-						FROM TB_RAWDATA_HOUR rdh
-							JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
-						WHERE pti.IS_ALL = '1' AND pti.CLSFC != '오존설비' AND pti.mntr_yn = '1'
-							AND rdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
-							AND rdh.ts &lt;= LAST_DAY(NOW())
-					) a
-				WHERE per_min_value &gt; 0 AND per_min_value &lt; 2000
-				GROUP BY ts
-			) b
-		GROUP BY peak_date
-		ORDER BY peak_date
+		SELECT
+			date_format(rd.ts, '%Y-%m-%d %H:%i:00') AS peak_date,
+			ROUND(MAX(CAST(rd.`VALUE` AS DECIMAL(20, 6))), 2) AS value,
+			pti.PWI_UNIT
+		FROM TB_RAWDATA rd
+			JOIN TB_PEAK_TAG_INF pti ON rd.tagname = pti.PWI_TAG
+		WHERE pti.PWI_TAG = 'PK00KE_E_SVHV4NSVCB_IKW'
+			AND rd.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
+			AND rd.ts &lt;= LAST_DAY(NOW())
+		ORDER BY rd.ts
 	</select>
 
 	<select id="selectPwrSumList" parameterType="hashMap" resultType="hashMap">
