@@ -2092,53 +2092,6 @@
 		ORDER BY peak_date
 	</select>
 
-	<!-- <select id="testSelectPwrSumList" parameterType="hashMap" resultType="hashMap">
-		SELECT
-		round(sum(rdh.value * pti.PWQ_UNIT_VALUE), 2) AS value,
-		<if test='range == "dayAgo"'>
-			'dayAgo' AS 'range',
-		</if>
-		<if test='range == "day"'>
-			'day' AS 'range',
-		</if>
-		<if test='range == "week"'>
-			'week' AS 'range',
-		</if>
-		<if test='range == "month"'>
-			'month' AS 'range',
-		</if>
-		<if test='range == "year"'>
-			'year' AS 'range',
-		</if>
-		rri.TIMEZONE as 'timezone',
-		rri.ELCTR_RATE as 'rate',
-		ROUND(sum(rdh.value * pti.PWQ_UNIT_VALUE *rri.ELCTR_RATE), 2) AS cost
-		FROM
-		TB_RAWDATA_HOUR_INGRT rdh, TB_RT_RATE_INF rri, TB_PEAK_TAG_INF pti
-		WHERE
-		rdh.tagname = pti.PWQ_TAG AND pti.IS_ALL = '1' and pti.mntr_yn = '1'
-		AND SUBSTRING(rdh.ts,12,2) = rri.STN_TM and rri.RATE_IDX ='1' and rri.MNTH = month('2026-03-30 00:00:00')
-		<if test='range == "dayAgo"'>
-			AND rdh.ts BETWEEN CONCAT(DATE_SUB('2026-03-30 00:00:00', INTERVAL 1 DAY), ' 00:00:00')
-			AND CONCAT(DATE_SUB('2026-03-30 00:00:00', INTERVAL 1 DAY), ' 23:59:59')
-		</if>
-		<if test='range == "day"'>
-			AND rdh.ts BETWEEN CONCAT('2026-03-30 00:00:00', ' 00:00:00')
-			AND CONCAT('2026-03-30 00:00:00', ' 23:59:59')
-		</if>
-		<if test='range == "week"'>
-			<![CDATA[AND rdh.ts >= ADDDATE( '2026-03-30 00:00:00', - WEEKDAY('2026-03-30 00:00:00') + 0 ) AND rdh.ts <= ADDDATE( '2026-03-30 00:00:00', - WEEKDAY('2026-03-30 00:00:00') + 6 )]]>
-		</if>
-		<if test='range == "month"'>
-			AND rdh.ts BETWEEN DATE_FORMAT('2026-03-30 00:00:00', '%Y-%m-01') AND LAST_DAY('2026-03-30 00:00:00')
-		</if>
-		<if test='range == "year"'>
-			AND rdh.ts BETWEEN CONCAT(YEAR('2026-03-30 00:00:00'), '-01-01 00:00:00')
-			AND CONCAT(YEAR('2026-03-30 00:00:00'), '-12-31 23:59:59')
-		</if>
-		GROUP BY
-		rri.TIMEZONE
-	</select> -->
 	<select id="selectPwrSumList" parameterType="hashMap" resultType="hashMap">
 		WITH raw_data AS (
 			SELECT
