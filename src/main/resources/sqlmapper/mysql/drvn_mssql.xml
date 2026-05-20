@@ -2742,9 +2742,8 @@
 	  ===========================================================
 	-->
 	<!--
-	  예측 유량: TB_CTR_TNK_RST 에서 PRDCT_TIME = rgstr_time + 10분 인 예측값을 가져옴.
-	  예) rgstr_time=14:00 → PRDCT_TIME=14:10 시점의 예측 유량.
-	  기존 prdctFlowPressure 와 동일 로직, ROUND(.,1) 적용.
+	  예측 유량: TB_CTR_TNK_RST 에서 RGSTR_TIME / PRDCT_TIME 모두 snapshot 과 정확 동치인 행의 PRDCT_VALUE.
+	  대시보드 성능점/예측점 유량과 동일 행 보장. 해당 행이 아직 없으면 null 반환 → snapshot 에 null 적재.
 	-->
 	<select id="selectLatestPredictedFlowTnk" parameterType="hashmap" resultType="hashmap">
 		SELECT
@@ -2752,12 +2751,8 @@
 			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time
 		FROM TB_CTR_TNK_RST tctr
 		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
-			AND tctr.RGSTR_TIME = (
-				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
-				WHERE UPPER(DSTRB_ID) = UPPER(#{dstrb_id})
-					AND RGSTR_TIME &lt;= #{rgstr_time}
-			)
-			AND tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 MINUTE)
+			AND tctr.RGSTR_TIME = #{rgstr_time}
+			AND tctr.PRDCT_TIME = #{prdct_time}
 		LIMIT 1
 	</select>
 
@@ -2775,14 +2770,16 @@
 			)
 	</select>
 
+	<!--
+	  실측 유량: predicted 와 동일 지점(DSTRB_Q_ID) 의 FRI_TAG 로, snapshot.RGSTR_TIME 과 동일 시각의 TB_RAWDATA 값.
+	  tnk_rst(예측) 와 rawdata(실측) 가 같은 유량 지점 / 같은 시각으로 정렬되어야 성능점·예측점과 일치.
+	-->
 	<select id="selectLatestActualFlow" parameterType="hashmap" resultType="hashmap">
 		SELECT DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') AS ts, tr.VALUE AS value
-		FROM TB_RAWDATA tr, TB_CTR_PRF_PUMPMST_INF tcppi
-		WHERE tr.TAGNAME = tcppi.FRI_TAG
-			AND tcppi.PUMP_GRP = #{pump_grp}
-			AND tr.TS &lt;= #{rgstr_time}
-			AND tr.TS &gt; DATE_SUB(#{rgstr_time}, INTERVAL 10 MINUTE)
-		ORDER BY tr.TS DESC
+		FROM TB_RAWDATA tr
+		JOIN TB_CTR_TNK_INF tcti ON tcti.FRI_TAG = tr.TAGNAME
+		WHERE UPPER(tcti.DSTRB_Q_ID) = UPPER(#{dstrb_id})
+			AND tr.TS = #{rgstr_time}
 		LIMIT 1
 	</select>
 
@@ -2803,6 +2800,12 @@
 		WHERE t.value = 1
 	</select>
 
+	<!--
+	  매분 retry 방식 UPSERT.
+	  - 신규 키 (RGSTR_TIME, PUMP_GRP) 면 INSERT.
+	  - 이미 존재하면 새 값이 non-null 일 때만 갱신 (COALESCE 로 기존 값 보존).
+	    → 1분차에 PRDCT_FLOW 만 들어오고 다음 분차에 ACTL_FLOW 가 들어와도 둘 다 유지됨.
+	-->
 	<insert id="insertFlowCombSnapshot" parameterType="hashmap">
 		INSERT INTO TB_PUMP_FLOW_COMB_SNAPSHOT
 			(RGSTR_TIME, PRDCT_TIME, PUMP_GRP, PRDCT_FLOW, ACTL_FLOW, PRDCT_COMB, ACTL_COMB)
@@ -2810,10 +2813,10 @@
 			(#{rgstr_time}, #{prdct_time}, #{pump_grp}, #{prdct_flow}, #{actl_flow}, #{prdct_comb}, #{actl_comb})
 		ON DUPLICATE KEY UPDATE
 			PRDCT_TIME = #{prdct_time},
-			PRDCT_FLOW = #{prdct_flow},
-			ACTL_FLOW  = #{actl_flow},
-			PRDCT_COMB = #{prdct_comb},
-			ACTL_COMB  = #{actl_comb}
+			PRDCT_FLOW = COALESCE(#{prdct_flow}, PRDCT_FLOW),
+			ACTL_FLOW  = COALESCE(#{actl_flow},  ACTL_FLOW),
+			PRDCT_COMB = COALESCE(#{prdct_comb}, PRDCT_COMB),
+			ACTL_COMB  = COALESCE(#{actl_comb},  ACTL_COMB)
 	</insert>
 
 </mapper>
