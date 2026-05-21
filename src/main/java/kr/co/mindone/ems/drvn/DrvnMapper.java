@@ -584,11 +584,11 @@ public interface DrvnMapper {
 	HashMap<String, Object> selectLatestPredictedFlowTnk(HashMap<String, Object> param);
 
 	/**
-	 * (10분 스냅샷) 예측 펌프 조합 CSV 조회 - TB_CTR_PUMPYN_RST 최신 RGSTR_TIME.
-	 * @param param pump_grp, snapshot_time
-	 * @return "1,3,4,6" (모두 OFF면 null)
+	 * (10분 스냅샷) 예측 펌프 조합 CSV + 결정 시각 조회 - TB_CTR_PUMPYN_RST 최신 RGSTR_TIME (≤ rgstr_time).
+	 * @param param pump_grp, rgstr_time
+	 * @return { prdct_comb: "1,3,4,6"(모두 OFF면 null), actl_ref_ts: "yyyy-MM-dd HH:mm:ss" (예측이 결정된 시각) }
 	 */
-	String selectLatestPredictedComb(HashMap<String, Object> param);
+	HashMap<String, Object> selectLatestPredictedComb(HashMap<String, Object> param);
 
 	/**
 	 * (10분 스냅샷) 실측 유량 조회 - TB_CTR_TNK_INF.DSTRB_Q_ID 로 매칭한 FRI_TAG 의 TB_RAWDATA 값.
@@ -608,8 +608,47 @@ public interface DrvnMapper {
 
 	/**
 	 * (10분 스냅샷) TB_PUMP_FLOW_COMB_SNAPSHOT 적재 (멱등).
-	 * @param param snapshot_time, pump_grp, prdct_flow, actl_flow, prdct_comb, actl_comb
+	 * 컬럼: rgstr_time, prdct_time, pump_grp,
+	 *       prdct_flow, actl_flow, prdct_comb, actl_comb,
+	 *       prdct_prsr, actl_prsr,
+	 *       prdct_wl_gn|ba|gr|wg|wgok, actl_wl_gn|ba|gr|wg|wgok
+	 * 새 컬럼은 null 허용. ON DUPLICATE KEY UPDATE 에서 COALESCE 로 기존 값 보존.
 	 */
 	int insertFlowCombSnapshot(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 예측 압력: TB_CTR_TNK_RST 에서 압력 DSTRB_ID 의 RGSTR_TIME / PRDCT_TIME 정확 동치 PRDCT_VALUE.
+	 * @param param dstrb_id, rgstr_time, prdct_time
+	 * @return {prdct_prsr, prdct_time} 없으면 null
+	 */
+	HashMap<String, Object> selectLatestPredictedPressureTnk(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 실측 압력: TB_RAWDATA 에서 압력 태그(=DSTRB_ID) 의 RGSTR_TIME 동일 시각 VALUE.
+	 * @param param tag, rgstr_time
+	 * @return {ts, value} 없으면 null
+	 */
+	HashMap<String, Object> selectLatestActualPressure(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 배수지 예측 수위 평균: TB_CTR_TNK_RST 에서 tagList 의 RGSTR_TIME / PRDCT_TIME 정확 동치 PRDCT_VALUE 평균.
+	 * @param param tagList(List&lt;String&gt;), rgstr_time, prdct_time
+	 * @return {avg_value, tank_count}
+	 */
+	HashMap<String, Object> selectLatestPredictedReservoirAvg(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 배수지 실측 수위 평균: TB_RAWDATA 에서 tagList 의 RGSTR_TIME 동일 시각 VALUE 평균.
+	 * @param param tagList(List&lt;String&gt;), rgstr_time
+	 * @return {avg_value, tank_count}
+	 */
+	HashMap<String, Object> selectLatestActualReservoirAvg(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷 backfill) 최근 N 시간 내 한 컬럼이라도 null 인 snapshot 행 조회.
+	 * @param param nowDateTime(String), hoursBack(int)
+	 * @return rgstr_time, prdct_time, pump_grp, 11개 측정 컬럼 (null/값).
+	 */
+	java.util.List<HashMap<String, Object>> selectRecentSnapshotsWithNulls(HashMap<String, Object> param);
 
 }

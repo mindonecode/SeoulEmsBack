@@ -2,6 +2,14 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 
 <mapper namespace="kr.co.mindone.ems.energy.EnerSpendMapper">
+<select id="selectFacUseSubList" parameterType="hashMap" resultType="hashMap">
+		SELECT pti.VSL_TAG_DSC as fac_name,
+			pti.PWI_TAG as fac_code
+		FROM TB_PEAK_TAG_INF pti
+		WHERE pti.CLSFC = #{zone_name}
+			AND pti.IS_ALL = '0'
+	</select>
+
 	<select id="selectZoneUseList" parameterType="hashMap" resultType="hashMap">
 		WITH raw_data AS (
 			SELECT
@@ -299,54 +307,45 @@
 		ORDER BY d.CLSFC
 	</select>
 	<select id="selectFacUseList" parameterType="hashMap" resultType="hashMap">
-		SELECT
-			x,
-			fac_name,
-			fac_code,
-			tagname,
-			COALESCE(AVG(y), 0) as y
-		FROM
-		(
-
 			SELECT
-				<if test='time_type =="h"'>DATE_FORMAT(rdh.ts,'%Y-%m-%d %H')</if>
-				<if test='time_type =="d"'>DATE_FORMAT(rdh.ts,'%Y-%m-%d')</if>
-				<if test='time_type =="m"'>DATE_FORMAT(rdh.ts,'%Y-%m')</if>
-				<if test='time_type =="y"'>DATE_FORMAT(rdh.ts,'%Y')</if> AS x,
-				fc.fac_name,
-				fc.fac_code,
-				ti.tagname,
-				ROUND(rdh.VALUE*pti.PWQ_UNIT_VALUE,2) AS y
+				<if test='time_type =="h"'>DATE_FORMAT(rd.ts,'%Y-%m-%d %H')</if>
+				<if test='time_type =="d"'>DATE_FORMAT(rd.ts,'%Y-%m-%d')</if>
+				<if test='time_type =="m"'>DATE_FORMAT(rd.ts,'%Y-%m')</if>
+				<if test='time_type =="y"'>DATE_FORMAT(rd.ts,'%Y')</if> AS x,
+				fc.FAC_NAME as fac_name,
+				fc.fac_code as fac_code,
+				pti.PWI_TAG as tagname,
+				ROUND(AVG(CAST(rd.VALUE AS DECIMAL(20,4)) * CAST(pti.PWQ_UNIT_VALUE AS DECIMAL(20,4))),2) AS y
 			FROM
-				TB_RAWDATA_HOUR_INGRT rdh, TB_TAGINFO ti, TB_FAC fc, TB_PEAK_TAG_INF pti
+				TB_RAWDATA rd, 
+				TB_PEAK_TAG_INF pti,
+				TB_FAC fc
 			WHERE
-				rdh.tagname = ti.tagname AND ti.fac_code = fc.FAC_CODE AND pti.PWQ_TAG = ti.tagname AND ti.USE_YN = '1'
-				and pti.mntr_yn = '1' and ti.USE_YN ='1'
+				rd.tagname = pti.PWI_TAG
+				and pti.mntr_yn = '1'
+				and pti.IS_ALL = '0'
+				and pti.HMI_TAG_DSC = fc.FAC_NAME
 				and
 				<if test='time_type =="h" or time_type =="d"'>
-					<![CDATA[rdh.ts >=concat(#{start_date},' 00:00:00') AND rdh.ts <= concat(#{end_date},' 23:59:00')]]>
+					rd.ts &gt;=concat(#{start_date},' 00:00:00') AND rd.ts &lt;= concat(#{end_date},' 23:59:00')
 				</if>
 				<if test='time_type =="m"'>
-					<![CDATA[rdh.ts >=concat(#{start_date},'-01 00:00:00') AND rdh.ts <= concat(#{end_date},'-31 23:59:00')]]>
+					rd.ts &gt;=concat(#{start_date},'-01 00:00:00') AND rd.ts &lt;= concat(#{end_date},'-31 23:59:00')
 				</if>
 				<if test='time_type =="y"'>
-					<![CDATA[rdh.ts >=concat(#{start_date},'-01-01 00:00:00') AND rdh.ts <= concat(#{end_date},'-12-31 23:59:00')]]>
+					rd.ts &gt;=concat(#{start_date},'-01-01 00:00:00') AND rd.ts &lt;= concat(#{end_date},'-12-31 23:59:00')
 				</if>
-				<if test="zone_code != null and zone_code != ''">  and ti.zone_code = #{zone_code} </if>
-				<if test="fac_code != null and fac_code != ''">  and fc.fac_code = #{fac_code} </if>
-		) a
-		GROUP BY fac_name,
-			<if test='time_type =="h"'>x</if>
-			<if test='time_type =="d"'>date(x)</if>
-			<if test='time_type =="m"'>x</if>
-			<if test='time_type =="y"'>x</if>
+				<if test="zone_code != null and zone_code != ''">
+					and pti.CLSFC = #{zone_code}
+				</if>
+			GROUP BY fac_code
 	</select>
 	<select id="selectFacUseList_sum" parameterType="hashMap" resultType="hashMap">
 		SELECT
 			fac_name,
 			fac_code,
 			CASE
-				WHEN COUNT(CASE WHEN y != 0 THEN 1 END) > 0
+				WHEN COUNT(CASE WHEN y != 0 THEN 1 END) &gt; 0
 				THEN ROUND(AVG(CASE WHEN y != 0 THEN y END), 2)
 				ELSE 0
 			END AS y

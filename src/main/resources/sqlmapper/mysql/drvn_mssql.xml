@@ -2758,9 +2758,13 @@
 
 	<!--
 	  예측 펌프 조합: TB_CTR_PUMPYN_RST 의 최신 RGSTR_TIME (≤ rgstr_time) 에서 PUMP_YN=1 인 PUMP_IDX CSV.
+	  반환: { prdct_comb, actl_ref_ts } — actl_ref_ts 는 이 예측 조합이 결정된 시각 (= MAX RGSTR_TIME).
+	  실측 컬럼들(actl_flow/comb/prsr/wl) 은 이 시점의 raw 를 매치하여 "예측 조합이 참고한 시점" 과 정렬.
 	-->
-	<select id="selectLatestPredictedComb" parameterType="hashmap" resultType="String">
-		SELECT GROUP_CONCAT(CASE WHEN t.PUMP_YN = 1 THEN t.PUMP_IDX END ORDER BY t.PUMP_IDX SEPARATOR ',') AS prdct_comb
+	<select id="selectLatestPredictedComb" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			GROUP_CONCAT(CASE WHEN t.PUMP_YN = 1 THEN t.PUMP_IDX END ORDER BY t.PUMP_IDX SEPARATOR ',') AS prdct_comb,
+			DATE_FORMAT(MAX(t.RGSTR_TIME), '%Y-%m-%d %H:%i:%s') AS actl_ref_ts
 		FROM TB_CTR_PUMPYN_RST t
 		WHERE t.PUMP_GRP = #{pump_grp}
 			AND t.RGSTR_TIME = (
@@ -2771,18 +2775,24 @@
 	</select>
 
 	<!--
-	  실측 유량: predicted 와 동일 지점(DSTRB_Q_ID) 의 FRI_TAG 로, snapshot.RGSTR_TIME 과 동일 시각의 TB_RAWDATA 값.
-	  tnk_rst(예측) 와 rawdata(실측) 가 같은 유량 지점 / 같은 시각으로 정렬되어야 성능점·예측점과 일치.
+	  실측 유량: PUMP_GRP 의 FRI_TAG (TB_CTR_PRF_PUMPMST_INF) 로 TB_RAWDATA 의 actl_ref_ts (예측 조합이
+	  결정된 시점) 와 정렬된 값. 정확 시각 raw 가 있으면 그게 잡히고, 없으면 (actl_ref_ts-10min, actl_ref_ts]
+	  윈도우 내 가장 최근 raw 가 잡힘 → "예측이 본 시점" 직전 마지막 측정값.
 	-->
 	<select id="selectLatestActualFlow" parameterType="hashmap" resultType="hashmap">
 		SELECT DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') AS ts, tr.VALUE AS value
 		FROM TB_RAWDATA tr
-		JOIN TB_CTR_TNK_INF tcti ON tcti.FRI_TAG = tr.TAGNAME
-		WHERE UPPER(tcti.DSTRB_Q_ID) = UPPER(#{dstrb_id})
-			AND tr.TS = #{rgstr_time}
+		JOIN TB_CTR_PRF_PUMPMST_INF tcppi ON tcppi.FRI_TAG = tr.TAGNAME
+		WHERE tcppi.PUMP_GRP = #{pump_grp}
+			AND tr.TS &lt;= #{actl_ref_ts}
+			AND tr.TS &gt; DATE_SUB(#{actl_ref_ts}, INTERVAL 10 MINUTE)
+		ORDER BY tr.TS DESC
 		LIMIT 1
 	</select>
 
+	<!--
+	  실측 펌프 조합: actl_ref_ts (예측 조합이 결정된 시점) 기준 각 PUMP_GRP 의 PMB_TAG 최근 ON 펌프 CSV.
+	-->
 	<select id="selectLatestActualComb" parameterType="hashmap" resultType="String">
 		SELECT GROUP_CONCAT(t.PUMP_IDX ORDER BY t.PUMP_IDX SEPARATOR ',') AS actl_comb
 		FROM (
@@ -2793,8 +2803,8 @@
 				AND rd.TS = (
 					SELECT MAX(sub.TS) FROM TB_RAWDATA sub
 					WHERE sub.TAGNAME = cppi.PMB_TAG
-						AND sub.TS &lt;= #{rgstr_time}
-						AND sub.TS &gt; DATE_SUB(#{rgstr_time}, INTERVAL 10 MINUTE)
+						AND sub.TS &lt;= #{actl_ref_ts}
+						AND sub.TS &gt; DATE_SUB(#{actl_ref_ts}, INTERVAL 10 MINUTE)
 				)
 		) t
 		WHERE t.value = 1
@@ -2808,15 +2818,149 @@
 	-->
 	<insert id="insertFlowCombSnapshot" parameterType="hashmap">
 		INSERT INTO TB_PUMP_FLOW_COMB_SNAPSHOT
-			(RGSTR_TIME, PRDCT_TIME, PUMP_GRP, PRDCT_FLOW, ACTL_FLOW, PRDCT_COMB, ACTL_COMB)
+			(RGSTR_TIME, PRDCT_TIME, PUMP_GRP,
+			 PRDCT_FLOW, ACTL_FLOW, PRDCT_COMB, ACTL_COMB,
+			 PRDCT_PRSR, ACTL_PRSR,
+			 PRDCT_WL_GN, PRDCT_WL_BA, PRDCT_WL_GR, PRDCT_WL_WG, PRDCT_WL_WGOK,
+			 ACTL_WL_GN,  ACTL_WL_BA,  ACTL_WL_GR,  ACTL_WL_WG,  ACTL_WL_WGOK)
 		VALUES
-			(#{rgstr_time}, #{prdct_time}, #{pump_grp}, #{prdct_flow}, #{actl_flow}, #{prdct_comb}, #{actl_comb})
+			(#{rgstr_time}, #{prdct_time}, #{pump_grp},
+			 #{prdct_flow}, #{actl_flow}, #{prdct_comb}, #{actl_comb},
+			 #{prdct_prsr}, #{actl_prsr},
+			 #{prdct_wl_gn}, #{prdct_wl_ba}, #{prdct_wl_gr}, #{prdct_wl_wg}, #{prdct_wl_wgok},
+			 #{actl_wl_gn},  #{actl_wl_ba},  #{actl_wl_gr},  #{actl_wl_wg},  #{actl_wl_wgok})
 		ON DUPLICATE KEY UPDATE
-			PRDCT_TIME = #{prdct_time},
-			PRDCT_FLOW = COALESCE(#{prdct_flow}, PRDCT_FLOW),
-			ACTL_FLOW  = COALESCE(#{actl_flow},  ACTL_FLOW),
-			PRDCT_COMB = COALESCE(#{prdct_comb}, PRDCT_COMB),
-			ACTL_COMB  = COALESCE(#{actl_comb},  ACTL_COMB)
+			PRDCT_TIME    = #{prdct_time},
+			PRDCT_FLOW    = COALESCE(#{prdct_flow}, PRDCT_FLOW),
+			ACTL_FLOW     = COALESCE(#{actl_flow},  ACTL_FLOW),
+			PRDCT_COMB    = COALESCE(#{prdct_comb}, PRDCT_COMB),
+			ACTL_COMB     = COALESCE(#{actl_comb},  ACTL_COMB),
+			PRDCT_PRSR    = COALESCE(#{prdct_prsr}, PRDCT_PRSR),
+			ACTL_PRSR     = COALESCE(#{actl_prsr},  ACTL_PRSR),
+			PRDCT_WL_GN   = COALESCE(#{prdct_wl_gn},   PRDCT_WL_GN),
+			PRDCT_WL_BA   = COALESCE(#{prdct_wl_ba},   PRDCT_WL_BA),
+			PRDCT_WL_GR   = COALESCE(#{prdct_wl_gr},   PRDCT_WL_GR),
+			PRDCT_WL_WG   = COALESCE(#{prdct_wl_wg},   PRDCT_WL_WG),
+			PRDCT_WL_WGOK = COALESCE(#{prdct_wl_wgok}, PRDCT_WL_WGOK),
+			ACTL_WL_GN    = COALESCE(#{actl_wl_gn},    ACTL_WL_GN),
+			ACTL_WL_BA    = COALESCE(#{actl_wl_ba},    ACTL_WL_BA),
+			ACTL_WL_GR    = COALESCE(#{actl_wl_gr},    ACTL_WL_GR),
+			ACTL_WL_WG    = COALESCE(#{actl_wl_wg},    ACTL_WL_WG),
+			ACTL_WL_WGOK  = COALESCE(#{actl_wl_wgok},  ACTL_WL_WGOK)
 	</insert>
+
+	<!--
+	  예측 압력: TB_CTR_TNK_RST 에서 압력 DSTRB_ID(pumpDstrbIdMap[grp].pressure) 의
+	  RGSTR_TIME / PRDCT_TIME 정확 동치 행 PRDCT_VALUE. 예측 유량과 동일 패턴.
+	-->
+	<select id="selectLatestPredictedPressureTnk" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			ROUND(CAST(tctr.PRDCT_VALUE AS DOUBLE), 2) AS prdct_prsr,
+			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time
+		FROM TB_CTR_TNK_RST tctr
+		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
+			AND tctr.RGSTR_TIME = #{rgstr_time}
+			AND tctr.PRDCT_TIME = #{prdct_time}
+		LIMIT 1
+	</select>
+
+	<!--
+	  실측 압력: 동일 압력 태그(TB_RAWDATA.TAGNAME = pumpDstrbIdMap[grp].pressure) 의
+	  (actl_ref_ts-10min, actl_ref_ts] 윈도우 가장 최근 행. selectLatestActualFlow 와 동일 매치 정책.
+	-->
+	<select id="selectLatestActualPressure" parameterType="hashmap" resultType="hashmap">
+		SELECT DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') AS ts, tr.VALUE AS value
+		FROM TB_RAWDATA tr
+		WHERE tr.TAGNAME = #{tag}
+			AND tr.TS &lt;= #{actl_ref_ts}
+			AND tr.TS &gt; DATE_SUB(#{actl_ref_ts}, INTERVAL 10 MINUTE)
+		ORDER BY tr.TS DESC
+		LIMIT 1
+	</select>
+
+	<!--
+	  예측 배수지 수위 평균: TB_CTR_TNK_RST 에서 배수지의 수조 태그(tagList) 중
+	  PRDCT_VALUE >= threshold 인 active 수조만 골라 평균 (frontend _AVG 와 동일 규칙).
+	  threshold: 구리 1.5m, 나머지 3.0m (drvnConfig.getSeoulReservoirThreshold).
+	-->
+	<select id="selectLatestPredictedReservoirAvg" parameterType="hashmap" resultType="hashmap">
+		SELECT AVG(tctr.PRDCT_VALUE) AS avg_value, COUNT(*) AS tank_count
+		FROM TB_CTR_TNK_RST tctr
+		WHERE tctr.DSTRB_ID IN
+			<foreach collection="tagList" item="tag" open="(" separator="," close=")">
+				#{tag}
+			</foreach>
+			AND tctr.RGSTR_TIME = #{rgstr_time}
+			AND tctr.PRDCT_TIME = #{prdct_time}
+			AND tctr.PRDCT_VALUE IS NOT NULL
+			AND tctr.PRDCT_VALUE <![CDATA[ >= ]]> #{threshold}
+	</select>
+
+	<!--
+	  실측 배수지 수위 평균: TB_RAWDATA 에서 배수지의 수조 태그(tagList) 중 (actl_ref_ts-10min, actl_ref_ts]
+	  윈도우 내 각 태그별 가장 최근 행을 골라 active(>=threshold) 수조만 평균.
+	  태그별 1개 행만 사용 → 한 태그가 윈도우 내 여러 raw 있어도 평균에 가중치 없음.
+	-->
+	<select id="selectLatestActualReservoirAvg" parameterType="hashmap" resultType="hashmap">
+		SELECT AVG(latest.VALUE) AS avg_value, COUNT(*) AS tank_count
+		FROM (
+			SELECT tr.TAGNAME, tr.VALUE
+			FROM TB_RAWDATA tr
+			JOIN (
+				SELECT TAGNAME, MAX(TS) AS last_ts
+				FROM TB_RAWDATA
+				WHERE TAGNAME IN
+					<foreach collection="tagList" item="tag" open="(" separator="," close=")">
+						#{tag}
+					</foreach>
+					AND TS &lt;= #{actl_ref_ts}
+					AND TS &gt; DATE_SUB(#{actl_ref_ts}, INTERVAL 10 MINUTE)
+					AND VALUE IS NOT NULL
+				GROUP BY TAGNAME
+			) m ON m.TAGNAME = tr.TAGNAME AND m.last_ts = tr.TS
+			WHERE tr.VALUE <![CDATA[ >= ]]> #{threshold}
+		) latest
+	</select>
+
+	<!--
+	  [snapshot backfill] 최근 N 시간 내 한 컬럼이라도 null 인 snapshot 행 조회.
+	  retry 대상: PRDCT_FLOW, ACTL_FLOW, PRDCT_PRSR, ACTL_PRSR,
+	             PRDCT_WL_{GN,BA,GR,WG,WGOK}, ACTL_WL_{GN,BA,GR,WG,WGOK}.
+	  PRDCT_COMB / ACTL_COMB 는 본 backfill 대상 아님 (별도 로직).
+	  주의: pressure 컬럼은 해당 pump_grp 가 pressure 미설정이면 영구 null 이라
+	         같은 행이 매분 반환됨 → backfill 측에서 dstrbId 없으면 skip 처리.
+	-->
+	<select id="selectRecentSnapshotsWithNulls" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(RGSTR_TIME, '%Y-%m-%d %H:%i:%s') AS rgstr_time,
+			DATE_FORMAT(PRDCT_TIME, '%Y-%m-%d %H:%i:%s') AS prdct_time,
+			PUMP_GRP      AS pump_grp,
+			PRDCT_FLOW    AS prdct_flow,
+			ACTL_FLOW     AS actl_flow,
+			PRDCT_PRSR    AS prdct_prsr,
+			ACTL_PRSR     AS actl_prsr,
+			PRDCT_WL_GN   AS prdct_wl_gn,
+			PRDCT_WL_BA   AS prdct_wl_ba,
+			PRDCT_WL_GR   AS prdct_wl_gr,
+			PRDCT_WL_WG   AS prdct_wl_wg,
+			PRDCT_WL_WGOK AS prdct_wl_wgok,
+			ACTL_WL_GN    AS actl_wl_gn,
+			ACTL_WL_BA    AS actl_wl_ba,
+			ACTL_WL_GR    AS actl_wl_gr,
+			ACTL_WL_WG    AS actl_wl_wg,
+			ACTL_WL_WGOK  AS actl_wl_wgok
+		FROM TB_PUMP_FLOW_COMB_SNAPSHOT
+		WHERE RGSTR_TIME &gt;= DATE_SUB(#{nowDateTime}, INTERVAL #{hoursBack} HOUR)
+			AND RGSTR_TIME &lt; #{nowDateTime}
+			AND (
+				PRDCT_FLOW    IS NULL OR ACTL_FLOW    IS NULL OR
+				PRDCT_PRSR    IS NULL OR ACTL_PRSR    IS NULL OR
+				PRDCT_WL_GN   IS NULL OR PRDCT_WL_BA  IS NULL OR PRDCT_WL_GR IS NULL OR
+				PRDCT_WL_WG   IS NULL OR PRDCT_WL_WGOK IS NULL OR
+				ACTL_WL_GN    IS NULL OR ACTL_WL_BA   IS NULL OR ACTL_WL_GR  IS NULL OR
+				ACTL_WL_WG    IS NULL OR ACTL_WL_WGOK IS NULL
+			)
+		ORDER BY RGSTR_TIME ASC
+	</select>
 
 </mapper>
