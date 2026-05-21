@@ -133,7 +133,9 @@ public class EnerSpendService {
 	 * @param map 조회에 필요한 파라미터
 	 * @return 시설 별 전력 순시
 	 */
-	List<HashMap<String, Object>> selectFacSunsi(HashMap<String, Object> map) {	return enerSpendMapper.selectFacSunsi(map);	}
+	List<HashMap<String, Object>> selectFacSunsi(HashMap<String, Object> map) {	
+		return enerSpendMapper.selectFacSunsi(map);	
+	}
 
 	/**
 	 * 정수장 총 전력 순시 데이터
