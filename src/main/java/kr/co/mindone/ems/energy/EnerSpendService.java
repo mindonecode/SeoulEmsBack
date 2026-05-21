@@ -14,7 +14,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.RequestParam;
 
 import java.util.HashMap;
 import java.util.List;
@@ -23,6 +22,15 @@ import java.util.List;
 public class EnerSpendService {
 	@Autowired
 	private EnerSpendMapper enerSpendMapper;
+
+	/**
+	 * 선택된 시설의 설비 목록 반환
+	 * @param map 조회에 필요한 파라미터
+	 * @return 선택된 시설의 설비 목록 반환
+	 */
+	List<HashMap<String, Object>> selectFacUseSubList(HashMap<String, Object> map) {
+		return enerSpendMapper.selectFacUseSubList(map);
+	}
 
 	/**
 	 * 시설의 전력 값 반환

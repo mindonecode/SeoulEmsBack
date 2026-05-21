@@ -20,7 +20,6 @@ import org.apache.ibatis.annotations.Param;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +37,17 @@ public class EnerSpendController extends BaseController {
 
 	@Autowired
 	private AiService aiService;
+
+	/**
+	 * 선택된 시설의 설비 목록을 조회하는 메서드
+	 * @param map 조회에 필요한 파라미터
+	 * @return 선택된 시설의 설비 목록
+	 */
+	@Operation(summary = "선택된 시설의 설비 목록", description = "selectFacUseSubList?zone_name=송수펌프동")
+	@GetMapping("/selectFacUseSubList")
+	public ResponseObject<List<HashMap<String, Object>>>  selectFacUseSubList(@RequestParam HashMap<String, Object> map){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, enerSpendService.selectFacUseSubList(map));
+	}
 
 	/**
 	 * 설비 순시 시간대별 값을 조회하는 메서드
