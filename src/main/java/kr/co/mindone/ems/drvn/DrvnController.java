@@ -56,6 +56,8 @@ public class DrvnController extends BaseController {
 	private ExcelService excelService;
 	@Autowired
 	private PumpService pumpService;
+	@Autowired
+	private DrvnConfig drvnConfig;
 	@Value("${spring.profiles.active}")
 	private String wpp_code;
 
@@ -561,6 +563,45 @@ public class DrvnController extends BaseController {
 			@PathVariable int pump_grp,
 			@RequestParam(required = false) String nowDateTime){
 		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectPwrUnitChartData(pump_grp, nowDateTime));
+	}
+
+	/**
+	 * [GET] TB_PUMP_FLOW_COMB_SNAPSHOT 과거 구간 backfill (브라우저/Swagger 에서 URL 직접 입력 가능).
+	 * - from / to 구간을 10분 경계로 floor 후, 각 경계마다 모든 PUMP_GRP UPSERT.
+	 * - cron 본 로직과 동일한 처리부 (processFlowCombSnapshotForBoundary) 재사용 → 1분 cron 과 동일 결과.
+	 * - 입력 포맷 (4가지 모두 허용, URL-encoding 없이 입력 가능):
+	 *     "yyyy-MM-ddTHH:mm"      (예: 2026-05-01T00:00)   ← 권장
+	 *     "yyyy-MM-ddTHH:mm:ss"
+	 *     "yyyy-MM-dd HH:mm"      (브라우저는 자동 인코딩)
+	 *     "yyyy-MM-dd HH:mm:ss"
+	 * @param from 시작 시각 (inclusive)
+	 * @param to   종료 시각 (inclusive)
+	 * @return { from, to, boundaries, rows }
+	 */
+	@GetMapping("/snapshot/fillRange")
+	public ResponseObject<Map<String, Object>> fillFlowCombSnapshotRange(
+			@RequestParam("from") String from,
+			@RequestParam("to") String to){
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		Map<String, Object> result = drvnConfig.fillFlowCombSnapshotRange(fromDt, toDt);
+		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
+	}
+
+	/** "yyyy-MM-dd HH:mm[:ss]" 또는 "yyyy-MM-ddTHH:mm[:ss]" 모두 허용 (URL 직접 입력 호환). */
+	private LocalDateTime parseSnapshotRangeDateTime(String s, String field) {
+		if (s == null || s.trim().isEmpty()) {
+			throw new IllegalArgumentException(field + " required (yyyy-MM-ddTHH:mm[:ss])");
+		}
+		String t = s.trim().replace('T', ' ');
+		try {
+			if (t.length() <= 16) {
+				return LocalDateTime.parse(t, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+			}
+			return LocalDateTime.parse(t, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+		} catch (Exception e) {
+			throw new IllegalArgumentException(field + " format must be yyyy-MM-ddTHH:mm[:ss]: " + s);
+		}
 	}
 
 }
