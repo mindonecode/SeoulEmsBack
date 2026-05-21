@@ -339,6 +339,7 @@
 					and pti.CLSFC = #{zone_code}
 				</if>
 			GROUP BY fac_code
+			ORDER BY x, tagname
 	</select>
 	<select id="selectFacUseList_sum" parameterType="hashMap" resultType="hashMap">
 		SELECT
@@ -614,7 +615,7 @@
 			</if>
 		GROUP BY
 			x, zone_code, fc.fac_name, dd.tagname, fc.FAC_CODE, fc.DSC, pti.PWQ_UNIT
-		ORDER BY fc.fac_name, x
+		ORDER BY dd.tagname, x
 	</select>
 	<select id="selectNowElec"  resultType="hashMap"> <!-- 총전력 소비량-->
 		WITH raw_data AS (
