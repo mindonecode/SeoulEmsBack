@@ -308,11 +308,18 @@
 	</select>
 	<select id="selectFacUseList" parameterType="hashMap" resultType="hashMap">
 		WITH active_tags AS (
-			SELECT tagname
+			SELECT t.tagname
 			FROM (
-				SELECT tagname, value,
-					   ROW_NUMBER() OVER (PARTITION BY tagname ORDER BY ts DESC) as rn
-				FROM TB_RAWDATA_SUNSI
+				SELECT rds.tagname, rds.value,
+					   ROW_NUMBER() OVER (PARTITION BY rds.tagname ORDER BY rds.ts DESC) as rn
+				FROM TB_RAWDATA_SUNSI rds
+				INNER JOIN TB_PEAK_TAG_INF pti ON rds.tagname = pti.PWQ_TAG
+				WHERE pti.mntr_yn = '1'
+				  AND pti.IS_ALL = '0'
+				  AND rds.ts &gt;= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+				  <if test="zone_code != null and zone_code != ''">
+					  AND pti.CLSFC = #{zone_code}
+				  </if>
 			) t
 			WHERE rn = 1 AND value &gt;= 1
 		),
@@ -335,48 +342,32 @@
 				<if test='time_type =="y"'>
 					AND rd.ts &gt;= concat(#{start_date},'-01-01 00:00:00') AND rd.ts &lt;= concat(#{end_date},'-12-31 23:59:00')
 				</if>
-		),
-		tag_usage AS (
-			SELECT 
-				s.tagname,
-				s.ts as start_ts,
-				s.value as start_val,
-				e.ts as end_ts,
-				e.value as end_val,
-				TIMESTAMPDIFF(MINUTE, s.ts, e.ts) as duration_minutes
-			FROM (SELECT tagname, ts, value FROM period_data WHERE rn_start = 1) s
-			INNER JOIN (SELECT tagname, ts, value FROM period_data WHERE rn_end = 1) e 
-				ON s.tagname = e.tagname
 		)
 		SELECT
-			<if test='time_type =="h"'>DATE_FORMAT(tu.end_ts,'%Y-%m-%d %H')</if>
-			<if test='time_type =="d"'>DATE_FORMAT(tu.end_ts,'%Y-%m-%d')</if>
-			<if test='time_type =="m"'>DATE_FORMAT(tu.end_ts,'%Y-%m')</if>
-			<if test='time_type =="y"'>DATE_FORMAT(tu.end_ts,'%Y')</if> AS x,
+			<if test='time_type =="h"'>DATE_FORMAT(e.ts,'%Y-%m-%d %H')</if>
+			<if test='time_type =="d"'>DATE_FORMAT(e.ts,'%Y-%m-%d')</if>
+			<if test='time_type =="m"'>DATE_FORMAT(e.ts,'%Y-%m')</if>
+			<if test='time_type =="y"'>DATE_FORMAT(e.ts,'%Y')</if> AS x,
 			fc.FAC_NAME as fac_name,
 			fc.fac_code as fac_code,
 			pti.PWQ_TAG as tagname,
 			ROUND(
 				AVG(
 					CASE 
-						WHEN tu.duration_minutes &gt; 0 
-						THEN (CAST(tu.end_val AS DECIMAL(20,4)) - CAST(tu.start_val AS DECIMAL(20,4))) 
+						WHEN TIMESTAMPDIFF(MINUTE, s.ts, e.ts) &gt; 0 
+						THEN (CAST(e.value AS DECIMAL(20,4)) - CAST(s.value AS DECIMAL(20,4))) 
 							 * CAST(pti.PWQ_UNIT_VALUE AS DECIMAL(20,4)) 
-							 / tu.duration_minutes
+							 / TIMESTAMPDIFF(MINUTE, s.ts, e.ts)
 						ELSE 0 
 					END
 				), 2
 			) AS y
 		FROM
-			tag_usage tu
-			INNER JOIN TB_PEAK_TAG_INF pti ON tu.tagname = pti.PWQ_TAG
+			(SELECT tagname, ts, value FROM period_data WHERE rn_start = 1) s
+			INNER JOIN (SELECT tagname, ts, value FROM period_data WHERE rn_end = 1) e 
+				ON s.tagname = e.tagname
+			INNER JOIN TB_PEAK_TAG_INF pti ON s.tagname = pti.PWQ_TAG
 			INNER JOIN TB_FAC fc ON pti.HMI_TAG_DSC = fc.FAC_NAME
-		WHERE
-			pti.mntr_yn = '1'
-			and pti.IS_ALL = '0'
-			<if test="zone_code != null and zone_code != ''">
-				and pti.CLSFC = #{zone_code}
-			</if>
 		GROUP BY fac_code
 		ORDER BY x, tagname
 	</select>
