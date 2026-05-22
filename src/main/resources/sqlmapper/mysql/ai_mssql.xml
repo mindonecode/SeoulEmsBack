@@ -2104,7 +2104,7 @@
 			ROUND(rd.VALUE, 2) AS value
 		FROM TB_RAWDATA rd
 			JOIN TB_PEAK_TAG_INF pti ON rd.tagname = pti.PWI_TAG
-		WHERE pti.PWI_TAG = 'PK00KE_E_SVHV4NSVCB_IKW'
+		WHERE pti.CLSFC = '전체'
 			<if test='time_type =="h" or time_type =="d"'>
 				AND rd.ts &gt;= CONCAT(#{start_date}, ' 00:00:00')
 				AND rd.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
@@ -2132,7 +2132,7 @@
 			pti.PWI_UNIT
 		FROM TB_RAWDATA rd
 			JOIN TB_PEAK_TAG_INF pti ON rd.tagname = pti.PWI_TAG
-		WHERE pti.PWI_TAG = 'PK00KE_E_SVHV4NSVCB_IKW'
+		WHERE pti.CLSFC = '전체'
 			AND rd.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
 			AND rd.ts &lt;= LAST_DAY(NOW())
 		ORDER BY rd.ts
