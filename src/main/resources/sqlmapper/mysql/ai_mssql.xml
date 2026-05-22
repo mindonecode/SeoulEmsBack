@@ -2104,7 +2104,7 @@
 			ROUND(rd.VALUE, 2) AS value
 		FROM TB_RAWDATA rd
 			JOIN TB_PEAK_TAG_INF pti ON rd.tagname = pti.PWI_TAG
-		WHERE pti.PWI_TAG = 'PK00KE_E_SVHV4NSVCB_IKW'
+		WHERE pti.CLSFC = '전체'
 			<if test='time_type =="h" or time_type =="d"'>
 				AND rd.ts &gt;= CONCAT(#{start_date}, ' 00:00:00')
 				AND rd.ts &lt;= CONCAT(#{end_date}, ' 23:59:00')
@@ -2132,71 +2132,55 @@
 			pti.PWI_UNIT
 		FROM TB_RAWDATA rd
 			JOIN TB_PEAK_TAG_INF pti ON rd.tagname = pti.PWI_TAG
-		WHERE pti.PWI_TAG = 'PK00KE_E_SVHV4NSVCB_IKW'
+		WHERE pti.CLSFC = '전체'
 			AND rd.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
 			AND rd.ts &lt;= LAST_DAY(NOW())
 		ORDER BY rd.ts
 	</select>
 
 	<select id="selectPwrSumList" parameterType="hashMap" resultType="hashMap">
-		WITH raw_data AS (
-			SELECT
-				rdh.tagname,
-				rdh.ts,
-				rdh.value,
-				pti.PWQ_UNIT_VALUE,
-				LAG(rdh.value) OVER (PARTITION BY rdh.tagname ORDER BY rdh.ts) AS prev_value
-			FROM
-				TB_RAWDATA_HOUR rdh
-				JOIN TB_PEAK_TAG_INF pti ON rdh.tagname = pti.PWI_TAG
-			WHERE
-				pti.IS_ALL = '1' AND pti.MNTR_YN = '1' AND pti.CLSFC != '오존설비'
-				<if test='range == "day"'>
-					AND rdh.ts &gt;= DATE_SUB(CONCAT(CURDATE(), ' 00:00:00'), INTERVAL 1 HOUR)
-					AND rdh.ts &lt;= CONCAT(CURDATE(), ' 23:59:59')
-				</if>
-				<if test='range == "month"'>
-					AND rdh.ts &gt;= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00'), INTERVAL 1 HOUR)
-					AND rdh.ts &lt;= CONCAT(LAST_DAY(CURDATE()), ' 23:59:59')
-				</if>
-				<if test='range == "year"'>
-					AND rdh.ts &gt;= DATE_SUB(CONCAT(YEAR(CURDATE()), '-01-01 00:00:00'), INTERVAL 1 HOUR)
-					AND rdh.ts &lt;= CONCAT(YEAR(CURDATE()), '-12-31 23:59:59')
-				</if>
-		),
-		diff_data AS (
-			SELECT
-				raw_data.ts,
-				CASE
-					WHEN raw_data.prev_value IS NULL THEN 0
-					WHEN raw_data.value &lt; raw_data.prev_value THEN 0
-					ELSE (raw_data.value - raw_data.prev_value) * raw_data.PWQ_UNIT_VALUE
-				END AS use_value
-			FROM raw_data
-		)
 		SELECT
-			ROUND(SUM(diff_data.use_value), 2) AS value,
+			ROUND(SUM(pdh.value), 2) AS value,
 			<if test='range == "day"'>'day' AS 'range',</if>
 			<if test='range == "month"'>'month' AS 'range',</if>
 			<if test='range == "year"'>'year' AS 'range',</if>
 			rri.TIMEZONE AS 'timezone',
 			rri.ELCTR_RATE AS 'rate',
-			ROUND(SUM(diff_data.use_value * rri.ELCTR_RATE), 2) AS cost
+			ROUND(SUM(pdh.value * rri.ELCTR_RATE), 2) AS cost
 		FROM
-			diff_data
-			JOIN TB_RT_RATE_INF rri ON CAST(SUBSTRING(diff_data.ts, 12, 2) AS UNSIGNED) = CAST(rri.STN_TM AS UNSIGNED)
+			tb_peak_data_hour pdh
+			JOIN TB_RT_RATE_INF rri ON CAST(SUBSTRING(pdh.ts, 12, 2) AS UNSIGNED) = CAST(rri.STN_TM AS UNSIGNED)
 		WHERE
 			rri.RATE_IDX = '1' AND rri.MNTH = MONTH(CURDATE())
 			<if test='range == "day"'>
-				AND diff_data.ts &gt;= CONCAT(CURDATE(), ' 00:00:00')
+				AND pdh.ts &gt;= CONCAT(CURDATE(), ' 00:00:00')
 			</if>
 			<if test='range == "month"'>
-				AND diff_data.ts &gt;= DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00')
+				AND pdh.ts &gt;= DATE_FORMAT(CURDATE(), '%Y-%m-01 00:00:00')
 			</if>
 			<if test='range == "year"'>
-				AND diff_data.ts &gt;= CONCAT(YEAR(CURDATE()), '-01-01 00:00:00')
+				AND pdh.ts &gt;= CONCAT(YEAR(CURDATE()), '-01-01 00:00:00')
 			</if>
 		GROUP BY rri.TIMEZONE
+	</select>
+
+	<select id="selectBaseCost" resultType="java.lang.Double">
+		SELECT 
+			COALESCE(
+				(SELECT MAX(PEAK_MAX_VALUE) 
+				 FROM tb_peak_data_hour 
+				 WHERE ts &gt;= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+				   AND ts &lt; CURDATE()), 
+				0
+			) 
+			* 
+			COALESCE(
+				(SELECT BASE_RATE
+				 FROM TB_RT_RATE_INF 
+				 LIMIT 1), 
+				0
+			) 
+			AS base_cost
 	</select>
 
 	<select id="selectPumpStatus" parameterType="String" resultType="java.util.LinkedHashMap">
