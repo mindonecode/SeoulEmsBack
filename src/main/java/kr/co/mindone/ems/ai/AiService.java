@@ -482,6 +482,15 @@ public class AiService {
     }
 
     /**
+     * 최근 12개월 동안의 최대 피크값과 당월 기준 기본 단가(BASE_RATE)를 곱한 base_cost를 조회하는 메서드
+     * 
+     * @return base_cost
+     */
+    public Double selectBaseCost() {
+        return aiMapper.selectBaseCost();
+    }
+
+    /**
      * 펌프 예측 조합을 조회하는 메서드
      * 
      * @return 펌프 예측 조합
