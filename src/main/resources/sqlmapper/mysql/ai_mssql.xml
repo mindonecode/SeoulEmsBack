@@ -1311,149 +1311,77 @@
 	</select>
 	<!-- 최적요금제분석 -->
 	<select id="selectRtRate" resultType="HashMap" parameterType="HashMap">
-		WITH
-		-- 1. 당월 총 사용량 (NK00AE_E_SV0011GCB_IWH만 롤오버 보정)
-		month_total AS (
+		//선택한 달의 총 전력량
+		WITH month_total AS (
+        SELECT 
+            COALESCE(ROUND(SUM(value), 0), 0) AS tv,
+            COALESCE(ROUND(MAX(peak_max_value), 0), 0) AS pmv 
+        FROM tb_peak_data_hour
+        WHERE ts &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s')
+          AND ts &lt; STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s') + INTERVAL 1 MONTH
+          AND value &gt;= 7000
+    	),
+		//선택한 달의 부하별 전력량
+		month_pwr AS (
 			SELECT
-				COALESCE(SUM(
-					CASE
-						-- NK00AE_E_SV0011GCB_IWH: 롤오버(음수)면 천만 보정
-						WHEN mm.TAGNAME = 'NK00AE_E_SV0011GCB_IWH'
-							AND (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &lt; 0
-							THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) + 10000000 - CAST(rd_first.VALUE AS DECIMAL(20,4))
-						-- 나머지: 정상 차이 (음수면 0)
-						WHEN (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &gt;= 0
-							THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))
-						ELSE 0
-					END
-				), 0) AS total_kwh
-			FROM (
-				SELECT
-					rdh.TAGNAME,
-					MIN(rdh.TS) AS first_ts,
-					MAX(rdh.TS) AS last_ts
-				FROM TB_RAWDATA_HOUR rdh
-				INNER JOIN tb_peak_tag_inf pti ON rdh.TAGNAME = pti.PWI_TAG
-				WHERE pti.IS_ALL = '1'
-				AND rdh.TAGNAME LIKE '%\_IWH' ESCAPE '\\'
-				AND CAST(rdh.VALUE AS DECIMAL(20,4)) &gt; 0.0
-				AND rdh.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d')
-				AND rdh.TS &lt;  STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') + INTERVAL 1 MONTH
-				GROUP BY rdh.TAGNAME
-			) mm
-			LEFT JOIN TB_RAWDATA_HOUR rd_first
-				ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
-			LEFT JOIN TB_RAWDATA_HOUR rd_last
-				ON rd_last.TAGNAME = mm.TAGNAME  AND rd_last.TS = mm.last_ts
-		),
-		-- 2. 요금 적용 전력 산출을 위한 최근 12개월(조회월 포함) 최고 피크 kW 추적 CTE
-		historical_hourly_shm AS (
-			SELECT
-				curr.TS,
-				SUM(CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4))) AS hourly_total_kw
-			FROM TB_RAWDATA_HOUR curr
-			INNER JOIN tb_peak_tag_inf pti ON curr.TAGNAME = pti.PWI_TAG
-			INNER JOIN TB_RAWDATA_HOUR prev 
-				ON prev.TAGNAME = curr.TAGNAME AND prev.TS = DATE_SUB(curr.TS, INTERVAL 1 HOUR)
-			WHERE pti.IS_ALL = '1'
-			AND curr.TAGNAME LIKE '%\_IWH' ESCAPE '\\'
-			AND curr.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') - INTERVAL 11 MONTH
-			AND curr.TS &lt;  STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') + INTERVAL 1 MONTH
-			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt;= CAST(prev.VALUE AS DECIMAL(20,4))
-			AND CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4)) &lt; 100000
-			GROUP BY curr.TS
-		),
-		billing_demand AS (
-			SELECT COALESCE(MAX(hourly_total_kw), 0) AS max_12m_kw FROM historical_hourly_shm
-		),
-		-- 3. 시간대별 부하량 계산을 위한 당월 시간별 차이값 집계
-		diff_data AS (
-			SELECT
-				HOUR(curr.TS) AS hh,
-				CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4)) AS usage_kwh
-			FROM TB_RAWDATA_HOUR curr
-			INNER JOIN tb_peak_tag_inf pti ON curr.TAGNAME = pti.PWI_TAG
-			INNER JOIN TB_RAWDATA_HOUR prev
-				ON prev.TAGNAME = curr.TAGNAME AND prev.TS = DATE_SUB(curr.TS, INTERVAL 1 HOUR)
-			WHERE pti.IS_ALL = '1'
-			AND curr.TAGNAME LIKE '%\_IWH' ESCAPE '\\'
-			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt; 0.0
-			AND CAST(prev.VALUE AS DECIMAL(20,4)) &gt; 0.0
-			AND curr.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d')
-			AND curr.TS &lt;  STR_TO_DATE(CONCAT(#{ymnth}, '01'), '%Y%m%d') + INTERVAL 1 MONTH
-			AND CAST(curr.VALUE AS DECIMAL(20,4)) &gt;= CAST(prev.VALUE AS DECIMAL(20,4))
-			AND CAST(curr.VALUE AS DECIMAL(20,4)) - CAST(prev.VALUE AS DECIMAL(20,4)) &lt; 100000
-		),
-		-- 4. 해당 월 단가 매핑
-		load_ratio AS (
-			SELECT
-				rate.RATE_IDX,
 				rate.TIMEZONE,
-				rate.ELCTR_RATE,
-				SUM(d.usage_kwh) AS load_kwh
-			FROM diff_data d
-			INNER JOIN TB_RT_RATE_INF rate
+				COALESCE(ROUND(SUM(tph.value), 0), 0) AS pwr_sum
+			FROM tb_peak_data_hour tph
+			INNER JOIN tb_rt_rate_inf rate
 				ON rate.MNTH = SUBSTRING(#{ymnth}, 5, 2)
-			AND CAST(rate.STN_TM AS UNSIGNED) = d.hh
-			AND rate.RATE_IDX IN (1, 2, 3)
-			GROUP BY rate.RATE_IDX, rate.TIMEZONE, rate.ELCTR_RATE
+			AND CAST(rate.STN_TM AS UNSIGNED) = HOUR(tph.ts)
+			AND rate.RATE_IDX = 1
+			WHERE tph.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s')
+			AND tph.TS &lt; STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s') + INTERVAL 1 MONTH
+			AND value &gt;= 7000    
+			GROUP BY rate.TIMEZONE
 		),
-		load_calc AS (
-			SELECT
-				lr.RATE_IDX,
-				lr.TIMEZONE,
-				mt.total_kwh,
-				ROUND(mt.total_kwh * lr.load_kwh / SUM(lr.load_kwh) OVER (PARTITION BY lr.RATE_IDX), 0) AS pwr,
-				ROUND(mt.total_kwh * lr.load_kwh / SUM(lr.load_kwh) OVER (PARTITION BY lr.RATE_IDX) * lr.ELCTR_RATE, 0) AS fee
-			FROM load_ratio lr
-			CROSS JOIN month_total mt
-		),
-		pivoted AS (
-			SELECT
-				RATE_IDX,
-				MAX(total_kwh) AS TOT_PWR_RAW,
-				MAX(CASE WHEN TIMEZONE = 'L' THEN pwr END) AS L_PWR_RAW,
-				MAX(CASE WHEN TIMEZONE = 'M' THEN pwr END) AS M_PWR_RAW,
-				MAX(CASE WHEN TIMEZONE = 'H' THEN pwr END) AS H_PWR_RAW,
-				MAX(CASE WHEN TIMEZONE = 'L' THEN fee END) AS L_ELCTR_FEE_RAW,
-				MAX(CASE WHEN TIMEZONE = 'M' THEN fee END) AS M_ELCTR_FEE_RAW,
-				MAX(CASE WHEN TIMEZONE = 'H' THEN fee END) AS H_ELCTR_FEE_RAW
-			FROM load_calc
-			GROUP BY RATE_IDX
-		),
-		load_rows AS (
-			SELECT 'L' AS tz, 1 AS ord UNION ALL
-			SELECT 'M', 2 UNION ALL
-			SELECT 'H', 3
+
+		//각 부하별 요금
+		total_fee AS (
+			SELECT 
+				COALESCE(ROUND(SUM(mp.pwr_sum * rti.ELCTR_RATE), 0), 0) AS smf,
+				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'L' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS l_fee,
+				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS m_fee,
+				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'H' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS h_fee
+			FROM month_pwr mp
+			INNER JOIN (
+				SELECT DISTINCT TIMEZONE, MNTH, RATE_IDX, ELCTR_RATE
+				FROM tb_rt_rate_inf
+			) rti
+				ON mp.TIMEZONE = rti.TIMEZONE
+			AND rti.MNTH = SUBSTRING(#{ymnth}, 5, 2)
+			AND rti.RATE_IDX = 1
 		)
-		-- 5. 최종 대시보드 규격 출력
-		SELECT
-			rmi.LARGE_CTGRY,
-			rmi.MIDDLE_CTGRY,
-			rmi.SMALL_CTGRY,
-			FORMAT(
-				CASE lr.tz
-					WHEN 'L' THEN p.L_PWR_RAW
-					WHEN 'M' THEN p.M_PWR_RAW
-					WHEN 'H' THEN bd.max_12m_kw
-				END
-			, 0) AS PWR,
-			0 AS DATA_MSN_PRCNT,
-			FORMAT(p.TOT_PWR_RAW, 0) AS TOT_PWR,
-			FORMAT(p.L_PWR_RAW, 0) AS L_PWR,
-			FORMAT(p.M_PWR_RAW, 0) AS M_PWR,
-			FORMAT(p.H_PWR_RAW, 0) AS H_PWR,
-			FORMAT(p.L_ELCTR_FEE_RAW + p.M_ELCTR_FEE_RAW + p.H_ELCTR_FEE_RAW + (7220 * bd.max_12m_kw), 0) AS TOT_FEE,
-			FORMAT(7220 * bd.max_12m_kw, 0) AS BASE_FEE,
-			0 AS ETC_FEE,
-			FORMAT(p.L_ELCTR_FEE_RAW, 0) AS L_ELCTR_FEE,
-			FORMAT(p.M_ELCTR_FEE_RAW, 0) AS M_ELCTR_FEE,
-			FORMAT(p.H_ELCTR_FEE_RAW, 0) AS H_ELCTR_FEE
-		FROM pivoted p
-		INNER JOIN TB_RT_MSTR_INF rmi ON rmi.RATE_IDX = p.RATE_IDX AND rmi.USE_YN = '1'
-		CROSS JOIN load_rows lr
-		CROSS JOIN billing_demand bd
-		ORDER BY p.RATE_IDX, lr.ord;	
+
+		SELECT 
+			trm.LARGE_CTGRY,
+			trm.MIDDLE_CTGRY,
+			trm.SMALL_CTGRY,
+			
+			CAST(mt.tv AS UNSIGNED) AS TOT_PWR,
+			CAST(COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'L' THEN mp.pwr_sum END), 0) AS UNSIGNED) AS L_PWR,
+			CAST(COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum END), 0) AS UNSIGNED) AS M_PWR,
+			CAST(COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'H' THEN mp.pwr_sum END), 0) AS UNSIGNED) AS H_PWR,
+			
+			CAST(ROUND(mt.pmv * tri.BASE_RATE, 0) AS UNSIGNED) AS BASE_FEE,
+			CAST(ROUND(tf.l_fee, 0) AS UNSIGNED) AS L_ELCTR_FEE,
+			CAST(ROUND(tf.m_fee, 0) AS UNSIGNED) AS M_ELCTR_FEE,
+			CAST(ROUND(tf.h_fee, 0) AS UNSIGNED) AS H_ELCTR_FEE,
+			CAST(ROUND((mt.pmv * tri.BASE_RATE) + tf.smf, 0) AS UNSIGNED) AS TOT_FEE,
+			CAST(ROUND(mt.pmv,0) AS UNSIGNED) AS PWR,
+			0 AS DATA_MSN_PRCNT
+		FROM month_total mt
+		CROSS JOIN total_fee tf
+		CROSS JOIN month_pwr mp
+		INNER JOIN tb_rt_rate_inf tri 
+			ON tri.MNTH = SUBSTRING(#{ymnth}, 5, 2)
+		AND tri.RATE_IDX = 1
+		INNER JOIN tb_rt_mstr_inf trm
+			ON tri.RATE_IDX = trm.RATE_IDX 
+		GROUP BY trm.LARGE_CTGRY, trm.MIDDLE_CTGRY, trm.SMALL_CTGRY, mt.tv, mt.pmv, tri.BASE_RATE, tf.smf, tf.l_fee, tf.m_fee, tf.h_fee
+		LIMIT 1;		
+
 	</select>
 
 	<select id="pumpSelect_new" parameterType="hashMap" resultType="hashMap">
