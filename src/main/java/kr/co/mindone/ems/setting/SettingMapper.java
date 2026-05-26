@@ -127,7 +127,7 @@ public interface SettingMapper {
      * 목표 전력 설정 정보 조회
      * @return 설정 정보 목록
      */
-    List<HashMap<String, Object>> selectGetSetting(String year);
+    List<HashMap<String, Object>> selectGetSetting(int year);
 
     /**
      * 목표 전력량 업데이트

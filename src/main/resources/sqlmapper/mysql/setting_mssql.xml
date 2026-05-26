@@ -146,60 +146,15 @@
 			AND STN_TM=#{stn_tm}
 	</update>
 	<select id="getUsageData" resultType="HashMap" parameterType="HashMap">
-		SELECT
-            m.year,
-            m.month,
-            COALESCE(CAST(ROUND(SUM(
-                CASE
-                    -- NK00AE_E_SV0011GCB_IWH: 롤오버(음수)면 천만 보정
-                    WHEN mm.TAGNAME = 'NK00AE_E_SV0011GCB_IWH'
-                         AND (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &lt; 0
-                        THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) + 10000000 - CAST(rd_first.VALUE AS DECIMAL(20,4))
-                    -- 나머지: 정상 차이 (음수면 0)
-                    WHEN (CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))) &gt;= 0
-                        THEN CAST(rd_last.VALUE AS DECIMAL(20,4)) - CAST(rd_first.VALUE AS DECIMAL(20,4))
-                    ELSE 0
-                END
-            ), 0) AS SIGNED), 0) AS value
-        FROM (
-            SELECT #{year} + 0 AS year, 1 AS month UNION ALL
-            SELECT #{year} + 0, 2  UNION ALL
-            SELECT #{year} + 0, 3  UNION ALL
-            SELECT #{year} + 0, 4  UNION ALL
-            SELECT #{year} + 0, 5  UNION ALL
-            SELECT #{year} + 0, 6  UNION ALL
-            SELECT #{year} + 0, 7  UNION ALL
-            SELECT #{year} + 0, 8  UNION ALL
-            SELECT #{year} + 0, 9  UNION ALL
-            SELECT #{year} + 0, 10 UNION ALL
-            SELECT #{year} + 0, 11 UNION ALL
-            SELECT #{year} + 0, 12
-        ) m
-        LEFT JOIN (
-            -- [수정 핵심] 하드코딩을 걷어내고 메타 테이블과 INNER JOIN으로 태그를 동적 매칭
-            SELECT
-                YEAR(rd.TS) AS year,
-                MONTH(rd.TS) AS month,
-                rd.TAGNAME,
-                MIN(rd.TS) AS first_ts,
-                MAX(rd.TS) AS last_ts
-            FROM TB_RAWDATA_HOUR rd
-            INNER JOIN tb_peak_tag_inf pti 
-                ON rd.TAGNAME = pti.PWI_TAG -- 메타 테이블의 태그 컬럼명 매칭
-            WHERE pti.IS_ALL = '1'           -- 활성화된 전체 태그 대상 필터
-            AND rd.TAGNAME LIKE '%\_IWH' ESCAPE '\\'  -- IWH 적산 태그만 (IKW 순시 제외)
-            -- 숫자로 형변환하여 초기 수집 시점의 0 또는 0.00 오차 데이터 배제
-            AND CAST(rd.VALUE AS DECIMAL(20,4)) &gt; 0.0
-            AND rd.TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
-            AND rd.TS &lt;  CONCAT(#{year} + 1, '-01-01 00:00:00')
-            GROUP BY YEAR(rd.TS), MONTH(rd.TS), rd.TAGNAME
-        ) mm ON m.year = mm.year AND m.month = mm.month
-        LEFT JOIN TB_RAWDATA_HOUR rd_first
-            ON rd_first.TAGNAME = mm.TAGNAME AND rd_first.TS = mm.first_ts
-        LEFT JOIN TB_RAWDATA_HOUR rd_last
-            ON rd_last.TAGNAME = mm.TAGNAME AND rd_last.TS = mm.last_ts
-        GROUP BY m.year, m.month
-        ORDER BY m.year, m.month
+		SELECT 
+			MONTH(ts) AS month, 
+			YEAR(ts) AS year, 
+			COALESCE(ROUND(SUM(value), 0), 0) AS value 
+		FROM tb_peak_data_hour
+		WHERE ts &gt;= STR_TO_DATE(CONCAT(#{year}, '-01-01 00:00:00'), '%Y-%m-%d %H:%i:%s')
+			AND ts &lt; STR_TO_DATE(CONCAT(#{year} + 1, '-01-01 00:00:00'), '%Y-%m-%d %H:%i:%s')
+		GROUP BY MONTH(ts), YEAR(ts)
+		ORDER BY month ASC; 
 	</select>
 	
 	<select id="getGoalData" resultType="hashMap" parameterType="string">

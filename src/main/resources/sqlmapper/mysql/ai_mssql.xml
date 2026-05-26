@@ -1311,7 +1311,7 @@
 	</select>
 	<!-- 최적요금제분석 -->
 	<select id="selectRtRate" resultType="HashMap" parameterType="HashMap">
-		//선택한 달의 총 전력량
+		/* 선택한 달의 총 전력량 */
 		WITH month_total AS (
         SELECT 
             COALESCE(ROUND(SUM(value), 0), 0) AS tv,
@@ -1321,7 +1321,7 @@
           AND ts &lt; STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s') + INTERVAL 1 MONTH
           AND value &gt;= 7000
     	),
-		//선택한 달의 부하별 전력량
+		/* 선택한 달의 부하별 전력량 */
 		month_pwr AS (
 			SELECT
 				rate.TIMEZONE,
@@ -1337,7 +1337,7 @@
 			GROUP BY rate.TIMEZONE
 		),
 
-		//각 부하별 요금
+		/* 각 부하별 요금 */
 		total_fee AS (
 			SELECT 
 				COALESCE(ROUND(SUM(mp.pwr_sum * rti.ELCTR_RATE), 0), 0) AS smf,

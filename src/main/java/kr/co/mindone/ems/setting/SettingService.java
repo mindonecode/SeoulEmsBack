@@ -119,7 +119,7 @@ public class SettingService {
      * @return 목표 전력 정보 리스트
      */
     public List<HashMap<String, Object>> selectGetSetting() {
-        String year = Year.now().toString();
+        int year = Year.now().getValue();
         return settingMapper.selectGetSetting(year);
     }
     /**
