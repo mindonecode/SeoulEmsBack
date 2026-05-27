@@ -151,8 +151,8 @@
 			YEAR(ts) AS year, 
 			COALESCE(ROUND(SUM(value), 0), 0) AS value 
 		FROM tb_peak_data_hour
-		WHERE ts &gt;= STR_TO_DATE(CONCAT(#{year}, '-01-01 00:00:00'), '%Y-%m-%d %H:%i:%s')
-			AND ts &lt; STR_TO_DATE(CONCAT(#{year} + 1, '-01-01 00:00:00'), '%Y-%m-%d %H:%i:%s')
+		WHERE ts &gt;= CONCAT(#{year}, '-01-01 00:00:00')
+			AND ts &lt; CONCAT(#{year} + 1, '-01-01 00:00:00')
 		GROUP BY MONTH(ts), YEAR(ts)
 		ORDER BY month ASC; 
 	</select>
@@ -200,10 +200,10 @@
 			CAST(COALESCE(SUM(CASE WHEN MONTH(TS) = 11 THEN VALUE END), 0) AS SIGNED) AS `11m`,
 			CAST(COALESCE(SUM(CASE WHEN MONTH(TS) = 12 THEN VALUE END), 0) AS SIGNED) AS `12m`
 			FROM TB_PEAK_DATA_HOUR
-			WHERE TS &gt;= STR_TO_DATE(CONCAT(#{year}, '-01-01 00:00:00'), '%Y-%m-%d %H:%i:%s')
-			AND TS &lt; STR_TO_DATE(CONCAT(#{year} + 1, '-01-01 00:00:00'), '%Y-%m-%d %H:%i:%s')
+			WHERE TS &gt;= CONCAT(#{year}, '-01-01 00:00:00')
+			AND TS &lt; CONCAT(#{year} + 1, '-01-01 00:00:00')
 			AND value &gt;= 7000
-			GROUP BY YEAR(TS)
+			
 
 	</select>
 	
