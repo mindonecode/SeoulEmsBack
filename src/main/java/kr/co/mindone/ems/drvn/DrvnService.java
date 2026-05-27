@@ -5158,34 +5158,35 @@ public class DrvnService {
 			result.computeIfAbsent(tag, k-> new ArrayList<>()).add(point);
 		}
 
-		// 1-1. 1주일 전 / 2주일 전 같은 요일·시각 실측 (비교 표시용).
-		//      현재 차트가 표시하는 [t-24h ~ now+6h] 전 구간을 weeksAgo 만큼 shift 한 범위로 조회 →
-		//      결과 TS 를 다시 현재 주차로 시프트하여 ${tagname}_W1 / ${tagname}_W2 sibling key 로 push.
+		// 1-1. 1일 전 / 1주 전 같은 시각 실측 (비교 표시용).
+		//      현재 차트가 표시하는 [t-24h ~ now+6h] 전 구간을 daysAgo 만큼 shift 한 범위로 조회 →
+		//      결과 TS 를 다시 현재 시점으로 시프트하여 ${tagname}_W1(1일전) / ${tagname}_W2(1주전) sibling key 로 push.
+		//      (응답 키 _W1/_W2 는 프론트 매핑 호환을 위해 유지 — 의미만 1일전/1주전으로 재정의.)
 		//      예측 구간도 1분 단위 비교 라인으로 채워짐.
-		for (int weeksAgo : new int[]{1, 2}) {
-			LocalDateTime startWk = t0.minusHours(24).minusWeeks(weeksAgo);
-			LocalDateTime endWk = now.plusHours(6).minusWeeks(weeksAgo);
+		for (int daysAgo : new int[]{1, 7}) {
+			LocalDateTime startWk = t0.minusHours(24).minusDays(daysAgo);
+			LocalDateTime endWk = now.plusHours(6).minusDays(daysAgo);
 			HashMap<String, Object> wkParam = new HashMap<>();
 			wkParam.put("tagList", waterLevelTagList);
 			wkParam.put("startDate", fmt.format(startWk));
 			wkParam.put("endDate", fmt.format(endWk));
 			List<HashMap<String, Object>> wkData = drvnMapper.selectWaterLevelByMinuteRange(wkParam);
-			String suffix = "_W" + weeksAgo;
+			String suffix = "_W" + (daysAgo == 1 ? 1 : 2);
 			for (Map<String, Object> row : wkData) {
 				String tag = (String) row.get("TAGNAME");
 				Object tsObj = row.get("TS");
 				if (tag == null || tsObj == null) continue;
 				LocalDateTime shifted = null;
 				if (tsObj instanceof Timestamp) {
-					shifted = ((Timestamp) tsObj).toLocalDateTime().plusWeeks(weeksAgo);
+					shifted = ((Timestamp) tsObj).toLocalDateTime().plusDays(daysAgo);
 				} else if (tsObj instanceof java.util.Date) {
 					shifted = LocalDateTime.ofInstant(((java.util.Date) tsObj).toInstant(),
-							java.time.ZoneId.systemDefault()).plusWeeks(weeksAgo);
+							java.time.ZoneId.systemDefault()).plusDays(daysAgo);
 				} else {
 					try {
 						String raw = tsObj.toString();
 						String trimmed = raw.length() >= 16 ? raw.substring(0, 16) : raw;
-						shifted = LocalDateTime.parse(trimmed, shortFmt).plusWeeks(weeksAgo);
+						shifted = LocalDateTime.parse(trimmed, shortFmt).plusDays(daysAgo);
 					} catch (Exception ignored) {}
 				}
 				if (shifted == null) continue;
@@ -5287,8 +5288,8 @@ public class DrvnService {
 		// 4. 배수지별 활성 수조(≥seoulActiveThreshold) 평균 시리즈.
 		//    화면 "수위 변동" 차트가 배수지당 1개 라인을 표출하기 위해 sibling 키로 push:
 		//      "<배수지>_AVG"            ← raw + 미래예측(isPredict 보존)
-		//      "<배수지>_AVG_W1"         ← 1주 전 비교
-		//      "<배수지>_AVG_W2"         ← 2주 전 비교
+		//      "<배수지>_AVG_W1"         ← 1일 전 비교 (키 이름은 호환 위해 W1 유지)
+		//      "<배수지>_AVG_W2"         ← 1주 전 비교 (키 이름은 호환 위해 W2 유지)
 		//      "<배수지>_AVG_PRDCT_HIST" ← 과거 10분 horizon 예측
 		//    임계 미만 수조는 평균에서 제외. 시점별 활성 수조 0개면 누락(connectNulls 동작).
 		LinkedHashMap<String, String[]> tagMap = drvnConfig.getSeoulReservoirTagMap();
@@ -5459,9 +5460,15 @@ public class DrvnService {
 		// 시드: 윈도 시작 직전 각 펌프의 마지막 VALUE 로 currentState 초기화.
 		// PMB 가 상태 변화 위주로 기록되므로 시드 없이는 daysAgo>0 윈도 초입 버킷이
 		// 모두 OFF(0대) 로 잘못 표시될 수 있음.
+		// seedStartDate: startDate 이전 전체 이력 풀스캔(TB_RAWDATA)을 막기 위한 조회 하한.
+		// 펌프 ON/OFF 는 변동이 잦아 7일이면 직전 상태를 안정적으로 포착. 이 구간에 기록이 없으면
+		// 시드는 비고, currentState 는 0(OFF)로 시작하는 기존 폴백 로직을 그대로 따른다.
+		final long SEED_LOOKBACK_MS = 7L * 86_400_000L;
+		Timestamp seedStartTs = new Timestamp(startMs - SEED_LOOKBACK_MS);
 		HashMap<String, Object> seedParam = new HashMap<>();
 		seedParam.put("PUMP_GRP", pumpGrp);
 		seedParam.put("startDate", startTs);
+		seedParam.put("seedStartDate", seedStartTs);
 		List<HashMap<String, Object>> seedList = drvnMapper.selectPumpLastStateBeforeGrp(seedParam);
 
 		// rawList 는 SQL 의 ORDER BY rd.TS 로 시간 오름차순 정렬됨.
@@ -5813,21 +5820,22 @@ public class DrvnService {
 		mergeTagValueRows(tsTagValue, rawRows);
 		mergeTagValueRows(tsTagValue, prdctRows);
 
-		// 2-0. 유량(flow) 1주 전 / 2주 전 같은 요일·시각 실측 (W1/W2 비교 라인용, flow 만).
-		//      현재 차트가 표시하는 [t-24h ~ t+6h] 전 구간을 weeksAgo 만큼 shift 한 범위로 조회 →
-		//      결과 TS 를 다시 현재 주차로 시프트하여 row.flowW1 / row.flowW2 필드로 부착.
+		// 2-0. 유량(flow) 1일 전 / 1주 전 같은 시각 실측 (W1/W2 비교 라인용, flow 만).
+		//      현재 차트가 표시하는 [t-24h ~ t+6h] 전 구간을 daysAgo 만큼 shift 한 범위로 조회 →
+		//      결과 TS 를 다시 현재 시점으로 시프트하여 row.flowW1(1일전) / row.flowW2(1주전) 필드로 부착.
+		//      (필드명 flowW1/flowW2 는 프론트 매핑 호환을 위해 유지 — 의미만 1일전/1주전으로 재정의.)
 		Map<String, Double> flowW1ByTs = new HashMap<>();
 		Map<String, Double> flowW2ByTs = new HashMap<>();
-		for (int weeksAgo : new int[]{1, 2}) {
-			LocalDateTime startWk = now.minusHours(24).minusWeeks(weeksAgo);
-			LocalDateTime endWk = now.plusHours(6).minusWeeks(weeksAgo);
+		for (int daysAgo : new int[]{1, 7}) {
+			LocalDateTime startWk = now.minusHours(24).minusDays(daysAgo);
+			LocalDateTime endWk = now.plusHours(6).minusDays(daysAgo);
 			HashMap<String, Object> wkParam = new HashMap<>();
 			wkParam.put("tagList", Collections.singletonList(flowTag));
 			wkParam.put("startDate", fmt.format(startWk));
 			wkParam.put("endDate", fmt.format(endWk));
 			List<HashMap<String, Object>> wkRows = drvnMapper.selectMultiTagRawRangeMinutely(wkParam);
 			if (wkRows == null) continue;
-			Map<String, Double> sink = (weeksAgo == 1) ? flowW1ByTs : flowW2ByTs;
+			Map<String, Double> sink = (daysAgo == 1) ? flowW1ByTs : flowW2ByTs;
 			for (HashMap<String, Object> r : wkRows) {
 				Object tagObj = r.get("tag");
 				Object tsObj = r.get("ts");
@@ -5838,7 +5846,7 @@ public class DrvnService {
 				try {
 					String raw = tsObj.toString();
 					String trimmed = raw.length() >= 16 ? raw.substring(0, 16) : raw;
-					shifted = LocalDateTime.parse(trimmed, shortFmt).plusWeeks(weeksAgo);
+					shifted = LocalDateTime.parse(trimmed, shortFmt).plusDays(daysAgo);
 				} catch (Exception ex) { continue; }
 				try {
 					sink.put(shifted.format(shortFmt), Double.parseDouble(valObj.toString()));
@@ -5987,8 +5995,8 @@ public class DrvnService {
 			row.put("deltaHour", deltaH);
 			row.put("isPredict", cur.isAfter(now));   // now(분 단위) 이후가 예측. 실측 1분 단위 그래프 표시 보장.
 			row.put("flowPrdct", flowPrdctHistByTs.get(curKey));   // 과거 10분 경계의 horizon 예측값 (그 외 null). 미래는 flow 가 곧 예측.
-			row.put("flowW1", flowW1ByTs.get(curKey));             // 1주 전 같은 요일·시각 실측 (W1 비교 라인).
-			row.put("flowW2", flowW2ByTs.get(curKey));             // 2주 전 같은 요일·시각 실측 (W2 비교 라인).
+			row.put("flowW1", flowW1ByTs.get(curKey));             // 1일 전 같은 시각 실측 (W1 비교 라인 — 키 이름 호환 유지).
+			row.put("flowW2", flowW2ByTs.get(curKey));             // 1주 전 같은 시각 실측 (W2 비교 라인 — 키 이름 호환 유지).
 			row.put("runningPumps", new ArrayList<>(running));
 			result.add(row);
 		}

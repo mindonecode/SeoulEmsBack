@@ -291,6 +291,13 @@ public interface AiMapper {
 	List<HashMap<String, Object>> selectPwrSumList(HashMap<String, Object> map);
 
 	/**
+	 * 최근 12개월 동안의 최대 피크값과 당월 기준 기본 단가(BASE_RATE)를 곱한 base_cost를 조회한다.
+	 * 
+	 * @return base_cost
+	 */
+	Double selectBaseCost();
+
+	/**
 	 * 현재 AI 상태를 조회한다.
 	 * 
 	 * @return AI 상태

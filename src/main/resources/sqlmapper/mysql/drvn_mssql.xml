@@ -2529,6 +2529,7 @@
 	  윈도 시작 직전 각 펌프의 마지막 ON/OFF 상태 시드 조회.
 	  - selectPumpRunHistoryByGrp 의 startDate 직전 시점에 각 PMB_TAG 별 최신 VALUE 1건씩 반환.
 	  - PMB 가 변경 시점 위주로 기록될 때 daysAgo>0 윈도 초입이 OFF 로 잘못 그려지는 문제 방지.
+	  - seedStartDate: 조회 하한. startDate 이전 "전체 이력" 풀스캔을 막기 위한 lower bound(서비스에서 startDate - SEED_LOOKBACK 로 산출).
 	-->
 	<select id="selectPumpLastStateBeforeGrp" parameterType="hashmap" resultType="HashMap">
 		SELECT
@@ -2546,6 +2547,7 @@
 			WHERE cppi2.PUMP_GRP = #{PUMP_GRP}
 			  AND cppi2.USE_YN = '1'
 			  AND rd2.TS &lt; #{startDate}
+			  AND rd2.TS &gt;= #{seedStartDate}
 			GROUP BY rd2.TAGNAME
 		) latest
 		  ON latest.TAGNAME = rd.TAGNAME
