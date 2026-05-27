@@ -5460,9 +5460,15 @@ public class DrvnService {
 		// 시드: 윈도 시작 직전 각 펌프의 마지막 VALUE 로 currentState 초기화.
 		// PMB 가 상태 변화 위주로 기록되므로 시드 없이는 daysAgo>0 윈도 초입 버킷이
 		// 모두 OFF(0대) 로 잘못 표시될 수 있음.
+		// seedStartDate: startDate 이전 전체 이력 풀스캔(TB_RAWDATA)을 막기 위한 조회 하한.
+		// 펌프 ON/OFF 는 변동이 잦아 7일이면 직전 상태를 안정적으로 포착. 이 구간에 기록이 없으면
+		// 시드는 비고, currentState 는 0(OFF)로 시작하는 기존 폴백 로직을 그대로 따른다.
+		final long SEED_LOOKBACK_MS = 7L * 86_400_000L;
+		Timestamp seedStartTs = new Timestamp(startMs - SEED_LOOKBACK_MS);
 		HashMap<String, Object> seedParam = new HashMap<>();
 		seedParam.put("PUMP_GRP", pumpGrp);
 		seedParam.put("startDate", startTs);
+		seedParam.put("seedStartDate", seedStartTs);
 		List<HashMap<String, Object>> seedList = drvnMapper.selectPumpLastStateBeforeGrp(seedParam);
 
 		// rawList 는 SQL 의 ORDER BY rd.TS 로 시간 오름차순 정렬됨.
