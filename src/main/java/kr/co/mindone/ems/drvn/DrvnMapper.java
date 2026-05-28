@@ -651,4 +651,18 @@ public interface DrvnMapper {
 	 */
 	java.util.List<HashMap<String, Object>> selectRecentSnapshotsWithNulls(HashMap<String, Object> param);
 
+	/**
+	 * (정확도) 항목별 오차율/정확도 UPSERT (TB_PUMP_FLOW_COMB_ACCURACY). 스냅샷과 동일 PK.
+	 * @param param rgstr_time, prdct_time, pump_grp, err_ / acc_ 항목값.
+	 */
+	int insertFlowCombAccuracy(HashMap<String, Object> param);
+
+	/**
+	 * (엑셀 다운로드) 기간 [from, to] 스냅샷 + 정확도 LEFT JOIN 결과.
+	 * 항목별로 PRDCT_/ACTL_/ACC_/ERR_ 가 한 행에 모여 있다. 수위 컬럼은 ROUND(2) 적용.
+	 * @param param from(String "yyyy-MM-dd HH:mm:ss"), to(String)
+	 * @return RGSTR_TIME 내림차순(최근이 먼저), PUMP_GRP 오름차순 전 컬럼.
+	 */
+	java.util.List<HashMap<String, Object>> selectSnapshotsWithAccuracyByRange(HashMap<String, Object> param);
+
 }

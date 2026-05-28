@@ -2852,6 +2852,97 @@
 	</insert>
 
 	<!--
+	  (정확도) 항목별 오차율/정확도 UPSERT. 스냅샷과 동일 PK (RGSTR_TIME, PUMP_GRP).
+	  - 재계산 시 항상 최신 계산값으로 덮어씀(COALESCE 미사용): ACTL 이 늦게 채워지면 다음 주기에 갱신.
+	-->
+	<insert id="insertFlowCombAccuracy" parameterType="hashmap">
+		INSERT INTO TB_PUMP_FLOW_COMB_ACCURACY
+			(RGSTR_TIME, PRDCT_TIME, PUMP_GRP,
+			 ERR_FLOW, ACC_FLOW, ERR_PRSR, ACC_PRSR,
+			 ERR_WL_GN, ACC_WL_GN, ERR_WL_BA, ACC_WL_BA, ERR_WL_GR, ACC_WL_GR,
+			 ERR_WL_WG, ACC_WL_WG, ERR_WL_WGOK, ACC_WL_WGOK,
+			 ERR_COMB, ACC_COMB, CALC_TIME)
+		VALUES
+			(#{rgstr_time}, #{prdct_time}, #{pump_grp},
+			 #{err_flow}, #{acc_flow}, #{err_prsr}, #{acc_prsr},
+			 #{err_wl_gn}, #{acc_wl_gn}, #{err_wl_ba}, #{acc_wl_ba}, #{err_wl_gr}, #{acc_wl_gr},
+			 #{err_wl_wg}, #{acc_wl_wg}, #{err_wl_wgok}, #{acc_wl_wgok},
+			 #{err_comb}, #{acc_comb}, NOW())
+		ON DUPLICATE KEY UPDATE
+			PRDCT_TIME  = #{prdct_time},
+			ERR_FLOW    = #{err_flow},    ACC_FLOW    = #{acc_flow},
+			ERR_PRSR    = #{err_prsr},    ACC_PRSR    = #{acc_prsr},
+			ERR_WL_GN   = #{err_wl_gn},   ACC_WL_GN   = #{acc_wl_gn},
+			ERR_WL_BA   = #{err_wl_ba},   ACC_WL_BA   = #{acc_wl_ba},
+			ERR_WL_GR   = #{err_wl_gr},   ACC_WL_GR   = #{acc_wl_gr},
+			ERR_WL_WG   = #{err_wl_wg},   ACC_WL_WG   = #{acc_wl_wg},
+			ERR_WL_WGOK = #{err_wl_wgok}, ACC_WL_WGOK = #{acc_wl_wgok},
+			ERR_COMB    = #{err_comb},    ACC_COMB    = #{acc_comb},
+			CALC_TIME   = NOW()
+	</insert>
+
+	<!--
+	  (엑셀 다운로드) 기간 [from, to] 스냅샷 + 정확도 결합 행.
+	  - SNAPSHOT 을 기준으로 LEFT JOIN ACCURACY (PK: RGSTR_TIME, PUMP_GRP 동일).
+	  - 수위(WL_*) 는 SQL 단계에서 소수 둘째 자리 ROUND.
+	  - 다른 숫자(유량/압력) 는 DB 원본 유지. 정확도/오차율은 저장 시 이미 round2.
+	-->
+	<select id="selectSnapshotsWithAccuracyByRange" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(s.RGSTR_TIME, '%Y-%m-%d %H:%i:%s') AS rgstr_time,
+			DATE_FORMAT(s.PRDCT_TIME, '%Y-%m-%d %H:%i:%s') AS prdct_time,
+			s.PUMP_GRP                  AS pump_grp,
+
+			s.PRDCT_FLOW                AS prdct_flow,
+			s.ACTL_FLOW                 AS actl_flow,
+			a.ACC_FLOW                  AS acc_flow,
+			a.ERR_FLOW                  AS err_flow,
+
+			s.PRDCT_PRSR                AS prdct_prsr,
+			s.ACTL_PRSR                 AS actl_prsr,
+			a.ACC_PRSR                  AS acc_prsr,
+			a.ERR_PRSR                  AS err_prsr,
+
+			ROUND(s.PRDCT_WL_GN, 2)     AS prdct_wl_gn,
+			ROUND(s.ACTL_WL_GN, 2)      AS actl_wl_gn,
+			a.ACC_WL_GN                 AS acc_wl_gn,
+			a.ERR_WL_GN                 AS err_wl_gn,
+
+			ROUND(s.PRDCT_WL_BA, 2)     AS prdct_wl_ba,
+			ROUND(s.ACTL_WL_BA, 2)      AS actl_wl_ba,
+			a.ACC_WL_BA                 AS acc_wl_ba,
+			a.ERR_WL_BA                 AS err_wl_ba,
+
+			ROUND(s.PRDCT_WL_GR, 2)     AS prdct_wl_gr,
+			ROUND(s.ACTL_WL_GR, 2)      AS actl_wl_gr,
+			a.ACC_WL_GR                 AS acc_wl_gr,
+			a.ERR_WL_GR                 AS err_wl_gr,
+
+			ROUND(s.PRDCT_WL_WG, 2)     AS prdct_wl_wg,
+			ROUND(s.ACTL_WL_WG, 2)      AS actl_wl_wg,
+			a.ACC_WL_WG                 AS acc_wl_wg,
+			a.ERR_WL_WG                 AS err_wl_wg,
+
+			ROUND(s.PRDCT_WL_WGOK, 2)   AS prdct_wl_wgok,
+			ROUND(s.ACTL_WL_WGOK, 2)    AS actl_wl_wgok,
+			a.ACC_WL_WGOK               AS acc_wl_wgok,
+			a.ERR_WL_WGOK               AS err_wl_wgok,
+
+			s.PRDCT_COMB                AS prdct_comb,
+			s.ACTL_COMB                 AS actl_comb,
+			a.ACC_COMB                  AS acc_comb,
+			a.ERR_COMB                  AS err_comb,
+
+			DATE_FORMAT(a.CALC_TIME, '%Y-%m-%d %H:%i:%s') AS calc_time
+		FROM TB_PUMP_FLOW_COMB_SNAPSHOT s
+		LEFT JOIN TB_PUMP_FLOW_COMB_ACCURACY a
+			   ON a.RGSTR_TIME = s.RGSTR_TIME AND a.PUMP_GRP = s.PUMP_GRP
+		WHERE s.RGSTR_TIME &gt;= #{from}
+			AND s.RGSTR_TIME &lt;= #{to}
+		ORDER BY s.RGSTR_TIME DESC, s.PUMP_GRP ASC
+	</select>
+
+	<!--
 	  예측 압력: TB_CTR_TNK_RST 에서 압력 DSTRB_ID(pumpDstrbIdMap[grp].pressure) 의
 	  RGSTR_TIME / PRDCT_TIME 정확 동치 행 PRDCT_VALUE. 예측 유량과 동일 패턴.
 	-->
@@ -2939,6 +3030,8 @@
 			PUMP_GRP      AS pump_grp,
 			PRDCT_FLOW    AS prdct_flow,
 			ACTL_FLOW     AS actl_flow,
+			PRDCT_COMB    AS prdct_comb,
+			ACTL_COMB     AS actl_comb,
 			PRDCT_PRSR    AS prdct_prsr,
 			ACTL_PRSR     AS actl_prsr,
 			PRDCT_WL_GN   AS prdct_wl_gn,

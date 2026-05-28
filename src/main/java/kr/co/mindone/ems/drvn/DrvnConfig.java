@@ -6210,6 +6210,14 @@ public class DrvnConfig {
 				drvnMapper.insertFlowCombSnapshot(insertParam);
 				processed++;
 
+				// snapshot 과 같은 시점에 정확도 동기 계산 (insertParam 키가 computeAndStoreAccuracy 입력과 동일).
+				// 한 grp 정확도 실패가 snapshot 적재/다른 grp 를 막지 않도록 try/catch 로 격리.
+				try {
+					computeAndStoreAccuracy(insertParam);
+				} catch (Exception ae) {
+					log.error("[flow-comb-accuracy] grp={} rgstr={} 계산 실패: {}", pumpGrp, rgstrTime, ae.getMessage(), ae);
+				}
+
 				log.debug("[flow-comb-snapshot] grp={} rgstrTime={} prdctFlow={} actlFlow={} prdctComb={} actlComb={}"
 						+ " prdctPrsr={} actlPrsr={}"
 						+ " prdctWL[gn={},ba={},gr={},wg={},wgok={}]"
@@ -6272,6 +6280,103 @@ public class DrvnConfig {
 		result.put("boundaries", boundaries);
 		result.put("rows", rows);
 		return result;
+	}
+
+	// =====================================================================
+	// [Seoul/Dev] 예측 정확도 계산·저장 (TB_PUMP_FLOW_COMB_ACCURACY)
+	//   - 입력: TB_PUMP_FLOW_COMB_SNAPSHOT 의 같은 row 내 PRDCT_* vs ACTL_*.
+	//   - 숫자: 오차율 = |예측-실측|/|실측|×100, 정확도 = clamp(100-오차율, 0, 100).
+	//   - 조합: 자카드(|∩|/|∪|×100), 둘다 0대면 100%.
+	//   - 별도 스케줄러 없이 snapshot 생성/backfill 과 같은 시점에 동기 계산(완전 결합).
+	//     ACTL 이 backfill 로 늦게 채워지면 backfillNullSnapshotFields 가 같은 시점에 재계산(upsert).
+	// =====================================================================
+
+	/**
+	 * 스냅샷 1행의 항목별 오차율/정확도를 계산해 UPSERT.
+	 * @return 계산 가능한 항목이 1개 이상이면 true(저장함), 전부 결측이면 false(skip).
+	 */
+	private boolean computeAndStoreAccuracy(HashMap<String, Object> row) {
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("rgstr_time", row.get("rgstr_time"));
+		p.put("prdct_time", row.get("prdct_time"));
+		p.put("pump_grp",   row.get("pump_grp"));
+
+		boolean any = false;
+		any |= putErrAcc(p, "flow",    numericErrAcc(toDouble(row.get("prdct_flow")),    toDouble(row.get("actl_flow"))));
+		any |= putErrAcc(p, "prsr",    numericErrAcc(toDouble(row.get("prdct_prsr")),    toDouble(row.get("actl_prsr"))));
+		any |= putErrAcc(p, "wl_gn",   numericErrAcc(toDouble(row.get("prdct_wl_gn")),   toDouble(row.get("actl_wl_gn"))));
+		any |= putErrAcc(p, "wl_ba",   numericErrAcc(toDouble(row.get("prdct_wl_ba")),   toDouble(row.get("actl_wl_ba"))));
+		any |= putErrAcc(p, "wl_gr",   numericErrAcc(toDouble(row.get("prdct_wl_gr")),   toDouble(row.get("actl_wl_gr"))));
+		any |= putErrAcc(p, "wl_wg",   numericErrAcc(toDouble(row.get("prdct_wl_wg")),   toDouble(row.get("actl_wl_wg"))));
+		any |= putErrAcc(p, "wl_wgok", numericErrAcc(toDouble(row.get("prdct_wl_wgok")), toDouble(row.get("actl_wl_wgok"))));
+		any |= putErrAcc(p, "comb",    combErrAcc(asStr(row.get("prdct_comb")), asStr(row.get("actl_comb"))));
+
+		if (!any) return false;   // 전부 결측 → 빈 행 만들지 않음
+		drvnMapper.insertFlowCombAccuracy(p);
+		return true;
+	}
+
+	/** errAcc[0]=오차율, [1]=정확도 를 err_&lt;key&gt;/acc_&lt;key&gt; 로 param 에 담는다. 둘 다 null 이면 false. */
+	private static boolean putErrAcc(HashMap<String, Object> p, String key, Double[] errAcc) {
+		p.put("err_" + key, errAcc[0]);
+		p.put("acc_" + key, errAcc[1]);
+		return errAcc[0] != null || errAcc[1] != null;
+	}
+
+	/**
+	 * 숫자 항목 오차율/정확도.
+	 *   오차율 = |예측-실측|/|실측|×100, 정확도 = clamp(100-오차율, 0, 100).
+	 *   실측=0 &amp; 예측=0 → {0,100} / 실측=0 &amp; 예측≠0 → {null,null}(정의불가) / 입력 결측 → {null,null}.
+	 * @return Double[2] {오차율, 정확도} (소수 2자리 반올림)
+	 */
+	private static Double[] numericErrAcc(Double pred, Double actl) {
+		if (pred == null || actl == null) return new Double[]{null, null};
+		if (actl == 0.0) {
+			return (pred == 0.0) ? new Double[]{0.0, 100.0} : new Double[]{null, null};
+		}
+		double err = Math.abs(pred - actl) / Math.abs(actl) * 100.0;
+		double acc = Math.max(0.0, Math.min(100.0, 100.0 - err));
+		return new Double[]{round2(err), round2(acc)};
+	}
+
+	/**
+	 * 펌프조합 정확도(자카드). 정확도 = |예측∩실측|/|예측∪실측|×100, 오차율 = 100 - 정확도.
+	 *   둘 다 0대(공집합) → {0,100}(완전일치). 한쪽이라도 null → {null,null}.
+	 * @return Double[2] {오차율, 정확도}
+	 */
+	private static Double[] combErrAcc(String predComb, String actlComb) {
+		if (predComb == null || actlComb == null) return new Double[]{null, null};
+		java.util.Set<Integer> pred = parsePumpSet(predComb);
+		java.util.Set<Integer> actl = parsePumpSet(actlComb);
+		java.util.Set<Integer> union = new java.util.HashSet<>(pred);
+		union.addAll(actl);
+		if (union.isEmpty()) return new Double[]{0.0, 100.0};   // 둘다 0대 → 완전일치
+		java.util.Set<Integer> inter = new java.util.HashSet<>(pred);
+		inter.retainAll(actl);
+		double acc = (double) inter.size() / union.size() * 100.0;
+		return new Double[]{round2(100.0 - acc), round2(acc)};
+	}
+
+	/** "1,3,4,6" → {1,3,4,6}. 공백/빈토큰/중복/숫자아님 무시. */
+	private static java.util.Set<Integer> parsePumpSet(String csv) {
+		java.util.Set<Integer> set = new java.util.HashSet<>();
+		if (csv == null) return set;
+		for (String tok : csv.split(",")) {
+			String t = tok.trim();
+			if (t.isEmpty()) continue;
+			try { set.add(Integer.parseInt(t)); } catch (NumberFormatException ignore) {}
+		}
+		return set;
+	}
+
+	/** Object → String. null 유지. */
+	private static String asStr(Object v) {
+		return v == null ? null : v.toString();
+	}
+
+	/** 소수 2자리 반올림. */
+	private static Double round2(double v) {
+		return Math.round(v * 100.0) / 100.0;
 	}
 
 	/** Object → Double 안전 변환. null / 숫자 아님 → null. */
@@ -6454,6 +6559,17 @@ public class DrvnConfig {
 				try {
 					drvnMapper.insertFlowCombSnapshot(upsert);
 					filled++;
+					// 스냅샷이 갱신된 행은 정확도도 동기 재계산. upsert(신규 비-null) 를 row(기존값) 위에 COALESCE
+					// → ON DUPLICATE KEY UPDATE + COALESCE 후의 실제 DB 상태와 일치하는 값으로 정확도 산출.
+					HashMap<String, Object> merged = new HashMap<>(row);
+					for (Map.Entry<String, Object> me : upsert.entrySet()) {
+						if (me.getValue() != null) merged.put(me.getKey(), me.getValue());
+					}
+					try {
+						computeAndStoreAccuracy(merged);
+					} catch (Exception ae) {
+						log.error("[flow-comb-accuracy] backfill 재계산 실패 grp={} rgstr={}: {}", pumpGrp, rgstrTime, ae.getMessage());
+					}
 				} catch (Exception e) {
 					log.error("[snapshot-backfill] UPSERT 실패 grp={} rgstr={}: {}", pumpGrp, rgstrTime, e.getMessage());
 				}

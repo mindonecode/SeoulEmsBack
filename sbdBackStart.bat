@@ -26,9 +26,11 @@ echo git pull
 call "C:\Users\hjseok\AppData\Roaming\npm\pm2.cmd" delete sbd_back
 echo pm2 delete
 
-call gradlew.bat clean
+call gradlew.bat --stop
+echo gradle daemon stop
+call gradlew.bat clean --no-daemon
 echo gradle clean
-call gradlew.bat build
+call gradlew.bat build -x test --no-daemon
 if errorlevel 1 exit /b 1
 echo gradle build
 
