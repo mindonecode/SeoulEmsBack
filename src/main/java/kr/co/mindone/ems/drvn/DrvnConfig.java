@@ -6047,15 +6047,16 @@ public class DrvnConfig {
 	}
 
 	/**
-	 * 10분 주기 예측/실측 유량·펌프조합 스냅샷 (TB_PUMP_FLOW_COMB_SNAPSHOT 적재).
+	 * 1분 주기 예측/실측 유량·펌프조합 스냅샷 (TB_PUMP_FLOW_COMB_SNAPSHOT 적재).
 	 * - 화면 미노출, 분석용 로그 테이블.
-	 * - RGSTR_TIME : 등록 시각 (10분 경계, 예 14:00).
-	 * - PRDCT_TIME : 예측 대상 시각 = RGSTR_TIME + 10분 (예 14:10).
-	 * - ACTL_FLOW / ACTL_COMB : RGSTR_TIME 시점 실측.
-	 * - PRDCT_FLOW / PRDCT_COMB : PRDCT_TIME 시점 예측 (TB_CTR_TNK_RST 기반).
-	 * - pump_grp 별로 1행씩 INSERT (그룹 N개 → 10분당 N행 누적).
+	 * - RGSTR_TIME : 현재 시각의 10분 경계 floor (예: 14:03 → 14:00).
+	 * - PRDCT_TIME : RGSTR_TIME + 10분.
+	 * - 매분 동일 (RGSTR_TIME, PUMP_GRP) 키로 UPSERT 재시도.
+	 *   tnk_rst / rawdata 가 늦게 도착해도 다음 분에 채워짐. 이미 채워진 값은 COALESCE 로 보존.
+	 * - PRDCT_FLOW : tnk_rst 에서 RGSTR_TIME / PRDCT_TIME 정확 동치 행의 PRDCT_VALUE.
+	 * - ACTL_FLOW : 동일 DSTRB_Q_ID 의 FRI_TAG, TB_RAWDATA.TS = RGSTR_TIME.
 	 */
-	@Scheduled(cron = "0 0/10 * * * *")
+	@Scheduled(cron = "0 * * * * *")
 	public void scheduleFlowCombSnapshotTask() {
 		if (pumpDstrbIdMap == null || pumpDstrbIdMap.isEmpty()) {
 			log.warn("[flow-comb-snapshot] pumpDstrbIdMap 미초기화 — skip");
@@ -6070,49 +6071,121 @@ public class DrvnConfig {
 		String rgstrTime = nowAligned.format(formatter);
 		String prdctTime = nowAligned.plusMinutes(10).format(formatter);
 
-		log.info("=== [flow-comb-snapshot] rgstrTime={} prdctTime={} ===", rgstrTime, prdctTime);
+		log.debug("=== [flow-comb-snapshot] rgstrTime={} prdctTime={} ===", rgstrTime, prdctTime);
 
+		processFlowCombSnapshotForBoundary(rgstrTime, prdctTime);
+
+		// 현재 분 snapshot 적재 완료 후, 최근 N 시간 내 null 컬럼 보유 행을 재조회.
+		// 동일 RGSTR_TIME/PRDCT_TIME 으로 source 정확 시각 재질의 → 도착 시점에 자동 채워짐.
+		try {
+			backfillNullSnapshotFields(LocalDateTime.now().withSecond(0).withNano(0).format(formatter));
+		} catch (Exception e) {
+			log.error("[snapshot-backfill] 실패: {}", e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * 단일 10분 경계 (rgstrTime / prdctTime) 의 모든 PUMP_GRP snapshot 행을 UPSERT.
+	 * cron (scheduleFlowCombSnapshotTask) 와 수동 range backfill (fillFlowCombSnapshotRange) 공통 처리부.
+	 * 한 grp 가 실패해도 다른 grp 는 계속 처리 (try/catch per-grp).
+	 * @return 시도(처리)한 pump_grp 수 (continue 로 skip 한 grp 제외).
+	 */
+	private int processFlowCombSnapshotForBoundary(String rgstrTime, String prdctTime) {
+		if (pumpDstrbIdMap == null || pumpDstrbIdMap.isEmpty()) return 0;
+		int processed = 0;
 		for (Integer pumpGrp : pumpDstrbIdMap.keySet()) {
 			try {
 				HashMap<String, String> ditrbMap = pumpDstrbIdMap.get(pumpGrp);
 				String flowDstrbId = (ditrbMap != null) ? ditrbMap.get("flow") : null;
 
+				if (flowDstrbId == null || flowDstrbId.isEmpty()) {
+					log.warn("[flow-comb-snapshot] grp={} flow DSTRB_ID 미정의 — skip", pumpGrp);
+					continue;
+				}
+
 				HashMap<String, Object> param = new HashMap<>();
 				param.put("pump_grp", pumpGrp);
 				param.put("rgstr_time", rgstrTime);
+				param.put("prdct_time", prdctTime);
 				param.put("dstrb_id", flowDstrbId);
 
-				// 예측 유량: TB_CTR_TNK_RST 에서 PRDCT_TIME = RGSTR_TIME+10분 (예: 14:00 → 14:10).
+				// 예측 유량: TB_CTR_TNK_RST 에서 RGSTR_TIME / PRDCT_TIME 정확 동치 행의 PRDCT_VALUE. 없으면 null (이후 backfill 이 같은 시각 재조회).
 				Double prdctFlow = null;
-				if (flowDstrbId != null && !flowDstrbId.isEmpty()) {
-					HashMap<String, Object> prdctRow = drvnMapper.selectLatestPredictedFlowTnk(param);
-					if (prdctRow != null) {
-						Object pf = prdctRow.get("prdct_flow");
-						if (pf instanceof Number) prdctFlow = ((Number) pf).doubleValue();
-						else if (pf != null) {
-							try { prdctFlow = Double.parseDouble(pf.toString()); } catch (NumberFormatException ignore) {}
+				HashMap<String, Object> prdctRow = drvnMapper.selectLatestPredictedFlowTnk(param);
+				if (prdctRow != null) {
+					Object pf = prdctRow.get("prdct_flow");
+					if (pf instanceof Number) prdctFlow = ((Number) pf).doubleValue();
+					else if (pf != null) {
+						try { prdctFlow = Double.parseDouble(pf.toString()); } catch (NumberFormatException ignore) {}
+					}
+				}
+
+				// 예측 조합: TB_CTR_PUMPYN_RST 최신 RGSTR_TIME (≤ rgstrTime) 의 ON 펌프 IDX CSV + 결정 시각 (actl_ref_ts).
+				HashMap<String, Object> prdctCombRow = drvnMapper.selectLatestPredictedComb(param);
+				String prdctComb = (prdctCombRow != null) ? (String) prdctCombRow.get("prdct_comb") : null;
+				String actlRefTs = (prdctCombRow != null) ? (String) prdctCombRow.get("actl_ref_ts") : null;
+				// 실측 컬럼들은 모두 actl_ref_ts (예측 조합이 결정된 시점) 기준으로 raw 매치 → 예측 입력 시점의 측정값과 정렬.
+				param.put("actl_ref_ts", actlRefTs);
+
+				// 실측 유량: actl_ref_ts 기준 raw. actl_ref_ts null 이면 매퍼 0 row → actl_flow null.
+				Double actlFlow = null;
+				String actlComb = null;
+				if (actlRefTs != null) {
+					HashMap<String, Object> actlRow = drvnMapper.selectLatestActualFlow(param);
+					if (actlRow != null) {
+						Object v = actlRow.get("value");
+						if (v instanceof Number) actlFlow = ((Number) v).doubleValue();
+						else if (v != null) {
+							try { actlFlow = Double.parseDouble(v.toString()); } catch (NumberFormatException ignore) {}
 						}
 					}
-				} else {
-					log.warn("[flow-comb-snapshot] grp={} flow DSTRB_ID 미정의 — prdctFlow=null", pumpGrp);
+					// 실측 조합: actl_ref_ts 시점 PMB_TAG ON 펌프 CSV.
+					actlComb = drvnMapper.selectLatestActualComb(param);
 				}
 
-				// 예측 조합: TB_CTR_PUMPYN_RST 최신 RGSTR_TIME (≤ rgstrTime) 의 ON 펌프 IDX CSV.
-				String prdctComb = drvnMapper.selectLatestPredictedComb(param);
-
-				// 실측 유량: rgstrTime(=14:00) 직전 10분 윈도우의 최근 FRI_TAG 값.
-				HashMap<String, Object> actlRow = drvnMapper.selectLatestActualFlow(param);
-				Double actlFlow = null;
-				if (actlRow != null) {
-					Object v = actlRow.get("value");
-					if (v instanceof Number) actlFlow = ((Number) v).doubleValue();
-					else if (v != null) {
-						try { actlFlow = Double.parseDouble(v.toString()); } catch (NumberFormatException ignore) {}
+				// === 압력 (PUMP_GRP 별 pressure DSTRB_ID 매핑) ===
+				// pumpDstrbIdMap[grp].pressure 가 정의된 grp 만 압력 컬럼 채움. 미정의면 null 적재.
+				String pressureDstrbId = (ditrbMap != null) ? ditrbMap.get("pressure") : null;
+				Double prdctPrsr = null;
+				Double actlPrsr = null;
+				if (pressureDstrbId != null && !pressureDstrbId.isEmpty()) {
+					HashMap<String, Object> prsrParam = new HashMap<>();
+					prsrParam.put("dstrb_id", pressureDstrbId);
+					prsrParam.put("tag",       pressureDstrbId); // TB_RAWDATA.TAGNAME 과 동일 식별자 가정
+					prsrParam.put("rgstr_time", rgstrTime);
+					prsrParam.put("prdct_time", prdctTime);
+					prsrParam.put("actl_ref_ts", actlRefTs);
+					HashMap<String, Object> prdctPrsrRow = drvnMapper.selectLatestPredictedPressureTnk(prsrParam);
+					prdctPrsr = toDouble(prdctPrsrRow != null ? prdctPrsrRow.get("prdct_prsr") : null);
+					if (actlRefTs != null) {
+						HashMap<String, Object> actlPrsrRow = drvnMapper.selectLatestActualPressure(prsrParam);
+						actlPrsr = toDouble(actlPrsrRow != null ? actlPrsrRow.get("value") : null);
 					}
 				}
 
-				// 실측 조합: rgstrTime 시점의 PMB_TAG ON 펌프 CSV.
-				String actlComb = drvnMapper.selectLatestActualComb(param);
+				// === 배수지 수위 (5개 배수지 평균, 첫 grp loop 한 번이면 충분하나 동일 RGSTR_TIME 이라
+				// row 별로 동일 값이 들어가도 무방. 안정성/단순함을 위해 매 grp 마다 조회) ===
+				// seoulReservoirTagMap 키: "공릉", "북악", "구리", "월계", "월곡"
+				// 컬럼 약어 키: GN, BA, GR, WG, WGOK
+				// 예측 수위: snapshot.rgstr_time/prdct_time 정확 매치 (예측 등록 시점 기준).
+				// 실측 수위: actl_ref_ts 기준 (예측 조합이 결정된 시각의 실측값).
+				java.util.LinkedHashMap<String, String[]> resTagMap = getSeoulReservoirTagMap();
+				Double prdctWlGn = null, prdctWlBa = null, prdctWlGr = null, prdctWlWg = null, prdctWlWgok = null;
+				Double actlWlGn  = null, actlWlBa  = null, actlWlGr  = null, actlWlWg  = null, actlWlWgok  = null;
+				if (resTagMap != null) {
+					prdctWlGn   = fetchPredictedReservoirAvg("공릉", resTagMap.get("공릉"), rgstrTime, prdctTime);
+					prdctWlBa   = fetchPredictedReservoirAvg("북악", resTagMap.get("북악"), rgstrTime, prdctTime);
+					prdctWlGr   = fetchPredictedReservoirAvg("구리", resTagMap.get("구리"), rgstrTime, prdctTime);
+					prdctWlWg   = fetchPredictedReservoirAvg("월계", resTagMap.get("월계"), rgstrTime, prdctTime);
+					prdctWlWgok = fetchPredictedReservoirAvg("월곡", resTagMap.get("월곡"), rgstrTime, prdctTime);
+					if (actlRefTs != null) {
+						actlWlGn   = fetchActualReservoirAvg("공릉", resTagMap.get("공릉"), actlRefTs);
+						actlWlBa   = fetchActualReservoirAvg("북악", resTagMap.get("북악"), actlRefTs);
+						actlWlGr   = fetchActualReservoirAvg("구리", resTagMap.get("구리"), actlRefTs);
+						actlWlWg   = fetchActualReservoirAvg("월계", resTagMap.get("월계"), actlRefTs);
+						actlWlWgok = fetchActualReservoirAvg("월곡", resTagMap.get("월곡"), actlRefTs);
+					}
+				}
 
 				HashMap<String, Object> insertParam = new HashMap<>();
 				insertParam.put("rgstr_time", rgstrTime);
@@ -6122,14 +6195,390 @@ public class DrvnConfig {
 				insertParam.put("actl_flow", actlFlow);
 				insertParam.put("prdct_comb", prdctComb);
 				insertParam.put("actl_comb", actlComb);
+				insertParam.put("prdct_prsr", prdctPrsr);
+				insertParam.put("actl_prsr",  actlPrsr);
+				insertParam.put("prdct_wl_gn",   prdctWlGn);
+				insertParam.put("prdct_wl_ba",   prdctWlBa);
+				insertParam.put("prdct_wl_gr",   prdctWlGr);
+				insertParam.put("prdct_wl_wg",   prdctWlWg);
+				insertParam.put("prdct_wl_wgok", prdctWlWgok);
+				insertParam.put("actl_wl_gn",   actlWlGn);
+				insertParam.put("actl_wl_ba",   actlWlBa);
+				insertParam.put("actl_wl_gr",   actlWlGr);
+				insertParam.put("actl_wl_wg",   actlWlWg);
+				insertParam.put("actl_wl_wgok", actlWlWgok);
 				drvnMapper.insertFlowCombSnapshot(insertParam);
+				processed++;
 
-				log.info("[flow-comb-snapshot] grp={} prdctFlow={} actlFlow={} prdctComb={} actlComb={}",
-						pumpGrp, prdctFlow, actlFlow, prdctComb, actlComb);
+				// snapshot 과 같은 시점에 정확도 동기 계산 (insertParam 키가 computeAndStoreAccuracy 입력과 동일).
+				// 한 grp 정확도 실패가 snapshot 적재/다른 grp 를 막지 않도록 try/catch 로 격리.
+				try {
+					computeAndStoreAccuracy(insertParam);
+				} catch (Exception ae) {
+					log.error("[flow-comb-accuracy] grp={} rgstr={} 계산 실패: {}", pumpGrp, rgstrTime, ae.getMessage(), ae);
+				}
+
+				log.debug("[flow-comb-snapshot] grp={} rgstrTime={} prdctFlow={} actlFlow={} prdctComb={} actlComb={}"
+						+ " prdctPrsr={} actlPrsr={}"
+						+ " prdctWL[gn={},ba={},gr={},wg={},wgok={}]"
+						+ " actlWL[gn={},ba={},gr={},wg={},wgok={}]",
+						pumpGrp, rgstrTime, prdctFlow, actlFlow, prdctComb, actlComb,
+						prdctPrsr, actlPrsr,
+						prdctWlGn, prdctWlBa, prdctWlGr, prdctWlWg, prdctWlWgok,
+						actlWlGn, actlWlBa, actlWlGr, actlWlWg, actlWlWgok);
 			} catch (Exception e) {
 				log.error("[flow-comb-snapshot] 실패 grp={} rgstrTime={}: {}",
 						pumpGrp, rgstrTime, e.getMessage(), e);
 			}
+		}
+		return processed;
+	}
+
+	/**
+	 * 지정 범위 [from, to] 의 10분 경계마다 TB_PUMP_FLOW_COMB_SNAPSHOT 을 UPSERT.
+	 * - from/to 는 10분 floor 적용 (예: 14:03 → 14:00).
+	 * - boundary 경계마다 모든 PUMP_GRP 처리. ON DUPLICATE KEY UPDATE + COALESCE 이므로 재실행 안전.
+	 * - 본 API 는 즉시 채움이므로 backfill (null 재조회) 은 호출하지 않음.
+	 * @param from 시작 (inclusive)
+	 * @param to   종료 (inclusive)
+	 * @return { boundaries: 경계 수, rows: 처리된 grp 행 수, from, to }
+	 */
+	public Map<String, Object> fillFlowCombSnapshotRange(LocalDateTime from, LocalDateTime to) {
+		if (from == null || to == null) throw new IllegalArgumentException("from/to required");
+		if (pumpDstrbIdMap == null || pumpDstrbIdMap.isEmpty()) {
+			throw new IllegalStateException("pumpDstrbIdMap 미초기화 — 서버 부팅 후 재시도");
+		}
+
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		LocalDateTime fromAligned = from.withSecond(0).withNano(0);
+		fromAligned = fromAligned.withMinute((fromAligned.getMinute() / 10) * 10);
+		LocalDateTime toAligned = to.withSecond(0).withNano(0);
+		toAligned = toAligned.withMinute((toAligned.getMinute() / 10) * 10);
+		if (fromAligned.isAfter(toAligned)) {
+			throw new IllegalArgumentException("from(" + fromAligned + ") must be <= to(" + toAligned + ")");
+		}
+
+		int boundaries = 0;
+		int rows = 0;
+		LocalDateTime cur = fromAligned;
+		while (!cur.isAfter(toAligned)) {
+			String rgstrTime = cur.format(formatter);
+			String prdctTime = cur.plusMinutes(10).format(formatter);
+			rows += processFlowCombSnapshotForBoundary(rgstrTime, prdctTime);
+			boundaries++;
+			cur = cur.plusMinutes(10);
+		}
+
+		String fromStr = fromAligned.format(formatter);
+		String toStr   = toAligned.format(formatter);
+		log.info("[flow-comb-snapshot-range] from={} to={} boundaries={} rows={}",
+				fromStr, toStr, boundaries, rows);
+
+		Map<String, Object> result = new java.util.LinkedHashMap<>();
+		result.put("from", fromStr);
+		result.put("to", toStr);
+		result.put("boundaries", boundaries);
+		result.put("rows", rows);
+		return result;
+	}
+
+	// =====================================================================
+	// [Seoul/Dev] 예측 정확도 계산·저장 (TB_PUMP_FLOW_COMB_ACCURACY)
+	//   - 입력: TB_PUMP_FLOW_COMB_SNAPSHOT 의 같은 row 내 PRDCT_* vs ACTL_*.
+	//   - 숫자: 오차율 = |예측-실측|/|실측|×100, 정확도 = clamp(100-오차율, 0, 100).
+	//   - 조합: 자카드(|∩|/|∪|×100), 둘다 0대면 100%.
+	//   - 별도 스케줄러 없이 snapshot 생성/backfill 과 같은 시점에 동기 계산(완전 결합).
+	//     ACTL 이 backfill 로 늦게 채워지면 backfillNullSnapshotFields 가 같은 시점에 재계산(upsert).
+	// =====================================================================
+
+	/**
+	 * 스냅샷 1행의 항목별 오차율/정확도를 계산해 UPSERT.
+	 * @return 계산 가능한 항목이 1개 이상이면 true(저장함), 전부 결측이면 false(skip).
+	 */
+	private boolean computeAndStoreAccuracy(HashMap<String, Object> row) {
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("rgstr_time", row.get("rgstr_time"));
+		p.put("prdct_time", row.get("prdct_time"));
+		p.put("pump_grp",   row.get("pump_grp"));
+
+		boolean any = false;
+		any |= putErrAcc(p, "flow",    numericErrAcc(toDouble(row.get("prdct_flow")),    toDouble(row.get("actl_flow"))));
+		any |= putErrAcc(p, "prsr",    numericErrAcc(toDouble(row.get("prdct_prsr")),    toDouble(row.get("actl_prsr"))));
+		any |= putErrAcc(p, "wl_gn",   numericErrAcc(toDouble(row.get("prdct_wl_gn")),   toDouble(row.get("actl_wl_gn"))));
+		any |= putErrAcc(p, "wl_ba",   numericErrAcc(toDouble(row.get("prdct_wl_ba")),   toDouble(row.get("actl_wl_ba"))));
+		any |= putErrAcc(p, "wl_gr",   numericErrAcc(toDouble(row.get("prdct_wl_gr")),   toDouble(row.get("actl_wl_gr"))));
+		any |= putErrAcc(p, "wl_wg",   numericErrAcc(toDouble(row.get("prdct_wl_wg")),   toDouble(row.get("actl_wl_wg"))));
+		any |= putErrAcc(p, "wl_wgok", numericErrAcc(toDouble(row.get("prdct_wl_wgok")), toDouble(row.get("actl_wl_wgok"))));
+		any |= putErrAcc(p, "comb",    combErrAcc(asStr(row.get("prdct_comb")), asStr(row.get("actl_comb"))));
+
+		if (!any) return false;   // 전부 결측 → 빈 행 만들지 않음
+		drvnMapper.insertFlowCombAccuracy(p);
+		return true;
+	}
+
+	/** errAcc[0]=오차율, [1]=정확도 를 err_&lt;key&gt;/acc_&lt;key&gt; 로 param 에 담는다. 둘 다 null 이면 false. */
+	private static boolean putErrAcc(HashMap<String, Object> p, String key, Double[] errAcc) {
+		p.put("err_" + key, errAcc[0]);
+		p.put("acc_" + key, errAcc[1]);
+		return errAcc[0] != null || errAcc[1] != null;
+	}
+
+	/**
+	 * 숫자 항목 오차율/정확도.
+	 *   오차율 = |예측-실측|/|실측|×100, 정확도 = clamp(100-오차율, 0, 100).
+	 *   실측=0 &amp; 예측=0 → {0,100} / 실측=0 &amp; 예측≠0 → {null,null}(정의불가) / 입력 결측 → {null,null}.
+	 * @return Double[2] {오차율, 정확도} (소수 2자리 반올림)
+	 */
+	private static Double[] numericErrAcc(Double pred, Double actl) {
+		if (pred == null || actl == null) return new Double[]{null, null};
+		if (actl == 0.0) {
+			return (pred == 0.0) ? new Double[]{0.0, 100.0} : new Double[]{null, null};
+		}
+		double err = Math.abs(pred - actl) / Math.abs(actl) * 100.0;
+		double acc = Math.max(0.0, Math.min(100.0, 100.0 - err));
+		return new Double[]{round2(err), round2(acc)};
+	}
+
+	/**
+	 * 펌프조합 정확도(자카드). 정확도 = |예측∩실측|/|예측∪실측|×100, 오차율 = 100 - 정확도.
+	 *   둘 다 0대(공집합) → {0,100}(완전일치). 한쪽이라도 null → {null,null}.
+	 * @return Double[2] {오차율, 정확도}
+	 */
+	private static Double[] combErrAcc(String predComb, String actlComb) {
+		if (predComb == null || actlComb == null) return new Double[]{null, null};
+		java.util.Set<Integer> pred = parsePumpSet(predComb);
+		java.util.Set<Integer> actl = parsePumpSet(actlComb);
+		java.util.Set<Integer> union = new java.util.HashSet<>(pred);
+		union.addAll(actl);
+		if (union.isEmpty()) return new Double[]{0.0, 100.0};   // 둘다 0대 → 완전일치
+		java.util.Set<Integer> inter = new java.util.HashSet<>(pred);
+		inter.retainAll(actl);
+		double acc = (double) inter.size() / union.size() * 100.0;
+		return new Double[]{round2(100.0 - acc), round2(acc)};
+	}
+
+	/** "1,3,4,6" → {1,3,4,6}. 공백/빈토큰/중복/숫자아님 무시. */
+	private static java.util.Set<Integer> parsePumpSet(String csv) {
+		java.util.Set<Integer> set = new java.util.HashSet<>();
+		if (csv == null) return set;
+		for (String tok : csv.split(",")) {
+			String t = tok.trim();
+			if (t.isEmpty()) continue;
+			try { set.add(Integer.parseInt(t)); } catch (NumberFormatException ignore) {}
+		}
+		return set;
+	}
+
+	/** Object → String. null 유지. */
+	private static String asStr(Object v) {
+		return v == null ? null : v.toString();
+	}
+
+	/** 소수 2자리 반올림. */
+	private static Double round2(double v) {
+		return Math.round(v * 100.0) / 100.0;
+	}
+
+	/** Object → Double 안전 변환. null / 숫자 아님 → null. */
+	private static Double toDouble(Object v) {
+		if (v == null) return null;
+		if (v instanceof Number) return ((Number) v).doubleValue();
+		try { return Double.parseDouble(v.toString()); } catch (NumberFormatException e) { return null; }
+	}
+
+	/**
+	 * 배수지 예측 수위 평균 (TB_CTR_TNK_RST).
+	 * threshold 이상인 active 수조만 평균 — frontend _AVG 규칙과 일치 (구리 1.5m, 나머지 3.0m).
+	 * 매칭 행 0 / 태그 미설정 → null.
+	 */
+	private Double fetchPredictedReservoirAvg(String resName, String[] tags, String rgstrTime, String prdctTime) {
+		if (tags == null || tags.length == 0) return null;
+		double threshold = getSeoulReservoirThreshold(resName);
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("tagList", java.util.Arrays.asList(tags));
+		p.put("rgstr_time", rgstrTime);
+		p.put("prdct_time", prdctTime);
+		p.put("threshold", threshold);
+		HashMap<String, Object> row = drvnMapper.selectLatestPredictedReservoirAvg(p);
+		if (row == null) return null;
+		Object cnt = row.get("tank_count");
+		if (cnt instanceof Number && ((Number) cnt).intValue() == 0) return null;
+		return toDouble(row.get("avg_value"));
+	}
+
+	/**
+	 * 배수지 실측 수위 평균 (TB_RAWDATA).
+	 * threshold 이상인 active 수조만 평균 — frontend _AVG 규칙과 일치.
+	 * 매칭 행 0 / 태그 미설정 / actlRefTs null → null.
+	 * @param actlRefTs 예측 조합이 결정된 시점 (TB_CTR_PUMPYN_RST.RGSTR_TIME). null 이면 매치 불가.
+	 */
+	private Double fetchActualReservoirAvg(String resName, String[] tags, String actlRefTs) {
+		if (tags == null || tags.length == 0 || actlRefTs == null) return null;
+		double threshold = getSeoulReservoirThreshold(resName);
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("tagList", java.util.Arrays.asList(tags));
+		p.put("actl_ref_ts", actlRefTs);
+		p.put("threshold", threshold);
+		HashMap<String, Object> row = drvnMapper.selectLatestActualReservoirAvg(p);
+		if (row == null) return null;
+		Object cnt = row.get("tank_count");
+		if (cnt instanceof Number && ((Number) cnt).intValue() == 0) return null;
+		return toDouble(row.get("avg_value"));
+	}
+
+	// =========================================================================
+	// [snapshot backfill] 최근 N 시간 내 null 컬럼 보유 행을 매분 재조회.
+	// 정확 시각으로 다시 source 조회 (TB_CTR_TNK_RST / TB_RAWDATA), 도착 시점에 채워짐.
+	// 평균값 사용 안 함 — 그 timestamp 의 실제 값만 사용.
+	// =========================================================================
+
+	/** backfill 윈도우 (시간). 이 시간 이후에도 null 이면 source 자체가 없는 것으로 간주. */
+	private static final int SNAPSHOT_BACKFILL_HOURS = 24;
+
+	/**
+	 * 최근 SNAPSHOT_BACKFILL_HOURS 시간 내 null 컬럼이 남아 있는 snapshot 행을 재조회 & UPSERT.
+	 * - 정확 시각 (RGSTR_TIME / PRDCT_TIME) 으로만 source 재조회.
+	 * - INSERT 의 ON DUPLICATE KEY UPDATE 의 COALESCE 가 이미 채워진 컬럼은 보존.
+	 * - pump_grp 에 dstrb_id 가 미설정인 경우 해당 컬럼은 영구 null 이므로 skip.
+	 */
+	private void backfillNullSnapshotFields(String nowDateTime) {
+		HashMap<String, Object> qp = new HashMap<>();
+		qp.put("nowDateTime", nowDateTime);
+		qp.put("hoursBack", SNAPSHOT_BACKFILL_HOURS);
+		java.util.List<HashMap<String, Object>> rows = drvnMapper.selectRecentSnapshotsWithNulls(qp);
+		if (rows == null || rows.isEmpty()) return;
+
+		java.util.LinkedHashMap<String, String[]> resTagMap = getSeoulReservoirTagMap();
+		int filled = 0;
+
+		for (HashMap<String, Object> row : rows) {
+			Integer pumpGrp = ((Number) row.get("pump_grp")).intValue();
+			String rgstrTime = (String) row.get("rgstr_time");
+			String prdctTime = (String) row.get("prdct_time");
+
+			HashMap<String, String> ditrbMap = (pumpDstrbIdMap != null) ? pumpDstrbIdMap.get(pumpGrp) : null;
+			String flowDstrbId     = (ditrbMap != null) ? ditrbMap.get("flow")     : null;
+			String pressureDstrbId = (ditrbMap != null) ? ditrbMap.get("pressure") : null;
+
+			// 실측 컬럼들의 매치 기준: 예측 조합이 결정된 시점 (TB_CTR_PUMPYN_RST.MAX RGSTR_TIME ≤ snapshot.rgstrTime).
+			HashMap<String, Object> combParam = new HashMap<>();
+			combParam.put("pump_grp", pumpGrp);
+			combParam.put("rgstr_time", rgstrTime);
+			HashMap<String, Object> prdctCombRow = drvnMapper.selectLatestPredictedComb(combParam);
+			String actlRefTs = (prdctCombRow != null) ? (String) prdctCombRow.get("actl_ref_ts") : null;
+
+			HashMap<String, Object> upsert = new HashMap<>();
+			upsert.put("rgstr_time", rgstrTime);
+			upsert.put("prdct_time", prdctTime);
+			upsert.put("pump_grp",   pumpGrp);
+			// 비측정 컬럼은 null 전달 → COALESCE 로 기존값 보존.
+			upsert.put("prdct_comb", null);
+			upsert.put("actl_comb",  null);
+
+			boolean changed = false;
+
+			// ── 예측 유량 ──
+			if (row.get("prdct_flow") == null && flowDstrbId != null && !flowDstrbId.isEmpty()) {
+				HashMap<String, Object> p = new HashMap<>();
+				p.put("dstrb_id", flowDstrbId);
+				p.put("rgstr_time", rgstrTime);
+				p.put("prdct_time", prdctTime);
+				HashMap<String, Object> r = drvnMapper.selectLatestPredictedFlowTnk(p);
+				Double v = (r != null) ? toDouble(r.get("prdct_flow")) : null;
+				if (v != null) { upsert.put("prdct_flow", v); changed = true;
+					log.info("[snapshot-backfill] grp={} rgstr={} prdct={} field=prdct_flow value={}", pumpGrp, rgstrTime, prdctTime, v);
+				} else upsert.put("prdct_flow", null);
+			} else upsert.put("prdct_flow", null);
+
+			// ── 실측 유량 (actl_ref_ts 기준) ──
+			if (row.get("actl_flow") == null && flowDstrbId != null && !flowDstrbId.isEmpty() && actlRefTs != null) {
+				HashMap<String, Object> p = new HashMap<>();
+				p.put("dstrb_id", flowDstrbId);
+				p.put("pump_grp", pumpGrp);
+				p.put("actl_ref_ts", actlRefTs);
+				HashMap<String, Object> r = drvnMapper.selectLatestActualFlow(p);
+				Double v = (r != null) ? toDouble(r.get("value")) : null;
+				if (v != null) { upsert.put("actl_flow", v); changed = true;
+					log.info("[snapshot-backfill] grp={} rgstr={} refTs={} field=actl_flow value={}", pumpGrp, rgstrTime, actlRefTs, v);
+				} else upsert.put("actl_flow", null);
+			} else upsert.put("actl_flow", null);
+
+			// ── 예측 압력 ──
+			if (row.get("prdct_prsr") == null && pressureDstrbId != null && !pressureDstrbId.isEmpty()) {
+				HashMap<String, Object> p = new HashMap<>();
+				p.put("dstrb_id", pressureDstrbId);
+				p.put("tag",      pressureDstrbId);
+				p.put("rgstr_time", rgstrTime);
+				p.put("prdct_time", prdctTime);
+				HashMap<String, Object> r = drvnMapper.selectLatestPredictedPressureTnk(p);
+				Double v = (r != null) ? toDouble(r.get("prdct_prsr")) : null;
+				if (v != null) { upsert.put("prdct_prsr", v); changed = true;
+					log.info("[snapshot-backfill] grp={} rgstr={} prdct={} field=prdct_prsr value={}", pumpGrp, rgstrTime, prdctTime, v);
+				} else upsert.put("prdct_prsr", null);
+			} else upsert.put("prdct_prsr", null);
+
+			// ── 실측 압력 (actl_ref_ts 기준) ──
+			if (row.get("actl_prsr") == null && pressureDstrbId != null && !pressureDstrbId.isEmpty() && actlRefTs != null) {
+				HashMap<String, Object> p = new HashMap<>();
+				p.put("dstrb_id", pressureDstrbId);
+				p.put("tag",      pressureDstrbId);
+				p.put("actl_ref_ts", actlRefTs);
+				HashMap<String, Object> r = drvnMapper.selectLatestActualPressure(p);
+				Double v = (r != null) ? toDouble(r.get("value")) : null;
+				if (v != null) { upsert.put("actl_prsr", v); changed = true;
+					log.info("[snapshot-backfill] grp={} rgstr={} refTs={} field=actl_prsr value={}", pumpGrp, rgstrTime, actlRefTs, v);
+				} else upsert.put("actl_prsr", null);
+			} else upsert.put("actl_prsr", null);
+
+			// ── 배수지 수위 5+5 ──
+			String[] resKeys   = { "공릉", "북악", "구리", "월계", "월곡" };
+			String[] colSuffix = { "gn",   "ba",   "gr",   "wg",   "wgok" };
+			for (int i = 0; i < resKeys.length; i++) {
+				String prdctKey = "prdct_wl_" + colSuffix[i];
+				String actlKey  = "actl_wl_"  + colSuffix[i];
+				String[] tags = (resTagMap != null) ? resTagMap.get(resKeys[i]) : null;
+
+				// 예측 수위 (snapshot.rgstr_time/prdct_time 정확 매치)
+				if (row.get(prdctKey) == null && tags != null && tags.length > 0) {
+					Double v = fetchPredictedReservoirAvg(resKeys[i], tags, rgstrTime, prdctTime);
+					if (v != null) { upsert.put(prdctKey, v); changed = true;
+						log.info("[snapshot-backfill] grp={} rgstr={} prdct={} field={} value={}", pumpGrp, rgstrTime, prdctTime, prdctKey, v);
+					} else upsert.put(prdctKey, null);
+				} else upsert.put(prdctKey, null);
+
+				// 실측 수위 (actl_ref_ts 기준)
+				if (row.get(actlKey) == null && tags != null && tags.length > 0) {
+					Double v = fetchActualReservoirAvg(resKeys[i], tags, actlRefTs);
+					if (v != null) { upsert.put(actlKey, v); changed = true;
+						log.info("[snapshot-backfill] grp={} rgstr={} refTs={} field={} value={}", pumpGrp, rgstrTime, actlRefTs, actlKey, v);
+					} else upsert.put(actlKey, null);
+				} else upsert.put(actlKey, null);
+			}
+
+			if (changed) {
+				try {
+					drvnMapper.insertFlowCombSnapshot(upsert);
+					filled++;
+					// 스냅샷이 갱신된 행은 정확도도 동기 재계산. upsert(신규 비-null) 를 row(기존값) 위에 COALESCE
+					// → ON DUPLICATE KEY UPDATE + COALESCE 후의 실제 DB 상태와 일치하는 값으로 정확도 산출.
+					HashMap<String, Object> merged = new HashMap<>(row);
+					for (Map.Entry<String, Object> me : upsert.entrySet()) {
+						if (me.getValue() != null) merged.put(me.getKey(), me.getValue());
+					}
+					try {
+						computeAndStoreAccuracy(merged);
+					} catch (Exception ae) {
+						log.error("[flow-comb-accuracy] backfill 재계산 실패 grp={} rgstr={}: {}", pumpGrp, rgstrTime, ae.getMessage());
+					}
+				} catch (Exception e) {
+					log.error("[snapshot-backfill] UPSERT 실패 grp={} rgstr={}: {}", pumpGrp, rgstrTime, e.getMessage());
+				}
+			}
+		}
+
+		if (filled > 0) {
+			log.debug("[snapshot-backfill] {} rows updated (scan={} rows, window={}h)",
+					filled, rows.size(), SNAPSHOT_BACKFILL_HOURS);
 		}
 	}
 

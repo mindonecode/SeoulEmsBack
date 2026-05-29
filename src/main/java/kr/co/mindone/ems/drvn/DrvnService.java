@@ -5158,34 +5158,35 @@ public class DrvnService {
 			result.computeIfAbsent(tag, k-> new ArrayList<>()).add(point);
 		}
 
-		// 1-1. 1주일 전 / 2주일 전 같은 요일·시각 실측 (비교 표시용).
-		//      현재 차트가 표시하는 [t-24h ~ now+6h] 전 구간을 weeksAgo 만큼 shift 한 범위로 조회 →
-		//      결과 TS 를 다시 현재 주차로 시프트하여 ${tagname}_W1 / ${tagname}_W2 sibling key 로 push.
+		// 1-1. 1일 전 / 1주 전 같은 시각 실측 (비교 표시용).
+		//      현재 차트가 표시하는 [t-24h ~ now+6h] 전 구간을 daysAgo 만큼 shift 한 범위로 조회 →
+		//      결과 TS 를 다시 현재 시점으로 시프트하여 ${tagname}_W1(1일전) / ${tagname}_W2(1주전) sibling key 로 push.
+		//      (응답 키 _W1/_W2 는 프론트 매핑 호환을 위해 유지 — 의미만 1일전/1주전으로 재정의.)
 		//      예측 구간도 1분 단위 비교 라인으로 채워짐.
-		for (int weeksAgo : new int[]{1, 2}) {
-			LocalDateTime startWk = t0.minusHours(24).minusWeeks(weeksAgo);
-			LocalDateTime endWk = now.plusHours(6).minusWeeks(weeksAgo);
+		for (int daysAgo : new int[]{1, 7}) {
+			LocalDateTime startWk = t0.minusHours(24).minusDays(daysAgo);
+			LocalDateTime endWk = now.plusHours(6).minusDays(daysAgo);
 			HashMap<String, Object> wkParam = new HashMap<>();
 			wkParam.put("tagList", waterLevelTagList);
 			wkParam.put("startDate", fmt.format(startWk));
 			wkParam.put("endDate", fmt.format(endWk));
 			List<HashMap<String, Object>> wkData = drvnMapper.selectWaterLevelByMinuteRange(wkParam);
-			String suffix = "_W" + weeksAgo;
+			String suffix = "_W" + (daysAgo == 1 ? 1 : 2);
 			for (Map<String, Object> row : wkData) {
 				String tag = (String) row.get("TAGNAME");
 				Object tsObj = row.get("TS");
 				if (tag == null || tsObj == null) continue;
 				LocalDateTime shifted = null;
 				if (tsObj instanceof Timestamp) {
-					shifted = ((Timestamp) tsObj).toLocalDateTime().plusWeeks(weeksAgo);
+					shifted = ((Timestamp) tsObj).toLocalDateTime().plusDays(daysAgo);
 				} else if (tsObj instanceof java.util.Date) {
 					shifted = LocalDateTime.ofInstant(((java.util.Date) tsObj).toInstant(),
-							java.time.ZoneId.systemDefault()).plusWeeks(weeksAgo);
+							java.time.ZoneId.systemDefault()).plusDays(daysAgo);
 				} else {
 					try {
 						String raw = tsObj.toString();
 						String trimmed = raw.length() >= 16 ? raw.substring(0, 16) : raw;
-						shifted = LocalDateTime.parse(trimmed, shortFmt).plusWeeks(weeksAgo);
+						shifted = LocalDateTime.parse(trimmed, shortFmt).plusDays(daysAgo);
 					} catch (Exception ignored) {}
 				}
 				if (shifted == null) continue;
@@ -5287,8 +5288,8 @@ public class DrvnService {
 		// 4. 배수지별 활성 수조(≥seoulActiveThreshold) 평균 시리즈.
 		//    화면 "수위 변동" 차트가 배수지당 1개 라인을 표출하기 위해 sibling 키로 push:
 		//      "<배수지>_AVG"            ← raw + 미래예측(isPredict 보존)
-		//      "<배수지>_AVG_W1"         ← 1주 전 비교
-		//      "<배수지>_AVG_W2"         ← 2주 전 비교
+		//      "<배수지>_AVG_W1"         ← 1일 전 비교 (키 이름은 호환 위해 W1 유지)
+		//      "<배수지>_AVG_W2"         ← 1주 전 비교 (키 이름은 호환 위해 W2 유지)
 		//      "<배수지>_AVG_PRDCT_HIST" ← 과거 10분 horizon 예측
 		//    임계 미만 수조는 평균에서 제외. 시점별 활성 수조 0개면 누락(connectNulls 동작).
 		LinkedHashMap<String, String[]> tagMap = drvnConfig.getSeoulReservoirTagMap();
@@ -5423,20 +5424,27 @@ public class DrvnService {
 	 *
 	 * @param pumpGrp 펌프 그룹 (서울 송수펌프는 1)
 	 * @param daysAgo 기준 시각을 현재로부터 며칠 전으로 이동. 0=현재, 1=1일전, 7=1주전.
-	 *                윈도 = [now - daysAgo*24h - 24h, now - daysAgo*24h]
+	 *                윈도 = daysAgo==0 : [now-24h, now]                                (forecast가 미래 6h 채움)
+	 *                       daysAgo>0  : [now - daysAgo*24h - 24h, now - daysAgo*24h + 6h]
+	 *                                    (차트 우측 미래 6h 영역도 이미 과거이므로 실측 raw bucket으로 확보)
 	 * @return Map {
-	 *   buckets : 144개 [startMin(0~1440), endMin, value] (0분 = 윈도 시작, 1440분 = 윈도 끝),
+	 *   buckets : 10분 단위 [startMin, endMin, value]. daysAgo==0 일 때 144개(=24h),
+	 *             daysAgo>0 일 때 180개(=30h, 마지막 36개가 차트의 미래 6h 영역 채움),
 	 *   forecast: daysAgo==0 일 때만 5개 horizon segment [{horizonMin, prdctTime, value, startMin, endMin}]
-	 *             (1일전·1주전 응답에는 빈 배열)
+	 *             (1일전·1주전 응답에는 빈 배열 — 그 시간대는 buckets 의 미래 영역 36개로 이미 표시됨)
 	 * }
 	 */
 	public HashMap<String,Object> selectPumpRunCountHistory(int pumpGrp, int daysAgo){
 		final int totalMinutes = 1440;
 		final int bucketMinutes = 10;
-		final int bucketCount = totalMinutes / bucketMinutes;
+		// 1일전/1주전(daysAgo>0)은 차트의 미래 6h 영역도 이미 과거 = 실측 raw 존재 → 30h 까지 bucket 확장.
+		// 현재(daysAgo==0)는 미래 6h 영역은 forecast 가 채우므로 확장 불필요.
+		final int futureMinutes = (daysAgo > 0) ? 360 : 0;
+		final int bucketCount = (totalMinutes + futureMinutes) / bucketMinutes;
 
-		long endMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
-		long startMs = endMs - (long) totalMinutes * 60_000L;
+		long anchorMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
+		long startMs = anchorMs - (long) totalMinutes * 60_000L;
+		long endMs = anchorMs + (long) futureMinutes * 60_000L;
 		Timestamp startTs = new Timestamp(startMs);
 		Timestamp endTs = new Timestamp(endMs);
 
@@ -5452,9 +5460,15 @@ public class DrvnService {
 		// 시드: 윈도 시작 직전 각 펌프의 마지막 VALUE 로 currentState 초기화.
 		// PMB 가 상태 변화 위주로 기록되므로 시드 없이는 daysAgo>0 윈도 초입 버킷이
 		// 모두 OFF(0대) 로 잘못 표시될 수 있음.
+		// seedStartDate: startDate 이전 전체 이력 풀스캔(TB_RAWDATA)을 막기 위한 조회 하한.
+		// 펌프 ON/OFF 는 변동이 잦아 7일이면 직전 상태를 안정적으로 포착. 이 구간에 기록이 없으면
+		// 시드는 비고, currentState 는 0(OFF)로 시작하는 기존 폴백 로직을 그대로 따른다.
+		final long SEED_LOOKBACK_MS = 7L * 86_400_000L;
+		Timestamp seedStartTs = new Timestamp(startMs - SEED_LOOKBACK_MS);
 		HashMap<String, Object> seedParam = new HashMap<>();
 		seedParam.put("PUMP_GRP", pumpGrp);
 		seedParam.put("startDate", startTs);
+		seedParam.put("seedStartDate", seedStartTs);
 		List<HashMap<String, Object>> seedList = drvnMapper.selectPumpLastStateBeforeGrp(seedParam);
 
 		// rawList 는 SQL 의 ORDER BY rd.TS 로 시간 오름차순 정렬됨.
@@ -5806,21 +5820,22 @@ public class DrvnService {
 		mergeTagValueRows(tsTagValue, rawRows);
 		mergeTagValueRows(tsTagValue, prdctRows);
 
-		// 2-0. 유량(flow) 1주 전 / 2주 전 같은 요일·시각 실측 (W1/W2 비교 라인용, flow 만).
-		//      현재 차트가 표시하는 [t-24h ~ t+6h] 전 구간을 weeksAgo 만큼 shift 한 범위로 조회 →
-		//      결과 TS 를 다시 현재 주차로 시프트하여 row.flowW1 / row.flowW2 필드로 부착.
+		// 2-0. 유량(flow) 1일 전 / 1주 전 같은 시각 실측 (W1/W2 비교 라인용, flow 만).
+		//      현재 차트가 표시하는 [t-24h ~ t+6h] 전 구간을 daysAgo 만큼 shift 한 범위로 조회 →
+		//      결과 TS 를 다시 현재 시점으로 시프트하여 row.flowW1(1일전) / row.flowW2(1주전) 필드로 부착.
+		//      (필드명 flowW1/flowW2 는 프론트 매핑 호환을 위해 유지 — 의미만 1일전/1주전으로 재정의.)
 		Map<String, Double> flowW1ByTs = new HashMap<>();
 		Map<String, Double> flowW2ByTs = new HashMap<>();
-		for (int weeksAgo : new int[]{1, 2}) {
-			LocalDateTime startWk = now.minusHours(24).minusWeeks(weeksAgo);
-			LocalDateTime endWk = now.plusHours(6).minusWeeks(weeksAgo);
+		for (int daysAgo : new int[]{1, 7}) {
+			LocalDateTime startWk = now.minusHours(24).minusDays(daysAgo);
+			LocalDateTime endWk = now.plusHours(6).minusDays(daysAgo);
 			HashMap<String, Object> wkParam = new HashMap<>();
 			wkParam.put("tagList", Collections.singletonList(flowTag));
 			wkParam.put("startDate", fmt.format(startWk));
 			wkParam.put("endDate", fmt.format(endWk));
 			List<HashMap<String, Object>> wkRows = drvnMapper.selectMultiTagRawRangeMinutely(wkParam);
 			if (wkRows == null) continue;
-			Map<String, Double> sink = (weeksAgo == 1) ? flowW1ByTs : flowW2ByTs;
+			Map<String, Double> sink = (daysAgo == 1) ? flowW1ByTs : flowW2ByTs;
 			for (HashMap<String, Object> r : wkRows) {
 				Object tagObj = r.get("tag");
 				Object tsObj = r.get("ts");
@@ -5831,7 +5846,7 @@ public class DrvnService {
 				try {
 					String raw = tsObj.toString();
 					String trimmed = raw.length() >= 16 ? raw.substring(0, 16) : raw;
-					shifted = LocalDateTime.parse(trimmed, shortFmt).plusWeeks(weeksAgo);
+					shifted = LocalDateTime.parse(trimmed, shortFmt).plusDays(daysAgo);
 				} catch (Exception ex) { continue; }
 				try {
 					sink.put(shifted.format(shortFmt), Double.parseDouble(valObj.toString()));
@@ -5980,8 +5995,8 @@ public class DrvnService {
 			row.put("deltaHour", deltaH);
 			row.put("isPredict", cur.isAfter(now));   // now(분 단위) 이후가 예측. 실측 1분 단위 그래프 표시 보장.
 			row.put("flowPrdct", flowPrdctHistByTs.get(curKey));   // 과거 10분 경계의 horizon 예측값 (그 외 null). 미래는 flow 가 곧 예측.
-			row.put("flowW1", flowW1ByTs.get(curKey));             // 1주 전 같은 요일·시각 실측 (W1 비교 라인).
-			row.put("flowW2", flowW2ByTs.get(curKey));             // 2주 전 같은 요일·시각 실측 (W2 비교 라인).
+			row.put("flowW1", flowW1ByTs.get(curKey));             // 1일 전 같은 시각 실측 (W1 비교 라인 — 키 이름 호환 유지).
+			row.put("flowW2", flowW2ByTs.get(curKey));             // 1주 전 같은 시각 실측 (W2 비교 라인 — 키 이름 호환 유지).
 			row.put("runningPumps", new ArrayList<>(running));
 			result.add(row);
 		}
@@ -6138,6 +6153,153 @@ public class DrvnService {
 		result.put("dayOfWeek", week);
 		result.put("isHoliday", isHoliday);
 		return result;
+	}
+
+	// =====================================================================
+	// [Seoul/Dev] 스냅샷 + 정확도 기간별 엑셀 다운로드 (통합 단일 시트)
+	//   - 항목별로 [예측, 실측, 정확도(%), 오차율(%)] 4컬럼 묶음 레이아웃.
+	//   - 수위(WL_*) 는 SQL 단에서 ROUND(2) → 소수 둘째 자리 표시.
+	//   - 컨트롤러(/dr/snapshot/download)에서 from/to(LocalDateTime) 받아 호출.
+	// =====================================================================
+
+	/**
+	 * 통합 시트 컬럼 키 — selectSnapshotsWithAccuracyByRange 의 컬럼 alias 와 매칭.
+	 * 펌프계통 다음에 조합 블록을 먼저 배치(가장 핵심 지표) → 유량/압력/수위 → 계산시각.
+	 */
+	private static final String[] COMBINED_KEYS = {
+			"rgstr_time", "prdct_time", "pump_grp",
+			// 조합 (펌프계통 직후로 이동)
+			"prdct_comb", "actl_comb", "acc_comb", "err_comb",
+			// 유량
+			"prdct_flow", "actl_flow", "acc_flow", "err_flow",
+			// 압력
+			"prdct_prsr", "actl_prsr", "acc_prsr", "err_prsr",
+			// 수위 5종 (공릉/북악/구리/월계/월곡)
+			"prdct_wl_gn",   "actl_wl_gn",   "acc_wl_gn",   "err_wl_gn",
+			"prdct_wl_ba",   "actl_wl_ba",   "acc_wl_ba",   "err_wl_ba",
+			"prdct_wl_gr",   "actl_wl_gr",   "acc_wl_gr",   "err_wl_gr",
+			"prdct_wl_wg",   "actl_wl_wg",   "acc_wl_wg",   "err_wl_wg",
+			"prdct_wl_wgok", "actl_wl_wgok", "acc_wl_wgok", "err_wl_wgok",
+			// 메타
+			"calc_time"
+	};
+	private static final String[] COMBINED_HEADERS = {
+			"등록시각", "예측대상시각", "펌프계통",
+			"조합 예측", "조합 실측", "조합 정확도(%)", "조합 오차율(%)",
+			"유량 예측", "유량 실측", "유량 정확도(%)", "유량 오차율(%)",
+			"압력 예측", "압력 실측", "압력 정확도(%)", "압력 오차율(%)",
+			"공릉 예측수위", "공릉 실측수위", "공릉 정확도(%)", "공릉 오차율(%)",
+			"북악 예측수위", "북악 실측수위", "북악 정확도(%)", "북악 오차율(%)",
+			"구리 예측수위", "구리 실측수위", "구리 정확도(%)", "구리 오차율(%)",
+			"월계 예측수위", "월계 실측수위", "월계 정확도(%)", "월계 오차율(%)",
+			"월곡 예측수위", "월곡 실측수위", "월곡 정확도(%)", "월곡 오차율(%)",
+			"계산시각"
+	};
+
+	/**
+	 * 헤더 셀별 배경색 (컬럼 인덱스와 길이 일치). 메트릭 블록별로 색을 달리해 가독성 향상.
+	 *   - 식별자(시각/펌프계통): 옅은 회색
+	 *   - 조합:   PALE_BLUE          (펌프계통 직후, 가장 핵심)
+	 *   - 유량:   LIGHT_TURQUOISE
+	 *   - 압력:   LIGHT_GREEN
+	 *   - 수위 5종: LIGHT_YELLOW
+	 *   - 메타(계산시각): GREY_25_PERCENT
+	 */
+	private static final short[] COMBINED_HEADER_COLORS = {
+			IndexedColors.GREY_25_PERCENT.getIndex(), IndexedColors.GREY_25_PERCENT.getIndex(), IndexedColors.GREY_25_PERCENT.getIndex(),
+			IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(),
+			IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(),
+			IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.GREY_25_PERCENT.getIndex()
+	};
+
+	/**
+	 * 스냅샷 + 정확도 기간별 엑셀 워크북 생성 (단일 시트 "snapshot_accuracy").
+	 * 각 측정 항목을 [예측 / 실측 / 정확도(%) / 오차율(%)] 4컬럼 묶음으로 배치.
+	 * @param from 시작 (inclusive)
+	 * @param to   종료 (inclusive)
+	 */
+	public SXSSFWorkbook createSnapshotAccuracyExcel(LocalDateTime from, LocalDateTime to) {
+		DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("from", from.format(f));
+		param.put("to",   to.format(f));
+
+		List<HashMap<String, Object>> rows = drvnMapper.selectSnapshotsWithAccuracyByRange(param);
+
+		SXSSFWorkbook workbook = new SXSSFWorkbook();
+		writeSnapshotAccuracySheet(workbook, "snapshot_accuracy", COMBINED_HEADERS, COMBINED_KEYS, COMBINED_HEADER_COLORS, rows);
+		return workbook;
+	}
+
+	/**
+	 * 단일 시트 작성: 1행 헤더(굵게/가운데/배경색) + 데이터 행.
+	 * 색 인덱스별로 CellStyle 을 메모이즈해 워크북 스타일 수를 최소화.
+	 * null 값 → 빈칸, Number → 숫자셀, 그 외 → 문자셀.
+	 */
+	private void writeSnapshotAccuracySheet(SXSSFWorkbook workbook, String sheetName,
+											String[] headers, String[] keys, short[] headerColors,
+											List<HashMap<String, Object>> rows) {
+		Sheet sheet = workbook.createSheet(sheetName);
+		((org.apache.poi.xssf.streaming.SXSSFSheet) sheet).trackAllColumnsForAutoSizing();
+
+		// 헤더 폰트 (굵게).
+		Font headerFont = workbook.createFont();
+		headerFont.setBold(true);
+
+		// 색상 인덱스 → CellStyle 매핑 (중복 색은 재사용).
+		HashMap<Short, CellStyle> styleByColor = new HashMap<>();
+
+		Row header = sheet.createRow(0);
+		for (int c = 0; c < headers.length; c++) {
+			short color = (headerColors != null && c < headerColors.length)
+					? headerColors[c]
+					: IndexedColors.GREY_25_PERCENT.getIndex();
+			CellStyle hs = styleByColor.get(color);
+			if (hs == null) {
+				hs = workbook.createCellStyle();
+				hs.setFont(headerFont);
+				hs.setAlignment(HorizontalAlignment.CENTER);
+				hs.setVerticalAlignment(VerticalAlignment.CENTER);
+				hs.setFillForegroundColor(color);
+				hs.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+				hs.setBorderTop(BorderStyle.THIN);
+				hs.setBorderBottom(BorderStyle.THIN);
+				hs.setBorderLeft(BorderStyle.THIN);
+				hs.setBorderRight(BorderStyle.THIN);
+				styleByColor.put(color, hs);
+			}
+			Cell cell = header.createCell(c);
+			cell.setCellValue(headers[c]);
+			cell.setCellStyle(hs);
+		}
+
+		int r = 1;
+		if (rows != null) {
+			for (HashMap<String, Object> row : rows) {
+				Row dataRow = sheet.createRow(r++);
+				for (int c = 0; c < keys.length; c++) {
+					Cell cell = dataRow.createCell(c);
+					Object v = row.get(keys[c]);
+					if (v == null) {
+						cell.setCellValue("");
+					} else if (v instanceof Number) {
+						cell.setCellValue(((Number) v).doubleValue());
+					} else {
+						cell.setCellValue(v.toString());
+					}
+				}
+			}
+		}
+
+		for (int c = 0; c < headers.length; c++) {
+			sheet.autoSizeColumn(c);
+		}
 	}
 
 }

@@ -19,6 +19,13 @@ import java.util.List;
 public interface EnerSpendMapper {
 
 	/**
+	 * 선택된 시설의 설비 목록을 조회하는 메서드
+	 * @param map 조회에 필요한 파라미터
+	 * @return 선택된 시설의 설비 리스트
+	 */
+	List<HashMap<String, Object>> selectFacUseSubList(HashMap<String, Object> map);
+
+	/**
 	 * 시설 순시 시간대별 값을 조회하는 메서드
 	 * @param map 조회에 필요한 파라미터
 	 * @return 시설 순시 시간대별 값 리스트

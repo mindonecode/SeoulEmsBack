@@ -343,16 +343,15 @@ public class AiController extends BaseController {
 		double dayTvalue = 0.0, monthTvalue = 0.0, yearTvalue = 0.0;
 		double dayTrate = 0.0, monthTrate = 0.0, yearTrate = 0.0;
 
-		//map.put("range","dayAgo");
-		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
 		returnMap.put("range", "day");
 		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
-		//map.put("range","week");
-		//tempPwrSumList.addAll(aiService.selectPwrSumList(map));
 		returnMap.put("range", "month");
 		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
 		returnMap.put("range", "year");
 		tempPwrSumList.addAll(aiService.selectPwrSumList(returnMap));
+
+		Double baseCostVal = aiService.selectBaseCost();
+		double baseCost = baseCostVal != null ? baseCostVal : 0.0;
 
 		for (HashMap < String, Object > item: tempPwrSumList) {
 			if (item.get("range").equals("day")) {
@@ -381,7 +380,7 @@ public class AiController extends BaseController {
 		HashMap < String, Object > weekItem = new HashMap < > ();
 		weekItem.put("value", Double.parseDouble(df.format(monthTvalue)));
 		weekItem.put("rate", 0);
-		weekItem.put("cost", Double.parseDouble(df.format(monthTcost)));
+		weekItem.put("cost", Double.parseDouble(df.format(monthTcost)) + baseCost);
 		weekItem.put("timezone", "T");
 		weekItem.put("range", "month");
 		tempPwrSumList.add(weekItem);
@@ -389,7 +388,7 @@ public class AiController extends BaseController {
 		HashMap < String, Object > yearItem = new HashMap < > ();
 		yearItem.put("value", Double.parseDouble(df.format(yearTvalue)));
 		yearItem.put("rate", 0);
-		yearItem.put("cost", Double.parseDouble(df.format(yearTcost)));
+		yearItem.put("cost", Double.parseDouble(df.format(yearTcost)) + baseCost);
 		yearItem.put("timezone", "T");
 		yearItem.put("range", "year");
 		tempPwrSumList.add(yearItem);

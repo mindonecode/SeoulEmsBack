@@ -30,6 +30,15 @@ public class EnerSpendService {
 	private CommonMapper commonMapper;
 
 	/**
+	 * 선택된 시설의 설비 목록 반환
+	 * @param map 조회에 필요한 파라미터
+	 * @return 선택된 시설의 설비 목록 반환
+	 */
+	List<HashMap<String, Object>> selectFacUseSubList(HashMap<String, Object> map) {
+		return enerSpendMapper.selectFacUseSubList(map);
+	}
+
+	/**
 	 * 시설의 전력 값 반환
 	 * @param map 조회에 필요한 파라미터
 	 * @return 시설의 전력 값 반환
@@ -128,7 +137,9 @@ public class EnerSpendService {
 	 * @param map 조회에 필요한 파라미터
 	 * @return 시설 별 전력 순시
 	 */
-	List<HashMap<String, Object>> selectFacSunsi(HashMap<String, Object> map) {	return enerSpendMapper.selectFacSunsi(map);	}
+	List<HashMap<String, Object>> selectFacSunsi(HashMap<String, Object> map) {	
+		return enerSpendMapper.selectFacSunsi(map);	
+	}
 
 	/**
 	 * 정수장 총 전력 순시 데이터
@@ -177,6 +188,7 @@ public class EnerSpendService {
 	 * @return 요금제정보에 따른 전력요금
 	 */
 	List<HashMap<String, Object>> selectRateInfo(HashMap<String, Object> map) {
+		//String mnth = LocalDate.now().format(DateTimeFormatter.ofPattern("MM"));
 		return enerSpendMapper.selectRateInfo(map);
 	}
 
