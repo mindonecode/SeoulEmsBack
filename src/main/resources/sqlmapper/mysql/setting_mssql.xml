@@ -765,21 +765,29 @@
 	</select>
 
 	<insert id="insertPeakGoal" parameterType="hashMap">
-		update
-			TB_PTR_CTR_INF
-		set
-			value = #{peakValue}
-		where
-			tag = (select TAG from TB_WPP_TAG_CODE WHERE func_typ = 'selectPeakGoal')
+		INSERT INTO tb_monthly_peak
+			(
+				YM
+				,PEAK_VALUE
+				,UNIT	
+			)
+		VALUES
+			(
+				date_format(NOW(), '%Y%m')
+				,#{peakValue}
+				,'kW'
+			)
+		ON DUPLICATE KEY UPDATE
+			PEAK_VALUE = #{peakValue}
 	</insert>
 
 	<select id="selectPeakGoal" resultType="hashMap">
-		select
-			value
-		from
-			TB_PTR_CTR_INF
-		where
-			tag = (select TAG from TB_WPP_TAG_CODE WHERE func_typ = 'selectPeakGoal')
+		SELECT
+			PEAK_VALUE AS value
+		FROM
+			tb_monthly_peak
+		WHERE
+			YM = date_format(NOW(), '%Y%m')
 	</select>
 
 	<select id="selectMonthSeason" resultType="hashMap">

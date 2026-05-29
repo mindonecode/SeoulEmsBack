@@ -668,4 +668,71 @@
 			ts DESC
 		LIMIT 1
 	</select>
+
+	<select id="selectPeakTagList" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			PWI_TAG
+		FROM
+			TB_PEAK_TAG_INF
+		WHERE
+			CLSFC = #{clsfc}
+			AND IS_ALL = #{is_all}
+			AND MNTR_YN = #{mntr_yn}
+			AND PWI_TAG IS NOT NULL
+			AND PWI_TAG != ''
+		ORDER BY
+			PWI_TAG
+	</select>
+
+	<select id="selectMonthlyPeak" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			COALESCE(MAX(PEAK_VALUE), 10000) AS goalPeak
+		FROM
+			TB_MONTHLY_PEAK
+		WHERE
+			YM = #{ym}
+	</select>
+
+	<select id="selectPeakTagUnitValue" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			MAX(T1.VALUE) * T2.PWI_UNIT_VALUE AS pwiUnitValue
+		FROM
+			tb_rawdata T1
+			JOIN tb_peak_tag_inf T2 ON T1.TAGNAME = T2.PWI_TAG
+		WHERE
+			T1.TAGNAME = #{pwi_tag} 
+			AND T1.TS &gt;= DATE_SUB(NOW() , INTERVAL 1 YEAR)
+		LIMIT 1;
+	</select>
+
+	<select id="selectFuturePeakPredictData" resultType="hashMap">
+		WITH ranked_prediction AS (
+			SELECT
+				ANLY_TIME,
+				CNFRM_TIME,
+				PRDCT_PWR,
+				PEAK_YN,
+				TIMESTAMPDIFF(MINUTE, NOW(), ANLY_TIME) AS remainMinutes,
+				ROW_NUMBER() OVER (
+					PARTITION BY ANLY_TIME
+					ORDER BY CNFRM_TIME DESC
+				) AS rn
+			FROM
+				TB_PEAK_PWR_PRDCT_RST
+			WHERE
+				ANLY_TIME &gt; NOW()
+		)
+		SELECT
+			DATE_FORMAT(ANLY_TIME, '%Y-%m-%d %H:%i') AS anlyTime,
+			DATE_FORMAT(CNFRM_TIME, '%Y-%m-%d %H:%i') AS cnfrmTime,
+			ROUND(PRDCT_PWR, 2) AS prdctPwr,
+			PEAK_YN AS peakYn,
+			remainMinutes
+		FROM
+			ranked_prediction
+		WHERE
+			rn = 1
+		ORDER BY
+			ANLY_TIME ASC
+	</select>
 </mapper>

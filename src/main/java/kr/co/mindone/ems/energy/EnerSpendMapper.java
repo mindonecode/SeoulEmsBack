@@ -144,4 +144,26 @@ public interface EnerSpendMapper {
 	 * @return 총 전력 사용량
 	 */
 	double selectAllPwq(HashMap<String, Object> map);
+	/**
+	 * 전력 피크 분석에 사용할 피크 태그 목록을 조회합니다.
+	 * @param map 조회 조건
+	 * @return 피크 태그 목록
+	 */
+	List<HashMap<String, Object>> selectPeakTagList(HashMap<String, Object> map);
+
+	/**
+	 * 지정 월의 목표 피크 전력을 조회합니다.
+	 * @param map 조회 조건
+	 * @return 목표 피크 전력
+	 */
+	HashMap<String, Object> selectMonthlyPeak(HashMap<String, Object> map);
+
+	/**
+	 * 지정 태그의 PWI 보정 계수를 조회합니다.
+	 * @param map 조회 조건
+	 * @return PWI 보정 계수
+	 */
+	HashMap<String, Object> selectPeakTagUnitValue(HashMap<String, Object> map);
+
+	List<HashMap<String, Object>> selectFuturePeakPredictData();
 }
