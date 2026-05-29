@@ -357,6 +357,15 @@ public interface DrvnMapper {
 	Double selectRawData(HashMap<String, Object> rawParam);
 
 	/**
+	 * [Seoul/Dev] 여러 태그 × 시간 범위 raw 데이터를 단일 쿼리로 조회.
+	 * 행 형식: {tagname, ts("yyyy-MM-dd HH:mm:ss"), value}. TAGNAME, TS DESC 정렬.
+	 *
+	 * @param param  tags(List&lt;String&gt;), startDateTime(String), endDateTime(String)
+	 * @return       TB_RAWDATA 행 리스트
+	 */
+	List<HashMap<String, Object>> selectRawDataRangeForTags(HashMap<String, Object> param);
+
+	/**
 	 * 운문 인버터 펌프 주파수 확인 메서드
 	 * @param pumpMap 조회할 펌프 맵
 	 * @return 펌프 주파수 데이터를 포함한 집합을 반환

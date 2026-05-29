@@ -5688,17 +5688,19 @@ public class DrvnConfig {
 	 */
 	private boolean isStationReachableSinlimStyle(String[] tags, double target,
 	                                              LocalDateTime dateTime, int nowScore, int optMinute) {
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		// backshift 0,5,...,60 + 그 prev(=backshift+5) 까지 → 0,5,...,65 (총 14개 슬롯)
+		int[] slots = new int[14];
+		for (int i = 0; i < 14; i++) slots[i] = i * 5;
+		Map<Integer, double[]> avg = precomputeActiveAvgSlots(tags, dateTime, slots, seoulActiveThreshold);
+
 		double curNow  = 0.0;
 		double diff    = 0.0;
 		int curScore   = nowScore;
 		boolean found  = false;
 		final int maxBack = 60;
 		for (int backShift = 0; backShift <= maxBack; backShift += 5) {
-			LocalDateTime nowT  = dateTime.minusMinutes(backShift);
-			LocalDateTime prevT = dateTime.minusMinutes(backShift + 5);
-			double[] n = avgActiveSeoulWaterLevel(tags, nowT.format(formatter),  seoulActiveThreshold);
-			double[] p = avgActiveSeoulWaterLevel(tags, prevT.format(formatter), seoulActiveThreshold);
+			double[] n = avg.getOrDefault(backShift,     new double[]{0.0, 0});
+			double[] p = avg.getOrDefault(backShift + 5, new double[]{0.0, 0});
 			if (n[1] == 0 || p[1] == 0) {
 				curScore -= 5;
 				continue;
@@ -5741,17 +5743,23 @@ public class DrvnConfig {
 	 * @return double[3] = {22시 예상수위(NaN=탐색실패), ratePerHour(m/h, 실패시 0), 채택 stepMin(실패시 0)}
 	 */
 	private double[] predict22LevelSeoul(String[] tags, double curLevel, LocalDateTime dateTime) {
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		// stepMin ∈ {5,10,...,60} + slot=0(now) → 0,5,...,60 (총 13개 슬롯)
+		int[] slots = new int[13];
+		for (int i = 0; i < 13; i++) slots[i] = i * 5;
+		Map<Integer, double[]> avg = precomputeActiveAvgSlots(tags, dateTime, slots, seoulActiveThreshold);
+
 		final int maxBack = 60;
+		// (개선 ③) 'n'(현재 활성평균)은 루프 안에서 변하지 않으므로 1회만 산출
+		double[] n = avg.getOrDefault(0, new double[]{0.0, 0});
+		if (n[1] == 0) {
+			return new double[]{Double.NaN, 0.0, 0};        // 현재 활성 0개 → 어떤 step 도 무의미
+		}
 		double rate = 0.0;
 		int stepUsed = 0;
 		boolean found = false;
 		for (int stepMin = 5; stepMin <= maxBack; stepMin += 5) {
-			LocalDateTime nowT  = dateTime;
-			LocalDateTime prevT = dateTime.minusMinutes(stepMin);
-			double[] n = avgActiveSeoulWaterLevel(tags, nowT.format(formatter),  seoulActiveThreshold);
-			double[] p = avgActiveSeoulWaterLevel(tags, prevT.format(formatter), seoulActiveThreshold);
-			if (n[1] == 0 || p[1] == 0) continue;          // 활성 평균 비정상 → 다음 step
+			double[] p = avg.getOrDefault(stepMin, new double[]{0.0, 0});
+			if (p[1] == 0) continue;                        // 과거 활성평균 비정상 → 다음 step
 			double delta = n[0] - p[0];
 			if (Math.abs(delta) <= 1e-9) continue;          // 변화 없음 → 다음 step
 			rate = delta / (double) stepMin * 60.0;         // m/h
@@ -5799,6 +5807,96 @@ public class DrvnConfig {
 		}
 		double avg = count > 0 ? sum / count : 0.0;
 		return new double[]{avg, count};
+	}
+
+	/**
+	 * [Seoul/Dev · 개선 ②] 여러 tag × 여러 slot 의 활성 평균을 단일 SQL 로 산출.
+	 *
+	 * 기존: avgActiveSeoulWaterLevel() 를 slot×tag 회 호출 (N+1 패턴, 최대 13 × 6 = 78 DB call).
+	 * 개선: drvnMapper.selectRawDataRangeForTags() 단일 호출로 raw row 들을 가져온 뒤
+	 *      자바에서 slot 별 활성 평균을 산출 (DB call 1 회).
+	 *
+	 * 각 slot 의 활성값은 (slot - 10min, slot] 윈도우에서 tag 별로 가장 최신 TS 의 row 1건을 채택.
+	 * (기존 selectRawData 의 10 분 lookback 의미를 그대로 유지하기 위함)
+	 *
+	 * @param tags        수위 태그 배열 (공릉 또는 북악)
+	 * @param baseTime    기준 시각 (= slot 0)
+	 * @param backshifts  baseTime 기준 분 단위 backshift 들 (예: {0,5,10,...,65})
+	 * @param threshold   활성 판정 임계 (m)
+	 * @return Map&lt;backshift, double[2]{avg, count}&gt;. tag/슬롯 없으면 {0.0, 0}.
+	 */
+	private Map<Integer, double[]> precomputeActiveAvgSlots(
+			String[] tags, LocalDateTime baseTime, int[] backshifts, double threshold) {
+		Map<Integer, double[]> result = new HashMap<>();
+		if (backshifts == null || backshifts.length == 0) return result;
+		if (tags == null || tags.length == 0) {
+			for (int b : backshifts) result.put(b, new double[]{0.0, 0});
+			return result;
+		}
+
+		DateTimeFormatter tsFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+		int maxBack = 0;
+		for (int b : backshifts) if (b > maxBack) maxBack = b;
+		LocalDateTime endTime   = baseTime;
+		LocalDateTime startTime = baseTime.minusMinutes(maxBack);
+
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("tags", Arrays.asList(tags));
+		param.put("startDateTime", startTime.format(tsFmt));
+		param.put("endDateTime",   endTime.format(tsFmt));
+
+		List<HashMap<String, Object>> rows;
+		try {
+			rows = drvnMapper.selectRawDataRangeForTags(param);
+		} catch (Exception e) {
+			rows = Collections.emptyList();
+		}
+
+		// tag → (TS DESC 순) row 리스트
+		Map<String, List<HashMap<String, Object>>> byTag = new HashMap<>();
+		if (rows != null) {
+			for (HashMap<String, Object> row : rows) {
+				if (row == null) continue;
+				Object tnObj = row.get("tagname");
+				if (tnObj == null) continue;
+				String tagname = String.valueOf(tnObj);
+				byTag.computeIfAbsent(tagname, k -> new ArrayList<>()).add(row);
+			}
+		}
+
+		// slot 별 활성 평균 산출
+		for (int back : backshifts) {
+			LocalDateTime slot    = baseTime.minusMinutes(back);
+			LocalDateTime slotMin = slot.minusMinutes(10);   // 기존 selectRawData 의 10분 lookback 호환
+			double sum = 0.0;
+			int    count = 0;
+			for (String tag : tags) {
+				List<HashMap<String, Object>> tagRows = byTag.get(tag);
+				if (tagRows == null || tagRows.isEmpty()) continue;
+				Double v = null;
+				for (HashMap<String, Object> row : tagRows) {
+					Object tsObj = row.get("ts");
+					if (tsObj == null) continue;
+					LocalDateTime ts;
+					try { ts = LocalDateTime.parse(String.valueOf(tsObj), tsFmt); }
+					catch (Exception e) { continue; }
+					if (!ts.isAfter(slot) && !ts.isBefore(slotMin)) {
+						Object val = row.get("value");
+						if (val instanceof Number) {
+							v = ((Number) val).doubleValue();
+						}
+						break;   // tagRows 가 TS DESC 정렬이므로 첫 매치 = 가장 최신
+					}
+				}
+				if (v != null && v >= threshold) {
+					sum += v;
+					count++;
+				}
+			}
+			result.put(back, new double[]{count > 0 ? sum / count : 0.0, count});
+		}
+		return result;
 	}
 
 	/**
