@@ -588,6 +588,36 @@ public class DrvnController extends BaseController {
 		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
 	}
 
+	/**
+	 * [GET] 스냅샷 + 정확도 기간별 엑셀 다운로드.
+	 * - 1개 xlsx 안에 2개 시트("snapshot", "accuracy") 로 구간 [from, to] 의 모든 행을 내보낸다.
+	 * - 입력 포맷: fillRange 와 동일 ("yyyy-MM-ddTHH:mm[:ss]" 또는 "yyyy-MM-dd HH:mm[:ss]").
+	 * - 프론트 버튼 연동: from/to 만 쿼리로 붙여 같은 URL 호출.
+	 * @param from 시작 (inclusive)
+	 * @param to   종료 (inclusive)
+	 */
+	@GetMapping("/snapshot/download")
+	public void downloadSnapshotAccuracyExcel(HttpServletResponse response,
+											  @RequestParam("from") String from,
+											  @RequestParam("to") String to) throws IOException {
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		if (fromDt.isAfter(toDt)) {
+			throw new IllegalArgumentException("from must be <= to");
+		}
+
+		DateTimeFormatter fileFmt = DateTimeFormatter.ofPattern("yyyyMMddHHmm");
+		String fileName = "예측 정확도" + fromDt.format(fileFmt) + "_" + toDt.format(fileFmt) + ".xlsx";
+		String encodedFileName = URLEncoder.encode(fileName, StandardCharsets.UTF_8).replace("+", "%20");
+
+		response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+		response.setHeader("Content-Disposition", "attachment; filename=\"" + encodedFileName + "\"; filename*=UTF-8''" + encodedFileName);
+
+		try (SXSSFWorkbook workbook = drvnService.createSnapshotAccuracyExcel(fromDt, toDt)) {
+			workbook.write(response.getOutputStream());
+		}
+	}
+
 	/** "yyyy-MM-dd HH:mm[:ss]" 또는 "yyyy-MM-ddTHH:mm[:ss]" 모두 허용 (URL 직접 입력 호환). */
 	private LocalDateTime parseSnapshotRangeDateTime(String s, String field) {
 		if (s == null || s.trim().isEmpty()) {

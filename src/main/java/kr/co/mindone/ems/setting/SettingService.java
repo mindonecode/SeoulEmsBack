@@ -497,7 +497,6 @@ public class SettingService {
      * @param params 삽입할 피크 목표 정보
      */
     void insertPeakGoal(Map<String, Object> params) {
-        alarmMapper.updateAlarmPrdctData(null);
         settingMapper.insertPeakGoal(params);
 	}
     /**

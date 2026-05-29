@@ -6155,4 +6155,151 @@ public class DrvnService {
 		return result;
 	}
 
+	// =====================================================================
+	// [Seoul/Dev] 스냅샷 + 정확도 기간별 엑셀 다운로드 (통합 단일 시트)
+	//   - 항목별로 [예측, 실측, 정확도(%), 오차율(%)] 4컬럼 묶음 레이아웃.
+	//   - 수위(WL_*) 는 SQL 단에서 ROUND(2) → 소수 둘째 자리 표시.
+	//   - 컨트롤러(/dr/snapshot/download)에서 from/to(LocalDateTime) 받아 호출.
+	// =====================================================================
+
+	/**
+	 * 통합 시트 컬럼 키 — selectSnapshotsWithAccuracyByRange 의 컬럼 alias 와 매칭.
+	 * 펌프계통 다음에 조합 블록을 먼저 배치(가장 핵심 지표) → 유량/압력/수위 → 계산시각.
+	 */
+	private static final String[] COMBINED_KEYS = {
+			"rgstr_time", "prdct_time", "pump_grp",
+			// 조합 (펌프계통 직후로 이동)
+			"prdct_comb", "actl_comb", "acc_comb", "err_comb",
+			// 유량
+			"prdct_flow", "actl_flow", "acc_flow", "err_flow",
+			// 압력
+			"prdct_prsr", "actl_prsr", "acc_prsr", "err_prsr",
+			// 수위 5종 (공릉/북악/구리/월계/월곡)
+			"prdct_wl_gn",   "actl_wl_gn",   "acc_wl_gn",   "err_wl_gn",
+			"prdct_wl_ba",   "actl_wl_ba",   "acc_wl_ba",   "err_wl_ba",
+			"prdct_wl_gr",   "actl_wl_gr",   "acc_wl_gr",   "err_wl_gr",
+			"prdct_wl_wg",   "actl_wl_wg",   "acc_wl_wg",   "err_wl_wg",
+			"prdct_wl_wgok", "actl_wl_wgok", "acc_wl_wgok", "err_wl_wgok",
+			// 메타
+			"calc_time"
+	};
+	private static final String[] COMBINED_HEADERS = {
+			"등록시각", "예측대상시각", "펌프계통",
+			"조합 예측", "조합 실측", "조합 정확도(%)", "조합 오차율(%)",
+			"유량 예측", "유량 실측", "유량 정확도(%)", "유량 오차율(%)",
+			"압력 예측", "압력 실측", "압력 정확도(%)", "압력 오차율(%)",
+			"공릉 예측수위", "공릉 실측수위", "공릉 정확도(%)", "공릉 오차율(%)",
+			"북악 예측수위", "북악 실측수위", "북악 정확도(%)", "북악 오차율(%)",
+			"구리 예측수위", "구리 실측수위", "구리 정확도(%)", "구리 오차율(%)",
+			"월계 예측수위", "월계 실측수위", "월계 정확도(%)", "월계 오차율(%)",
+			"월곡 예측수위", "월곡 실측수위", "월곡 정확도(%)", "월곡 오차율(%)",
+			"계산시각"
+	};
+
+	/**
+	 * 헤더 셀별 배경색 (컬럼 인덱스와 길이 일치). 메트릭 블록별로 색을 달리해 가독성 향상.
+	 *   - 식별자(시각/펌프계통): 옅은 회색
+	 *   - 조합:   PALE_BLUE          (펌프계통 직후, 가장 핵심)
+	 *   - 유량:   LIGHT_TURQUOISE
+	 *   - 압력:   LIGHT_GREEN
+	 *   - 수위 5종: LIGHT_YELLOW
+	 *   - 메타(계산시각): GREY_25_PERCENT
+	 */
+	private static final short[] COMBINED_HEADER_COLORS = {
+			IndexedColors.GREY_25_PERCENT.getIndex(), IndexedColors.GREY_25_PERCENT.getIndex(), IndexedColors.GREY_25_PERCENT.getIndex(),
+			IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(),
+			IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(),
+			IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
+			IndexedColors.GREY_25_PERCENT.getIndex()
+	};
+
+	/**
+	 * 스냅샷 + 정확도 기간별 엑셀 워크북 생성 (단일 시트 "snapshot_accuracy").
+	 * 각 측정 항목을 [예측 / 실측 / 정확도(%) / 오차율(%)] 4컬럼 묶음으로 배치.
+	 * @param from 시작 (inclusive)
+	 * @param to   종료 (inclusive)
+	 */
+	public SXSSFWorkbook createSnapshotAccuracyExcel(LocalDateTime from, LocalDateTime to) {
+		DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("from", from.format(f));
+		param.put("to",   to.format(f));
+
+		List<HashMap<String, Object>> rows = drvnMapper.selectSnapshotsWithAccuracyByRange(param);
+
+		SXSSFWorkbook workbook = new SXSSFWorkbook();
+		writeSnapshotAccuracySheet(workbook, "snapshot_accuracy", COMBINED_HEADERS, COMBINED_KEYS, COMBINED_HEADER_COLORS, rows);
+		return workbook;
+	}
+
+	/**
+	 * 단일 시트 작성: 1행 헤더(굵게/가운데/배경색) + 데이터 행.
+	 * 색 인덱스별로 CellStyle 을 메모이즈해 워크북 스타일 수를 최소화.
+	 * null 값 → 빈칸, Number → 숫자셀, 그 외 → 문자셀.
+	 */
+	private void writeSnapshotAccuracySheet(SXSSFWorkbook workbook, String sheetName,
+											String[] headers, String[] keys, short[] headerColors,
+											List<HashMap<String, Object>> rows) {
+		Sheet sheet = workbook.createSheet(sheetName);
+		((org.apache.poi.xssf.streaming.SXSSFSheet) sheet).trackAllColumnsForAutoSizing();
+
+		// 헤더 폰트 (굵게).
+		Font headerFont = workbook.createFont();
+		headerFont.setBold(true);
+
+		// 색상 인덱스 → CellStyle 매핑 (중복 색은 재사용).
+		HashMap<Short, CellStyle> styleByColor = new HashMap<>();
+
+		Row header = sheet.createRow(0);
+		for (int c = 0; c < headers.length; c++) {
+			short color = (headerColors != null && c < headerColors.length)
+					? headerColors[c]
+					: IndexedColors.GREY_25_PERCENT.getIndex();
+			CellStyle hs = styleByColor.get(color);
+			if (hs == null) {
+				hs = workbook.createCellStyle();
+				hs.setFont(headerFont);
+				hs.setAlignment(HorizontalAlignment.CENTER);
+				hs.setVerticalAlignment(VerticalAlignment.CENTER);
+				hs.setFillForegroundColor(color);
+				hs.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+				hs.setBorderTop(BorderStyle.THIN);
+				hs.setBorderBottom(BorderStyle.THIN);
+				hs.setBorderLeft(BorderStyle.THIN);
+				hs.setBorderRight(BorderStyle.THIN);
+				styleByColor.put(color, hs);
+			}
+			Cell cell = header.createCell(c);
+			cell.setCellValue(headers[c]);
+			cell.setCellStyle(hs);
+		}
+
+		int r = 1;
+		if (rows != null) {
+			for (HashMap<String, Object> row : rows) {
+				Row dataRow = sheet.createRow(r++);
+				for (int c = 0; c < keys.length; c++) {
+					Cell cell = dataRow.createCell(c);
+					Object v = row.get(keys[c]);
+					if (v == null) {
+						cell.setCellValue("");
+					} else if (v instanceof Number) {
+						cell.setCellValue(((Number) v).doubleValue());
+					} else {
+						cell.setCellValue(v.toString());
+					}
+				}
+			}
+		}
+
+		for (int c = 0; c < headers.length; c++) {
+			sheet.autoSizeColumn(c);
+		}
+	}
+
 }

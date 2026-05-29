@@ -5688,17 +5688,19 @@ public class DrvnConfig {
 	 */
 	private boolean isStationReachableSinlimStyle(String[] tags, double target,
 	                                              LocalDateTime dateTime, int nowScore, int optMinute) {
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		// backshift 0,5,...,60 + 그 prev(=backshift+5) 까지 → 0,5,...,65 (총 14개 슬롯)
+		int[] slots = new int[14];
+		for (int i = 0; i < 14; i++) slots[i] = i * 5;
+		Map<Integer, double[]> avg = precomputeActiveAvgSlots(tags, dateTime, slots, seoulActiveThreshold);
+
 		double curNow  = 0.0;
 		double diff    = 0.0;
 		int curScore   = nowScore;
 		boolean found  = false;
 		final int maxBack = 60;
 		for (int backShift = 0; backShift <= maxBack; backShift += 5) {
-			LocalDateTime nowT  = dateTime.minusMinutes(backShift);
-			LocalDateTime prevT = dateTime.minusMinutes(backShift + 5);
-			double[] n = avgActiveSeoulWaterLevel(tags, nowT.format(formatter),  seoulActiveThreshold);
-			double[] p = avgActiveSeoulWaterLevel(tags, prevT.format(formatter), seoulActiveThreshold);
+			double[] n = avg.getOrDefault(backShift,     new double[]{0.0, 0});
+			double[] p = avg.getOrDefault(backShift + 5, new double[]{0.0, 0});
 			if (n[1] == 0 || p[1] == 0) {
 				curScore -= 5;
 				continue;
@@ -5741,17 +5743,23 @@ public class DrvnConfig {
 	 * @return double[3] = {22시 예상수위(NaN=탐색실패), ratePerHour(m/h, 실패시 0), 채택 stepMin(실패시 0)}
 	 */
 	private double[] predict22LevelSeoul(String[] tags, double curLevel, LocalDateTime dateTime) {
-		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		// stepMin ∈ {5,10,...,60} + slot=0(now) → 0,5,...,60 (총 13개 슬롯)
+		int[] slots = new int[13];
+		for (int i = 0; i < 13; i++) slots[i] = i * 5;
+		Map<Integer, double[]> avg = precomputeActiveAvgSlots(tags, dateTime, slots, seoulActiveThreshold);
+
 		final int maxBack = 60;
+		// (개선 ③) 'n'(현재 활성평균)은 루프 안에서 변하지 않으므로 1회만 산출
+		double[] n = avg.getOrDefault(0, new double[]{0.0, 0});
+		if (n[1] == 0) {
+			return new double[]{Double.NaN, 0.0, 0};        // 현재 활성 0개 → 어떤 step 도 무의미
+		}
 		double rate = 0.0;
 		int stepUsed = 0;
 		boolean found = false;
 		for (int stepMin = 5; stepMin <= maxBack; stepMin += 5) {
-			LocalDateTime nowT  = dateTime;
-			LocalDateTime prevT = dateTime.minusMinutes(stepMin);
-			double[] n = avgActiveSeoulWaterLevel(tags, nowT.format(formatter),  seoulActiveThreshold);
-			double[] p = avgActiveSeoulWaterLevel(tags, prevT.format(formatter), seoulActiveThreshold);
-			if (n[1] == 0 || p[1] == 0) continue;          // 활성 평균 비정상 → 다음 step
+			double[] p = avg.getOrDefault(stepMin, new double[]{0.0, 0});
+			if (p[1] == 0) continue;                        // 과거 활성평균 비정상 → 다음 step
 			double delta = n[0] - p[0];
 			if (Math.abs(delta) <= 1e-9) continue;          // 변화 없음 → 다음 step
 			rate = delta / (double) stepMin * 60.0;         // m/h
@@ -5799,6 +5807,96 @@ public class DrvnConfig {
 		}
 		double avg = count > 0 ? sum / count : 0.0;
 		return new double[]{avg, count};
+	}
+
+	/**
+	 * [Seoul/Dev · 개선 ②] 여러 tag × 여러 slot 의 활성 평균을 단일 SQL 로 산출.
+	 *
+	 * 기존: avgActiveSeoulWaterLevel() 를 slot×tag 회 호출 (N+1 패턴, 최대 13 × 6 = 78 DB call).
+	 * 개선: drvnMapper.selectRawDataRangeForTags() 단일 호출로 raw row 들을 가져온 뒤
+	 *      자바에서 slot 별 활성 평균을 산출 (DB call 1 회).
+	 *
+	 * 각 slot 의 활성값은 (slot - 10min, slot] 윈도우에서 tag 별로 가장 최신 TS 의 row 1건을 채택.
+	 * (기존 selectRawData 의 10 분 lookback 의미를 그대로 유지하기 위함)
+	 *
+	 * @param tags        수위 태그 배열 (공릉 또는 북악)
+	 * @param baseTime    기준 시각 (= slot 0)
+	 * @param backshifts  baseTime 기준 분 단위 backshift 들 (예: {0,5,10,...,65})
+	 * @param threshold   활성 판정 임계 (m)
+	 * @return Map&lt;backshift, double[2]{avg, count}&gt;. tag/슬롯 없으면 {0.0, 0}.
+	 */
+	private Map<Integer, double[]> precomputeActiveAvgSlots(
+			String[] tags, LocalDateTime baseTime, int[] backshifts, double threshold) {
+		Map<Integer, double[]> result = new HashMap<>();
+		if (backshifts == null || backshifts.length == 0) return result;
+		if (tags == null || tags.length == 0) {
+			for (int b : backshifts) result.put(b, new double[]{0.0, 0});
+			return result;
+		}
+
+		DateTimeFormatter tsFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+		int maxBack = 0;
+		for (int b : backshifts) if (b > maxBack) maxBack = b;
+		LocalDateTime endTime   = baseTime;
+		LocalDateTime startTime = baseTime.minusMinutes(maxBack);
+
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("tags", Arrays.asList(tags));
+		param.put("startDateTime", startTime.format(tsFmt));
+		param.put("endDateTime",   endTime.format(tsFmt));
+
+		List<HashMap<String, Object>> rows;
+		try {
+			rows = drvnMapper.selectRawDataRangeForTags(param);
+		} catch (Exception e) {
+			rows = Collections.emptyList();
+		}
+
+		// tag → (TS DESC 순) row 리스트
+		Map<String, List<HashMap<String, Object>>> byTag = new HashMap<>();
+		if (rows != null) {
+			for (HashMap<String, Object> row : rows) {
+				if (row == null) continue;
+				Object tnObj = row.get("tagname");
+				if (tnObj == null) continue;
+				String tagname = String.valueOf(tnObj);
+				byTag.computeIfAbsent(tagname, k -> new ArrayList<>()).add(row);
+			}
+		}
+
+		// slot 별 활성 평균 산출
+		for (int back : backshifts) {
+			LocalDateTime slot    = baseTime.minusMinutes(back);
+			LocalDateTime slotMin = slot.minusMinutes(10);   // 기존 selectRawData 의 10분 lookback 호환
+			double sum = 0.0;
+			int    count = 0;
+			for (String tag : tags) {
+				List<HashMap<String, Object>> tagRows = byTag.get(tag);
+				if (tagRows == null || tagRows.isEmpty()) continue;
+				Double v = null;
+				for (HashMap<String, Object> row : tagRows) {
+					Object tsObj = row.get("ts");
+					if (tsObj == null) continue;
+					LocalDateTime ts;
+					try { ts = LocalDateTime.parse(String.valueOf(tsObj), tsFmt); }
+					catch (Exception e) { continue; }
+					if (!ts.isAfter(slot) && !ts.isBefore(slotMin)) {
+						Object val = row.get("value");
+						if (val instanceof Number) {
+							v = ((Number) val).doubleValue();
+						}
+						break;   // tagRows 가 TS DESC 정렬이므로 첫 매치 = 가장 최신
+					}
+				}
+				if (v != null && v >= threshold) {
+					sum += v;
+					count++;
+				}
+			}
+			result.put(back, new double[]{count > 0 ? sum / count : 0.0, count});
+		}
+		return result;
 	}
 
 	/**
@@ -6210,6 +6308,14 @@ public class DrvnConfig {
 				drvnMapper.insertFlowCombSnapshot(insertParam);
 				processed++;
 
+				// snapshot 과 같은 시점에 정확도 동기 계산 (insertParam 키가 computeAndStoreAccuracy 입력과 동일).
+				// 한 grp 정확도 실패가 snapshot 적재/다른 grp 를 막지 않도록 try/catch 로 격리.
+				try {
+					computeAndStoreAccuracy(insertParam);
+				} catch (Exception ae) {
+					log.error("[flow-comb-accuracy] grp={} rgstr={} 계산 실패: {}", pumpGrp, rgstrTime, ae.getMessage(), ae);
+				}
+
 				log.debug("[flow-comb-snapshot] grp={} rgstrTime={} prdctFlow={} actlFlow={} prdctComb={} actlComb={}"
 						+ " prdctPrsr={} actlPrsr={}"
 						+ " prdctWL[gn={},ba={},gr={},wg={},wgok={}]"
@@ -6272,6 +6378,103 @@ public class DrvnConfig {
 		result.put("boundaries", boundaries);
 		result.put("rows", rows);
 		return result;
+	}
+
+	// =====================================================================
+	// [Seoul/Dev] 예측 정확도 계산·저장 (TB_PUMP_FLOW_COMB_ACCURACY)
+	//   - 입력: TB_PUMP_FLOW_COMB_SNAPSHOT 의 같은 row 내 PRDCT_* vs ACTL_*.
+	//   - 숫자: 오차율 = |예측-실측|/|실측|×100, 정확도 = clamp(100-오차율, 0, 100).
+	//   - 조합: 자카드(|∩|/|∪|×100), 둘다 0대면 100%.
+	//   - 별도 스케줄러 없이 snapshot 생성/backfill 과 같은 시점에 동기 계산(완전 결합).
+	//     ACTL 이 backfill 로 늦게 채워지면 backfillNullSnapshotFields 가 같은 시점에 재계산(upsert).
+	// =====================================================================
+
+	/**
+	 * 스냅샷 1행의 항목별 오차율/정확도를 계산해 UPSERT.
+	 * @return 계산 가능한 항목이 1개 이상이면 true(저장함), 전부 결측이면 false(skip).
+	 */
+	private boolean computeAndStoreAccuracy(HashMap<String, Object> row) {
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("rgstr_time", row.get("rgstr_time"));
+		p.put("prdct_time", row.get("prdct_time"));
+		p.put("pump_grp",   row.get("pump_grp"));
+
+		boolean any = false;
+		any |= putErrAcc(p, "flow",    numericErrAcc(toDouble(row.get("prdct_flow")),    toDouble(row.get("actl_flow"))));
+		any |= putErrAcc(p, "prsr",    numericErrAcc(toDouble(row.get("prdct_prsr")),    toDouble(row.get("actl_prsr"))));
+		any |= putErrAcc(p, "wl_gn",   numericErrAcc(toDouble(row.get("prdct_wl_gn")),   toDouble(row.get("actl_wl_gn"))));
+		any |= putErrAcc(p, "wl_ba",   numericErrAcc(toDouble(row.get("prdct_wl_ba")),   toDouble(row.get("actl_wl_ba"))));
+		any |= putErrAcc(p, "wl_gr",   numericErrAcc(toDouble(row.get("prdct_wl_gr")),   toDouble(row.get("actl_wl_gr"))));
+		any |= putErrAcc(p, "wl_wg",   numericErrAcc(toDouble(row.get("prdct_wl_wg")),   toDouble(row.get("actl_wl_wg"))));
+		any |= putErrAcc(p, "wl_wgok", numericErrAcc(toDouble(row.get("prdct_wl_wgok")), toDouble(row.get("actl_wl_wgok"))));
+		any |= putErrAcc(p, "comb",    combErrAcc(asStr(row.get("prdct_comb")), asStr(row.get("actl_comb"))));
+
+		if (!any) return false;   // 전부 결측 → 빈 행 만들지 않음
+		drvnMapper.insertFlowCombAccuracy(p);
+		return true;
+	}
+
+	/** errAcc[0]=오차율, [1]=정확도 를 err_&lt;key&gt;/acc_&lt;key&gt; 로 param 에 담는다. 둘 다 null 이면 false. */
+	private static boolean putErrAcc(HashMap<String, Object> p, String key, Double[] errAcc) {
+		p.put("err_" + key, errAcc[0]);
+		p.put("acc_" + key, errAcc[1]);
+		return errAcc[0] != null || errAcc[1] != null;
+	}
+
+	/**
+	 * 숫자 항목 오차율/정확도.
+	 *   오차율 = |예측-실측|/|실측|×100, 정확도 = clamp(100-오차율, 0, 100).
+	 *   실측=0 &amp; 예측=0 → {0,100} / 실측=0 &amp; 예측≠0 → {null,null}(정의불가) / 입력 결측 → {null,null}.
+	 * @return Double[2] {오차율, 정확도} (소수 2자리 반올림)
+	 */
+	private static Double[] numericErrAcc(Double pred, Double actl) {
+		if (pred == null || actl == null) return new Double[]{null, null};
+		if (actl == 0.0) {
+			return (pred == 0.0) ? new Double[]{0.0, 100.0} : new Double[]{null, null};
+		}
+		double err = Math.abs(pred - actl) / Math.abs(actl) * 100.0;
+		double acc = Math.max(0.0, Math.min(100.0, 100.0 - err));
+		return new Double[]{round2(err), round2(acc)};
+	}
+
+	/**
+	 * 펌프조합 정확도(자카드). 정확도 = |예측∩실측|/|예측∪실측|×100, 오차율 = 100 - 정확도.
+	 *   둘 다 0대(공집합) → {0,100}(완전일치). 한쪽이라도 null → {null,null}.
+	 * @return Double[2] {오차율, 정확도}
+	 */
+	private static Double[] combErrAcc(String predComb, String actlComb) {
+		if (predComb == null || actlComb == null) return new Double[]{null, null};
+		java.util.Set<Integer> pred = parsePumpSet(predComb);
+		java.util.Set<Integer> actl = parsePumpSet(actlComb);
+		java.util.Set<Integer> union = new java.util.HashSet<>(pred);
+		union.addAll(actl);
+		if (union.isEmpty()) return new Double[]{0.0, 100.0};   // 둘다 0대 → 완전일치
+		java.util.Set<Integer> inter = new java.util.HashSet<>(pred);
+		inter.retainAll(actl);
+		double acc = (double) inter.size() / union.size() * 100.0;
+		return new Double[]{round2(100.0 - acc), round2(acc)};
+	}
+
+	/** "1,3,4,6" → {1,3,4,6}. 공백/빈토큰/중복/숫자아님 무시. */
+	private static java.util.Set<Integer> parsePumpSet(String csv) {
+		java.util.Set<Integer> set = new java.util.HashSet<>();
+		if (csv == null) return set;
+		for (String tok : csv.split(",")) {
+			String t = tok.trim();
+			if (t.isEmpty()) continue;
+			try { set.add(Integer.parseInt(t)); } catch (NumberFormatException ignore) {}
+		}
+		return set;
+	}
+
+	/** Object → String. null 유지. */
+	private static String asStr(Object v) {
+		return v == null ? null : v.toString();
+	}
+
+	/** 소수 2자리 반올림. */
+	private static Double round2(double v) {
+		return Math.round(v * 100.0) / 100.0;
 	}
 
 	/** Object → Double 안전 변환. null / 숫자 아님 → null. */
@@ -6454,6 +6657,17 @@ public class DrvnConfig {
 				try {
 					drvnMapper.insertFlowCombSnapshot(upsert);
 					filled++;
+					// 스냅샷이 갱신된 행은 정확도도 동기 재계산. upsert(신규 비-null) 를 row(기존값) 위에 COALESCE
+					// → ON DUPLICATE KEY UPDATE + COALESCE 후의 실제 DB 상태와 일치하는 값으로 정확도 산출.
+					HashMap<String, Object> merged = new HashMap<>(row);
+					for (Map.Entry<String, Object> me : upsert.entrySet()) {
+						if (me.getValue() != null) merged.put(me.getKey(), me.getValue());
+					}
+					try {
+						computeAndStoreAccuracy(merged);
+					} catch (Exception ae) {
+						log.error("[flow-comb-accuracy] backfill 재계산 실패 grp={} rgstr={}: {}", pumpGrp, rgstrTime, ae.getMessage());
+					}
 				} catch (Exception e) {
 					log.error("[snapshot-backfill] UPSERT 실패 grp={} rgstr={}: {}", pumpGrp, rgstrTime, e.getMessage());
 				}

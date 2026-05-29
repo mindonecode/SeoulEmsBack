@@ -1314,11 +1314,11 @@
 		/* 선택한 달의 총 전력량 */
 		WITH month_total AS (
         SELECT 
-            COALESCE(ROUND(SUM(value), 0), 0) AS tv,
+            COALESCE(ROUND(SUM(CASE WHEN ts &gt;= CONCAT(#{ymnth}, '01 00:00:00') THEN value END), 0), 0) AS tv,
             COALESCE(ROUND(MAX(peak_max_value), 0), 0) AS pmv 
         FROM tb_peak_data_hour
-        WHERE ts &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s')
-          AND ts &lt; STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s') + INTERVAL 1 MONTH
+        WHERE ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) - INTERVAL 11 MONTH
+          AND ts &lt; CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) + INTERVAL 1 MONTH
           AND value &gt;= 7000
     	),
 		/* 선택한 달의 부하별 전력량 */
@@ -1331,8 +1331,8 @@
 				ON rate.MNTH = SUBSTRING(#{ymnth}, 5, 2)
 			AND CAST(rate.STN_TM AS UNSIGNED) = HOUR(tph.ts)
 			AND rate.RATE_IDX = 1
-			WHERE tph.TS &gt;= STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s')
-			AND tph.TS &lt; STR_TO_DATE(CONCAT(#{ymnth}, '01 00:00:00'), '%Y%m%d %H:%i:%s') + INTERVAL 1 MONTH
+			WHERE tph.TS &gt;= CONCAT(#{ymnth}, '01 00:00:00')
+			AND tph.TS &lt; CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) + INTERVAL 1 MONTH
 			AND value &gt;= 7000    
 			GROUP BY rate.TIMEZONE
 		),
@@ -1369,8 +1369,7 @@
 			CAST(ROUND(tf.m_fee, 0) AS UNSIGNED) AS M_ELCTR_FEE,
 			CAST(ROUND(tf.h_fee, 0) AS UNSIGNED) AS H_ELCTR_FEE,
 			CAST(ROUND((mt.pmv * tri.BASE_RATE) + tf.smf, 0) AS UNSIGNED) AS TOT_FEE,
-			CAST(ROUND(mt.pmv,0) AS UNSIGNED) AS PWR,
-			0 AS DATA_MSN_PRCNT
+			CAST(ROUND(mt.pmv,0) AS UNSIGNED) AS PWR
 		FROM month_total mt
 		CROSS JOIN total_fee tf
 		CROSS JOIN month_pwr mp

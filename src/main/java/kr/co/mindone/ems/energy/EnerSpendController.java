@@ -278,7 +278,15 @@ public class EnerSpendController extends BaseController {
 		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, savingResultList);
 	}
 
-
-
+	/**
+	 * 전력피크 분석 데이터 조회 메서드
+	 * @return 
+	 * @throws Exception
+	 */
+	@GetMapping("/getPowerPeakAnalysisData")
+	public ResponseObject<List<HashMap<String, Object>>> getPowerPeakAnalysisData() throws Exception {
+		List<HashMap<String, Object>> list = enerSpendService.getPowerPeakAnalysisData();
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, list);
+	}
 
 }

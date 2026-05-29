@@ -16,7 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 
 @Mapper
-interface CommonMapper {
+public interface CommonMapper {
     /**
      * WPP 태그 목록 조회
      * @param map 조회할 파라미터

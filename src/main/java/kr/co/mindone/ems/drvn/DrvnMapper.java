@@ -357,6 +357,15 @@ public interface DrvnMapper {
 	Double selectRawData(HashMap<String, Object> rawParam);
 
 	/**
+	 * [Seoul/Dev] 여러 태그 × 시간 범위 raw 데이터를 단일 쿼리로 조회.
+	 * 행 형식: {tagname, ts("yyyy-MM-dd HH:mm:ss"), value}. TAGNAME, TS DESC 정렬.
+	 *
+	 * @param param  tags(List&lt;String&gt;), startDateTime(String), endDateTime(String)
+	 * @return       TB_RAWDATA 행 리스트
+	 */
+	List<HashMap<String, Object>> selectRawDataRangeForTags(HashMap<String, Object> param);
+
+	/**
 	 * 운문 인버터 펌프 주파수 확인 메서드
 	 * @param pumpMap 조회할 펌프 맵
 	 * @return 펌프 주파수 데이터를 포함한 집합을 반환
@@ -650,5 +659,19 @@ public interface DrvnMapper {
 	 * @return rgstr_time, prdct_time, pump_grp, 11개 측정 컬럼 (null/값).
 	 */
 	java.util.List<HashMap<String, Object>> selectRecentSnapshotsWithNulls(HashMap<String, Object> param);
+
+	/**
+	 * (정확도) 항목별 오차율/정확도 UPSERT (TB_PUMP_FLOW_COMB_ACCURACY). 스냅샷과 동일 PK.
+	 * @param param rgstr_time, prdct_time, pump_grp, err_ / acc_ 항목값.
+	 */
+	int insertFlowCombAccuracy(HashMap<String, Object> param);
+
+	/**
+	 * (엑셀 다운로드) 기간 [from, to] 스냅샷 + 정확도 LEFT JOIN 결과.
+	 * 항목별로 PRDCT_/ACTL_/ACC_/ERR_ 가 한 행에 모여 있다. 수위 컬럼은 ROUND(2) 적용.
+	 * @param param from(String "yyyy-MM-dd HH:mm:ss"), to(String)
+	 * @return RGSTR_TIME 내림차순(최근이 먼저), PUMP_GRP 오름차순 전 컬럼.
+	 */
+	java.util.List<HashMap<String, Object>> selectSnapshotsWithAccuracyByRange(HashMap<String, Object> param);
 
 }
