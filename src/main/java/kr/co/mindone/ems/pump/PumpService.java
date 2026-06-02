@@ -113,10 +113,46 @@ public class PumpService {
     /**
      * 통합 제어 명령 lock 시간 (분).
      * AI 자동/AI 추천/수동 모든 제어 명령에 공통 적용.
-     * gu 환경은 기존 5분 정책 유지, 그 외 30분.
+     * 조회 우선순위 (코드 재배포 없이 운영 중 조정 가능):
+     *   1) tb_ctr_cycle (전용 설정 테이블, 사용자가 변경) — 우선 사용
+     *   2) TB_WPP_TAG_CODE(FUNC_TYP='CTRL_LOCK_MIN') — 레거시 전역 설정
+     *   3) 하드코딩(gu=5/그 외=30) — DB 조회 실패/미설정/비정상값(&lt;=0) 시 안전 fallback (DB 장애 시에도 락이 풀리지 않도록).
      */
-    private int controlLockMinutes() {
-        return "gu".equals(wpp_code) ? 5 : 30;
+    public int controlLockMinutes() {
+        // 1) 신규 전용 테이블(tb_ctr_cycle) 우선 — 사용자가 변경 가능한 전역 설정.
+        try {
+            Integer cycleVal = drvnMapper.selectCtrlCycleMin();
+            if (cycleVal != null && cycleVal > 0) return cycleVal;
+        } catch (Exception e) {
+            System.out.println("[controlLockMinutes] tb_ctr_cycle 조회 실패 → 다음 fallback. err=" + e.getMessage());
+        }
+        // 2) 레거시 전역 설정(TB_WPP_TAG_CODE, FUNC_TYP='CTRL_LOCK_MIN').
+        try {
+            Integer dbVal = drvnMapper.selectCtrlLockMin();
+            if (dbVal != null && dbVal > 0) return dbVal;
+        } catch (Exception e) {
+            System.out.println("[controlLockMinutes] TB_WPP_TAG_CODE 조회 실패 → 하드코딩 fallback. err=" + e.getMessage());
+        }
+        // 3) 하드코딩 안전 fallback (DB 장애 시에도 락이 풀리지 않도록).
+        return "gu".equals(wpp_code) ? 5 : 60;
+    }
+
+    /**
+     * 제어주기(분) 전역 설정값 변경 (tb_ctr_cycle upsert).
+     * controlLockMinutes() 가 최우선으로 읽는 값이므로, 변경 즉시 AI 자동/추천/수동 제어 lock 에 반영된다.
+     * @param lockMin 1 이상 분 단위
+     * @param updtUser 수정자(없으면 null)
+     * @return 저장된 분 값
+     */
+    public int updateControlLockMinutes(int lockMin, String updtUser) {
+        if (lockMin <= 0) {
+            throw new IllegalArgumentException("제어주기(분)는 1 이상이어야 합니다. 입력=" + lockMin);
+        }
+        HashMap<String, Object> param = new HashMap<>();
+        param.put("lockMin", lockMin);
+        param.put("updtUser", updtUser);
+        drvnMapper.upsertCtrlCycleMin(param);
+        return lockMin;
     }
 
     /**

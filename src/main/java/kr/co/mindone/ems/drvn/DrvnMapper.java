@@ -420,6 +420,60 @@ public interface DrvnMapper {
 	 */
 	String selectLastHmiCtrTime();
 
+	/**
+	 * 펌프 제어 쿨다운(분) 전역 설정값 조회 (TB_WPP_TAG_CODE, FUNC_TYP='CTRL_LOCK_MIN').
+	 * @return 분 단위 Integer. 행이 없으면 null.
+	 */
+	Integer selectCtrlLockMin();
+
+	/**
+	 * 펌프 제어주기(분) 전역 설정값 조회 (tb_ctr_cycle, 전역 단일 행).
+	 * @return 분 단위 Integer. 행이 없으면 null.
+	 */
+	Integer selectCtrlCycleMin();
+
+	/**
+	 * 펌프 제어주기(분) 전역 설정값 변경 (tb_ctr_cycle upsert, CYCLE_IDX=1 고정).
+	 * @param param lockMin(Integer), updtUser(String|null)
+	 */
+	void upsertCtrlCycleMin(HashMap<String, Object> param);
+
+	/**
+	 * 펌프 예측 가동이력 타임라인 조회 (예측·실측 비교 차트용).
+	 * @param param date(yyyy-MM-dd), pump_grp
+	 * @return [{ts, PUMP_IDX, PUMP_GRP_IDX, name, PUMP_YN}]
+	 */
+	List<HashMap<String, Object>> selectPumpForecastTimeline(HashMap<String, Object> param);
+
+	/**
+	 * 펌프 실측 가동이력 타임라인 조회 (PMB_TAG 전용, 예측·실측 비교 차트용).
+	 * @param param date(yyyy-MM-dd), pump_grp
+	 * @return [{ts, PUMP_GRP_IDX, name, value}] (value>0=가동)
+	 */
+	List<HashMap<String, Object>> selectPumpActualTimeline(HashMap<String, Object> param);
+
+	/**
+	 * 펌프 실측 가동이력 조회 (분단위, 최근 24시간, PMB_TAG 전용, 단일차트 비교용).
+	 * @param param pump_grp
+	 * @return [{ts, PUMP_GRP_IDX, name, value}] (value>0=가동)
+	 */
+	List<HashMap<String, Object>> selectPumpActualMinute(HashMap<String, Object> param);
+
+	/**
+	 * 펌프 예측 가동이력 조회 (RGSTR_TIME 10분단위, 최근 24시간, 단일차트 비교용).
+	 * 예측이 10분마다 생성된 시점(RGSTR_TIME) 기준.
+	 * @param param pump_grp
+	 * @return [{ts, PUMP_IDX, PUMP_GRP_IDX, name, PUMP_YN}]
+	 */
+	List<HashMap<String, Object>> selectPumpForecastByRgstr(HashMap<String, Object> param);
+
+	/**
+	 * 그룹 내 전체 펌프 명단(roster). 비교 차트 y축 고정용(데이터 없는 펌프도 표시).
+	 * @param param pump_grp
+	 * @return [{PUMP_GRP_IDX, name}]
+	 */
+	List<HashMap<String, Object>> selectPumpRosterByGrp(HashMap<String, Object> param);
+
 	String getPumpCombLogTime();
 
 	Set<Integer> inverterPumpFreqCheck(HashMap<String, Object> pumpMap);
