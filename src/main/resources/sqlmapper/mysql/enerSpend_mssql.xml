@@ -321,7 +321,7 @@
 					  AND pti.CLSFC = #{zone_code}
 				  </if>
 			) t
-			WHERE rn = 1 AND value &gt;= 1
+			WHERE rn = 1 AND value &gt;= 0.01
 		),
 		period_data AS (
 			SELECT 
