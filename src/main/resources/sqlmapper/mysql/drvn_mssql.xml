@@ -2177,6 +2177,164 @@
 		WHERE
 			ANLY_CD IN ('RUN', 'STOP', 'FREQ')
 	</select>
+
+	<!--
+	  펌프 제어 쿨다운(분) 전역 설정값 (TB_WPP_TAG_CODE, FUNC_TYP='CTRL_LOCK_MIN').
+	  마지막 제어 후 대기시간. 행 없으면 null → PumpService 에서 하드코딩 fallback.
+	-->
+	<select id="selectCtrlLockMin" resultType="java.lang.Integer">
+		SELECT
+			DEFAULT_VALUE
+		FROM
+			TB_WPP_TAG_CODE
+		WHERE
+			FUNC_TYP = 'CTRL_LOCK_MIN'
+		LIMIT 1
+	</select>
+
+	<!--
+	  펌프 제어주기(분) 전역 설정값 (tb_ctr_cycle, 전역 단일 행).
+	  사용자가 변경 가능. 행 없으면 null → PumpService 에서 TB_WPP_TAG_CODE / 하드코딩 순으로 fallback.
+	-->
+	<select id="selectCtrlCycleMin" resultType="java.lang.Integer">
+		SELECT
+			LOCK_MIN
+		FROM
+			tb_ctr_cycle
+		ORDER BY CYCLE_IDX
+		LIMIT 1
+	</select>
+
+	<!-- 전역 제어주기(분) 변경. 행이 없으면 생성, 있으면 갱신 (CYCLE_IDX=1 고정). -->
+	<insert id="upsertCtrlCycleMin" parameterType="hashmap">
+		INSERT INTO tb_ctr_cycle (CYCLE_IDX, LOCK_MIN, UPDT_USER)
+		VALUES (1, #{lockMin}, #{updtUser})
+		ON DUPLICATE KEY UPDATE
+			LOCK_MIN = #{lockMin},
+			UPDT_USER = #{updtUser}
+	</insert>
+
+	<!--
+	  펌프 예측 가동이력 타임라인 (예측·실측 비교 차트용).
+	  지정 날짜(date)의 최신 분석회차(ANLY_TIME MAX) 예측 결과를 펌프별 PRDCT_TIME 단위로 반환.
+	  실측은 기존 /es/selectPumpPerformList(PMB_TAG) 재사용, 본 쿼리는 예측만 담당.
+	  name = CONCAT(PUMP_GRP_NM, PUMP_GRP_IDX) → 실측 응답의 name 과 동일 규칙으로 매칭됨.
+	-->
+	<select id="selectPumpForecastTimeline" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(cor.PRDCT_TIME, '%Y-%m-%d %H:%i') AS ts,
+			cpr.PUMP_IDX,
+			cppi.PUMP_GRP_IDX,
+			CONCAT(cppi.PUMP_GRP_NM, cppi.PUMP_GRP_IDX) AS name,
+			MAX(cpr.PUMP_YN) AS PUMP_YN
+		FROM TB_CTR_OPT_RST cor
+		JOIN TB_CTR_PUMPYN_RST cpr
+			ON cor.OPT_IDX = cpr.OPT_IDX
+			AND cor.PUMP_GRP = cpr.PUMP_GRP
+		JOIN TB_CTR_PRF_PUMPMST_INF cppi
+			ON cpr.PUMP_IDX = cppi.PUMP_IDX
+		WHERE cor.PUMP_GRP = #{pump_grp}
+			AND cor.PRDCT_TIME &gt;= CONCAT(#{date}, ' 00:00:00')
+			AND cor.PRDCT_TIME &lt;  CONCAT(#{date}, ' 23:59:59')
+			AND cor.ANLY_TIME = (
+				SELECT MAX(ANLY_TIME)
+				FROM TB_CTR_OPT_RST
+				WHERE PUMP_GRP = #{pump_grp}
+					AND PRDCT_TIME &gt;= CONCAT(#{date}, ' 00:00:00')
+					AND PRDCT_TIME &lt;  CONCAT(#{date}, ' 23:59:59')
+			)
+		-- (PRDCT_TIME, 펌프)당 1행 보장: PRDCT_TIME_DIFF/FLAG/DC_NMB 등으로 인한 중복 집계 제거
+		GROUP BY ts, cpr.PUMP_IDX, cppi.PUMP_GRP_IDX, cppi.PUMP_GRP_NM
+		ORDER BY ts, cppi.PUMP_GRP_IDX
+	</select>
+
+	<!--
+	  펌프 실측 가동이력 타임라인 (예측·실측 비교 차트용, PMB_TAG 전용 경량 쿼리).
+	  기존 /es/selectPumpPerformList 가 PMB·PWI·PRI·SPI 4종을 모두 스캔하던 것을,
+	  본 차트가 쓰는 PMB(가동여부)만 + 해당 PUMP_GRP 으로 좁혀 비용을 줄임.
+	  name = CONCAT(PUMP_GRP_NM, PUMP_GRP_IDX) → 예측 결과 name 과 동일 규칙.
+	  value > 0 이면 가동.
+	-->
+	<select id="selectPumpActualTimeline" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(b.ts, '%Y-%m-%d %H:%i') AS ts,
+			cppi.PUMP_GRP_IDX,
+			CONCAT(cppi.PUMP_GRP_NM, cppi.PUMP_GRP_IDX) AS name,
+			MAX(b.value) AS value
+		FROM TB_RAWDATA_HOUR b
+		JOIN TB_CTR_PRF_PUMPMST_INF cppi
+			ON cppi.PMB_TAG = b.tagname
+		WHERE b.ts &gt;= CONCAT(#{date}, ' 00:00:00')
+			AND b.ts &lt;= CONCAT(#{date}, ' 23:59:00')
+			AND cppi.PUMP_GRP = #{pump_grp}
+		GROUP BY b.ts, b.tagname, cppi.PUMP_GRP_IDX, cppi.PUMP_GRP_NM
+		ORDER BY b.ts, cppi.PUMP_GRP_IDX
+	</select>
+
+	<!--
+	  펌프 실측 가동이력 (10분 버킷, 예측·실측 단일차트 비교용).
+	  start_date ~ end_date 구간을 TB_RAWDATA(PMB_TAG)에서 10분 경계(:00/:10/.../:50)로 집계.
+	  예측(selectPumpForecastByRgstr, RGSTR_TIME 10분단위)과 동일 시간축에 정렬되도록 실측도 10분 버킷.
+	  TS - INTERVAL (MINUTE % 10) MINUTE 로 10분 단위로 내림(floor) → 한 버킷 내 한 분이라도 가동이면 MAX(VALUE)>0.
+	  응답 스키마 동일({ts,PUMP_GRP_IDX,name,value}). 분단위 대비 결과 행 ~10배 감소(응답·렌더 비용 절감).
+	  HAVING 으로 가동(ON) 버킷만 반환.
+	-->
+	<select id="selectPumpActualMinute" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(b.TS - INTERVAL (MINUTE(b.TS) % 10) MINUTE, '%Y-%m-%d %H:%i') AS ts,
+			cppi.PUMP_GRP_IDX,
+			CONCAT(cppi.PUMP_GRP_NM, cppi.PUMP_GRP_IDX) AS name,
+			MAX(b.VALUE) AS value
+		FROM TB_RAWDATA b
+		JOIN TB_CTR_PRF_PUMPMST_INF cppi
+			ON cppi.PMB_TAG = b.TAGNAME
+		WHERE b.TS &gt;= #{start_date}
+			AND b.TS &lt;= #{end_date}
+			AND cppi.PUMP_GRP = #{pump_grp}
+		GROUP BY ts, cppi.PUMP_GRP_IDX, cppi.PUMP_GRP_NM
+		HAVING MAX(b.VALUE) &gt; 0
+		ORDER BY ts, cppi.PUMP_GRP_IDX
+	</select>
+
+	<!--
+	  펌프 예측 가동이력 (10분단위, 예측·실측 단일차트 비교용).
+	  제어현황 펌프조합 기록(selectPrdctPumpCombYn)과 동일하게 RGSTR_TIME(예측 생성시점) 기준.
+	  예측은 10분마다 생성되므로 MINUTE(RGSTR_TIME) % 10 = 0 인 시점만, start_date ~ end_date 구간 반환.
+	  프론트 name 매칭을 위해 PUMP_GRP_IDX/name 조인 추가.
+	  → "그 시각의 실측에 대해 생성된 예측" 을 동일 시간축 위에서 점으로 대조.
+	-->
+	<select id="selectPumpForecastByRgstr" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(rst.RGSTR_TIME, '%Y-%m-%d %H:%i') AS ts,
+			rst.PUMP_IDX,
+			cppi.PUMP_GRP_IDX,
+			CONCAT(cppi.PUMP_GRP_NM, cppi.PUMP_GRP_IDX) AS name,
+			MAX(rst.PUMP_YN) AS PUMP_YN
+		FROM TB_CTR_PUMPYN_RST rst
+		JOIN TB_CTR_PRF_PUMPMST_INF cppi
+			ON rst.PUMP_IDX = cppi.PUMP_IDX
+		WHERE rst.RGSTR_TIME &gt;= #{start_date}
+			AND rst.RGSTR_TIME &lt;= #{end_date}
+			AND MINUTE(rst.RGSTR_TIME) % 10 = 0
+			AND rst.PUMP_GRP = #{pump_grp}
+		GROUP BY ts, rst.PUMP_IDX, cppi.PUMP_GRP_IDX, cppi.PUMP_GRP_NM
+		HAVING MAX(rst.PUMP_YN) &gt; 0
+		ORDER BY ts, cppi.PUMP_GRP_IDX
+	</select>
+
+	<!--
+	  그룹 내 전체 펌프 명단(roster). 예측·실측 비교 차트의 y축을 고정하기 위함.
+	  24시간 내 가동/예측이 전혀 없는 펌프도 빈 행으로 표시되도록 데이터와 무관하게 전체 펌프를 반환.
+	-->
+	<select id="selectPumpRosterByGrp" parameterType="hashmap" resultType="hashmap">
+		SELECT DISTINCT
+			cppi.PUMP_GRP_IDX,
+			CONCAT(cppi.PUMP_GRP_NM, cppi.PUMP_GRP_IDX) AS name
+		FROM TB_CTR_PRF_PUMPMST_INF cppi
+		WHERE cppi.PUMP_GRP = #{pump_grp}
+		ORDER BY cppi.PUMP_GRP_IDX
+	</select>
+
 	<insert id="insertManualOperLogNew" parameterType="hashmap">
 		INSERT INTO TB_MNL_CHN_LOG
 			(RGSTR_TIME, OPER, PUMP_GRP, NewPumpComb, NewPumpFreq, AgoPumpComb, AgoPumpFreq)

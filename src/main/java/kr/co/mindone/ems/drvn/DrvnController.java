@@ -84,6 +84,50 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 제어주기(분) 전역 설정값 조회.
+	 * 한번 제어가 들어가면 이 분(分) 동안 다음 제어가 차단된다.
+	 * @return 현재 적용 중인 제어주기(분)
+	 */
+	@Operation(summary = "제어주기 조회", description = "controlLockMinutes")
+	@GetMapping("/ctrlCycle")
+	public ResponseObject<Integer> getCtrlCycle(){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, pumpService.controlLockMinutes());
+	}
+
+	/**
+	 * [POST] 제어주기(분) 전역 설정값 변경. (tb_ctr_cycle)
+	 * @param lockMin 1 이상 분 단위
+	 * @return 저장된 제어주기(분)
+	 */
+	@Operation(summary = "제어주기 변경", description = "updateControlLockMinutes")
+	@PostMapping("/ctrlCycle/{lockMin}")
+	public ResponseObject<Integer> setCtrlCycle(@PathVariable int lockMin){
+		return makeSuccessObj(ResponseMessage.SAVE_SUCCESS, pumpService.updateControlLockMinutes(lockMin, null));
+	}
+
+	/**
+	 * [GET] 펌프 예측 가동이력 타임라인 조회 (예측·실측 비교 차트용).
+	 * @param param date(yyyy-MM-dd), pump_grp
+	 * @return [{ts, PUMP_IDX, PUMP_GRP_IDX, name, PUMP_YN}]
+	 */
+	@Operation(summary = "펌프 예측 가동이력 타임라인", description = "selectPumpForecastTimeline")
+	@GetMapping("/pumpForecastTimeline")
+	public ResponseObject<List<HashMap<String, Object>>> pumpForecastTimeline(@RequestParam HashMap<String, Object> param){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectPumpForecastTimeline(param));
+	}
+
+	/**
+	 * [GET] 펌프 예측·실측 가동이력 통합 조회 (비교 차트용, 왕복 1회).
+	 * @param param date(yyyy-MM-dd), pump_grp
+	 * @return { actual:[...PMB 실측], predict:[...예측] }
+	 */
+	@Operation(summary = "펌프 예측·실측 가동이력 비교", description = "selectPumpForecastCompare")
+	@GetMapping("/pumpForecastCompare")
+	public ResponseObject<Map<String, Object>> pumpForecastCompare(@RequestParam HashMap<String, Object> param){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectPumpForecastCompare(param));
+	}
+
+	/**
 	 * [GET] 현재 시각의 부하 시간대 조회
 	 * @return {zone, label, month, hour, dayOfWeek, isHoliday}
 	 */
@@ -294,6 +338,9 @@ public class DrvnController extends BaseController {
 			return new ResponseEntity<>(responseObject, HttpStatus.BAD_REQUEST); // 400 상태 코드를 사용
 		}
 
+		// 쿨다운(분)은 TB_WPP_TAG_CODE(FUNC_TYP='CTRL_LOCK_MIN') 전역 설정값 기준 (DB 단일 소스).
+		// 통합 가드 checkControlLockStatus 와 동일 값. 미설정/장애 시 하드코딩 fallback.
+		int cooldownMin = pumpService.controlLockMinutes();
 		if(wpp_code.equals("gs")){
 			checkLogParam.put("pump_grp", 0);
 			checkLogParam.put("interval", 30);
@@ -302,7 +349,7 @@ public class DrvnController extends BaseController {
 			checkLogParam.put("interval", 5);
 		}else{
 			checkLogParam.put("pump_grp", pump_grp);
-			checkLogParam.put("interval", 30);
+			checkLogParam.put("interval", cooldownMin);
 		}
 
 		int checkLog = drvnService.checkManualOperLog(checkLogParam);
@@ -310,7 +357,7 @@ public class DrvnController extends BaseController {
 		if(wpp_code.equals("ba") || wpp_code.equals("gr")) {
 			errMinute = "5";
 		}else{
-			errMinute = "30";
+			errMinute = String.valueOf(cooldownMin);
 		}
 
 		if(checkLog != 0) {

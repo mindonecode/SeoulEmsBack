@@ -29,6 +29,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.PostConstruct;
 import java.lang.reflect.Type;
@@ -5048,47 +5049,168 @@ public class DrvnService {
 
 	List<HashMap<String, Object>> selectPumpCombList(HashMap<String, Object> map) { return drvnMapper.selectPumpCombList(map); }
 
+	/** 펌프 예측 가동이력 타임라인 (예측·실측 비교 차트용). */
+	public List<HashMap<String, Object>> selectPumpForecastTimeline(HashMap<String, Object> param) {
+		return drvnMapper.selectPumpForecastTimeline(param);
+	}
+
+	/**
+	 * 예측·실측 가동이력을 한 번에 반환 (단일차트 비교용, 왕복 1회).
+	 * start_date ~ end_date 구간. 실측·예측 모두 10분 버킷으로 동일 시간축에 정렬.
+	 * 예측이 10분마다 생성되므로, 그 시점의 실측에 대해 만들어진 예측을 동일 시간축에서 대조.
+	 * @param param pump_grp, start_date, end_date
+	 */
+	public Map<String, Object> selectPumpForecastCompare(HashMap<String, Object> param) {
+		Map<String, Object> result = new HashMap<>();
+		result.put("actual", drvnMapper.selectPumpActualMinute(param));
+		result.put("predict", drvnMapper.selectPumpForecastByRgstr(param));
+		result.put("pumps", drvnMapper.selectPumpRosterByGrp(param)); // y축 고정용 전체 펌프 명단
+		return result;
+	}
+
+	@Transactional
 	public void savePumpComb(List<HashMap<String, Object>> listMap) {
-		StringBuilder pumpIDX = new StringBuilder();
+		List<Integer> baseSet = new ArrayList<>();          // 편집 조합에서 사용(PUMP_YN=1)하는 펌프 IDX
+		Map<Integer, Double> sizeByIdx = new HashMap<>();   // PUMP_IDX -> PUMP_SIZE(0.5 / 1)
 		int pumpGrp = -1;
 		double pumpCount = 0.0;
 		int pumpPriority = 0;
 
 		for(HashMap<String, Object> map:listMap) {
 			drvnMapper.savePumpComb(map);
-			
+
 			if (pumpGrp == -1 && map.get("PUMP_GRP") != null) {
 				pumpGrp = Integer.parseInt(String.valueOf(map.get("PUMP_GRP")));
 				pumpCount = Double.parseDouble(String.valueOf(map.get("PUMP_COUNT")));
 				pumpPriority = Integer.parseInt(String.valueOf(map.get("PUMP_PRIORITY")));
 			}
 
-			if(map.get("PUMP_YN") != null && "1".equals(String.valueOf(map.get("PUMP_YN")))) { //사용 중인 펌프면
-				if(map.get("PUMP_IDX") != null) {
-					int idx =  Integer.parseInt(String.valueOf(map.get("PUMP_IDX")));
-					pumpIDX.append(idx).append(",");
+			if (map.get("PUMP_IDX") != null) {
+				int idx = Integer.parseInt(String.valueOf(map.get("PUMP_IDX")));
+				if (map.get("PUMP_SIZE") != null) {
+					sizeByIdx.put(idx, Double.parseDouble(String.valueOf(map.get("PUMP_SIZE"))));
+				}
+				if (map.get("PUMP_YN") != null && "1".equals(String.valueOf(map.get("PUMP_YN")))) { //사용 중인 펌프면
+					baseSet.add(idx);
 				}
 			}
 		}
-		
-		if(pumpIDX.length() > 0 && pumpGrp > -1) {
-			pumpIDX.deleteCharAt(pumpIDX.length()-1);
-			
-			// 기존 값에 대한 정보(COUNT_IDX)를 찾아서 그 자리에 덮어쓰는 로직
-			HashMap<String, Object> calParam = new HashMap<>();
-			calParam.put("pump_grp", pumpGrp);
-			calParam.put("pump_count", pumpCount);
-			calParam.put("pump_priority", pumpPriority);
-			
-			List<HashMap<String, Object>> getGrpCombCal = drvnMapper.getGroupPumpCal(calParam);
-			int countIdx = 0;
-			 
-			if(getGrpCombCal != null && !getGrpCombCal.isEmpty()) {
-				if ((int) getGrpCombCal.get(0).get("C_ORD") == 1) countIdx = (int) getGrpCombCal.get(0).get("COUNT_IDX");
-			}
-			
-			drvnMapper.updatePumpComb(pumpIDX.toString(), countIdx);
+
+		if (baseSet.isEmpty() || pumpGrp <= -1) {
+			return;
 		}
+		Collections.sort(baseSet);
+
+		// 편집한 조합 자체의 TB_PUMP_CAL.PUMP_COMB 갱신 (대표 행 C_ORD==1 의 COUNT_IDX)
+		int countIdx = resolveCountIdx(pumpGrp, pumpCount, pumpPriority);
+		if (countIdx > 0) {
+			drvnMapper.updatePumpComb(joinComb(baseSet), countIdx);
+		}
+
+		// 3대 조합을 변경하면 3.5 / 4 / 4.5 조합에 일괄 적용
+		if (pumpCount == 3.0) {
+			cascadePumpComb(pumpGrp, pumpPriority, baseSet, sizeByIdx);
+		}
+	}
+
+	/**
+	 * 3대 base 조합을 3.5 / 4 / 4.5 조합에 일괄 적용한다.
+	 * <ul>
+	 *   <li>3.5 = base + (base에 없는 최소 IDX의 0.5대 펌프)</li>
+	 *   <li>4   = base + (base에 없는 최소 IDX의 1대 펌프)</li>
+	 *   <li>4.5 = base + 1대 펌프 + 0.5대 펌프</li>
+	 * </ul>
+	 */
+	private void cascadePumpComb(int pumpGrp, int pumpPriority, List<Integer> baseSet, Map<Integer, Double> sizeByIdx) {
+		Set<Integer> base = new HashSet<>(baseSet);
+
+		// base에 포함되지 않은 펌프 중 크기별 최소 IDX
+		Integer addHalf = sizeByIdx.entrySet().stream()
+				.filter(e -> !base.contains(e.getKey()) && e.getValue() == 0.5)
+				.map(Map.Entry::getKey)
+				.min(Integer::compareTo)
+				.orElse(null);
+		Integer addFull = sizeByIdx.entrySet().stream()
+				.filter(e -> !base.contains(e.getKey()) && e.getValue() == 1.0)
+				.map(Map.Entry::getKey)
+				.min(Integer::compareTo)
+				.orElse(null);
+
+		applyDerived(pumpGrp, pumpPriority, "3.5", unionIdx(baseSet, addHalf));
+		applyDerived(pumpGrp, pumpPriority, "4",   unionIdx(baseSet, addFull));
+		applyDerived(pumpGrp, pumpPriority, "4.5", unionIdx(baseSet, addFull, addHalf));
+	}
+
+	/**
+	 * 대상 대수(targetCount) 조합의 PUMP_YN(TB_PUMP_COMBINATION) 및 PUMP_COMB(TB_PUMP_CAL)를
+	 * derivedSet 기준으로 갱신한다. 대상 조합 행이 없으면 스킵한다.
+	 */
+	private void applyDerived(int pumpGrp, int pumpPriority, String targetCount, List<Integer> derivedSet) {
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("pump_grp", pumpGrp);
+		param.put("pump_count", targetCount);
+		param.put("pump_priority", pumpPriority);
+
+		List<HashMap<String, Object>> rows = drvnMapper.getPumpCombinationItem(param);
+		if (rows == null || rows.isEmpty()) {
+			logger.info("[cascadePumpComb] 대상 조합 없음 - grp={}, count={}, priority={}", pumpGrp, targetCount, pumpPriority);
+			return;
+		}
+
+		Set<Integer> derived = new HashSet<>(derivedSet);
+		for (HashMap<String, Object> row : rows) {
+			int idx = Integer.parseInt(String.valueOf(row.get("PUMP_IDX")));
+			HashMap<String, Object> upd = new HashMap<>();
+			upd.put("PUMP_GRP", pumpGrp);
+			upd.put("PUMP_IDX", idx);
+			upd.put("PUMP_COUNT", row.get("PUMP_COUNT"));   // 대상 행의 DB값 그대로 사용(타입 불일치 방지)
+			upd.put("PUMP_PRIORITY", pumpPriority);
+			upd.put("PUMP_YN", derived.contains(idx) ? 1 : 0);
+			drvnMapper.savePumpComb(upd);
+		}
+
+		int countIdx = resolveCountIdx(pumpGrp, Double.parseDouble(targetCount), pumpPriority);
+		if (countIdx > 0) {
+			drvnMapper.updatePumpComb(joinComb(derivedSet), countIdx);
+		}
+	}
+
+	/**
+	 * 조합(grp, count, priority)의 TB_PUMP_CAL 대표 행(C_ORD==1)의 COUNT_IDX 반환. 없으면 0.
+	 * (getGroupPumpCal 의 ORDER BY 상 첫 행이 C_ORD==1 임을 보장할 수 없어 명시적으로 탐색)
+	 */
+	private int resolveCountIdx(int pumpGrp, double pumpCount, int pumpPriority) {
+		HashMap<String, Object> calParam = new HashMap<>();
+		calParam.put("pump_grp", pumpGrp);
+		calParam.put("pump_count", pumpCount);
+		calParam.put("pump_priority", pumpPriority);
+
+		List<HashMap<String, Object>> grpCombCal = drvnMapper.getGroupPumpCal(calParam);
+		if (grpCombCal == null) {
+			return 0;
+		}
+		for (HashMap<String, Object> row : grpCombCal) {
+			if (row.get("C_ORD") != null && Integer.parseInt(String.valueOf(row.get("C_ORD"))) == 1) {
+				return row.get("COUNT_IDX") == null ? 0 : Integer.parseInt(String.valueOf(row.get("COUNT_IDX")));
+			}
+		}
+		return 0;
+	}
+
+	/** base 펌프 집합에 추가 펌프(null 제외)를 합쳐 오름차순 정렬된 IDX 리스트 반환 */
+	private List<Integer> unionIdx(List<Integer> base, Integer... extras) {
+		TreeSet<Integer> set = new TreeSet<>(base);
+		for (Integer e : extras) {
+			if (e != null) {
+				set.add(e);
+			}
+		}
+		return new ArrayList<>(set);
+	}
+
+	/** PUMP_IDX 리스트를 오름차순 쉼표 문자열로 변환 (예: "1,3,4,5") */
+	private String joinComb(List<Integer> idxList) {
+		return idxList.stream().sorted().map(String::valueOf).collect(Collectors.joining(","));
 	}
 
 	public Map<String, List<Map<String,Object>>> selectWaterLevel(){
