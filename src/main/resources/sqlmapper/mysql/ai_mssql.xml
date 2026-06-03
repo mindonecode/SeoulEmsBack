@@ -1314,7 +1314,7 @@
 		/* 선택한 달의 총 전력량 */
 		WITH month_total AS (
         SELECT 
-            COALESCE(ROUND(SUM(CASE WHEN ts &gt;= CONCAT(#{ymnth}, '01 00:00:00') THEN value END), 0), 0) AS tv,
+            COALESCE(ROUND(SUM(CASE WHEN ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) THEN value END), 0), 0) AS tv,
             COALESCE(ROUND(MAX(peak_max_value), 0), 0) AS pmv 
         FROM tb_peak_data_hour
         WHERE ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) - INTERVAL 11 MONTH
@@ -1331,7 +1331,7 @@
 				ON rate.MNTH = SUBSTRING(#{ymnth}, 5, 2)
 			AND CAST(rate.STN_TM AS UNSIGNED) = HOUR(tph.ts)
 			AND rate.RATE_IDX = 1
-			WHERE tph.TS &gt;= CONCAT(#{ymnth}, '01 00:00:00')
+			WHERE tph.TS &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME)
 			AND tph.TS &lt; CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) + INTERVAL 1 MONTH
 			AND value &gt;= 7000    
 			GROUP BY rate.TIMEZONE
@@ -1339,7 +1339,11 @@
 
 		/* 각 부하별 요금 */
 		total_fee AS (
-			SELECT 
+			SELECT
+				COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'L' THEN mp.pwr_sum END), 0) AS l_pwr,
+				COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum END), 0) AS m_pwr,
+				COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'H' THEN mp.pwr_sum END), 0) AS h_pwr,
+
 				COALESCE(ROUND(SUM(mp.pwr_sum * rti.ELCTR_RATE), 0), 0) AS smf,
 				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'L' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS l_fee,
 				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS m_fee,
@@ -1360,9 +1364,9 @@
 			trm.SMALL_CTGRY,
 			
 			CAST(mt.tv AS UNSIGNED) AS TOT_PWR,
-			CAST(COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'L' THEN mp.pwr_sum END), 0) AS UNSIGNED) AS L_PWR,
-			CAST(COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum END), 0) AS UNSIGNED) AS M_PWR,
-			CAST(COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'H' THEN mp.pwr_sum END), 0) AS UNSIGNED) AS H_PWR,
+			CAST(tf.l_pwr AS UNSIGNED) AS L_PWR,
+			CAST(tf.m_pwr AS UNSIGNED) AS M_PWR,
+			CAST(tf.h_pwr AS UNSIGNED) AS H_PWR,
 			
 			CAST(ROUND(mt.pmv * tri.BASE_RATE, 0) AS UNSIGNED) AS BASE_FEE,
 			CAST(ROUND(tf.l_fee, 0) AS UNSIGNED) AS L_ELCTR_FEE,
@@ -1372,7 +1376,6 @@
 			CAST(ROUND(mt.pmv,0) AS UNSIGNED) AS PWR
 		FROM month_total mt
 		CROSS JOIN total_fee tf
-		CROSS JOIN month_pwr mp
 		INNER JOIN tb_rt_rate_inf tri 
 			ON tri.MNTH = SUBSTRING(#{ymnth}, 5, 2)
 		AND tri.RATE_IDX = 1
