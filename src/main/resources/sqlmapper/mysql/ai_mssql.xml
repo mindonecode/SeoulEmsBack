@@ -1313,19 +1313,20 @@
 	<select id="selectRtRate" resultType="HashMap" parameterType="HashMap">
 		/* 선택한 달의 총 전력량 */
 		WITH month_total AS (
-        SELECT 
-            COALESCE(ROUND(SUM(CASE WHEN ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) THEN value END), 0), 0) AS tv,
-            COALESCE(ROUND(MAX(peak_max_value), 0), 0) AS pmv 
-        FROM tb_peak_data_hour
-        WHERE ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) - INTERVAL 11 MONTH
-          AND ts &lt; CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) + INTERVAL 1 MONTH
-          AND value &gt;= 7000
-    	),
+		SELECT 
+			COALESCE(ROUND(SUM(CASE WHEN ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) THEN value END), 0), 0) AS tv,
+			COALESCE(MAX(peak_max_value), 0) AS pmv 
+		FROM tb_peak_data_hour
+		WHERE ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) - INTERVAL 11 MONTH
+		AND ts &lt; CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) + INTERVAL 1 MONTH
+		AND value &gt;= 7000
+		),
+
 		/* 선택한 달의 부하별 전력량 */
 		month_pwr AS (
 			SELECT
 				rate.TIMEZONE,
-				COALESCE(ROUND(SUM(tph.value), 0), 0) AS pwr_sum
+				COALESCE(SUM(tph.value), 0) AS pwr_sum
 			FROM tb_peak_data_hour tph
 			INNER JOIN tb_rt_rate_inf rate
 				ON rate.MNTH = SUBSTRING(#{ymnth}, 5, 2)
@@ -1344,10 +1345,10 @@
 				COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum END), 0) AS m_pwr,
 				COALESCE(MAX(CASE WHEN mp.TIMEZONE = 'H' THEN mp.pwr_sum END), 0) AS h_pwr,
 
-				COALESCE(ROUND(SUM(mp.pwr_sum * rti.ELCTR_RATE), 0), 0) AS smf,
-				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'L' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS l_fee,
-				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS m_fee,
-				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'H' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 0), 0) AS h_fee
+				COALESCE(ROUND(SUM(mp.pwr_sum * rti.ELCTR_RATE), 2), 0) AS smf,
+				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'L' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 2), 0) AS l_fee,
+				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'M' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 2), 0) AS m_fee,
+				COALESCE(ROUND(SUM(CASE WHEN mp.TIMEZONE = 'H' THEN mp.pwr_sum * rti.ELCTR_RATE ELSE 0 END), 2), 0) AS h_fee
 			FROM month_pwr mp
 			INNER JOIN (
 				SELECT DISTINCT TIMEZONE, MNTH, RATE_IDX, ELCTR_RATE
@@ -1372,8 +1373,9 @@
 			CAST(ROUND(tf.l_fee, 0) AS UNSIGNED) AS L_ELCTR_FEE,
 			CAST(ROUND(tf.m_fee, 0) AS UNSIGNED) AS M_ELCTR_FEE,
 			CAST(ROUND(tf.h_fee, 0) AS UNSIGNED) AS H_ELCTR_FEE,
-			CAST(ROUND((mt.pmv * tri.BASE_RATE) + tf.smf, 0) AS UNSIGNED) AS TOT_FEE,
-			CAST(ROUND(mt.pmv,0) AS UNSIGNED) AS PWR
+			
+			CAST(TRUNCATE((mt.pmv * tri.BASE_RATE) + tf.smf, 0) AS UNSIGNED) AS TOT_FEE,
+			CAST(ROUND(mt.pmv, 0) AS UNSIGNED) AS PWR
 		FROM month_total mt
 		CROSS JOIN total_fee tf
 		INNER JOIN tb_rt_rate_inf tri 
@@ -1382,7 +1384,7 @@
 		INNER JOIN tb_rt_mstr_inf trm
 			ON tri.RATE_IDX = trm.RATE_IDX 
 		GROUP BY trm.LARGE_CTGRY, trm.MIDDLE_CTGRY, trm.SMALL_CTGRY, mt.tv, mt.pmv, tri.BASE_RATE, tf.smf, tf.l_fee, tf.m_fee, tf.h_fee
-		LIMIT 1;		
+		LIMIT 1;
 
 	</select>
 
