@@ -526,4 +526,9 @@
 		AND R.TS = P.PREV_TS
 	</select>
 
+	<!-- 런타임 설정 전체 조회 (AppConfigStore 캐시 적재용) -->
+	<select id="selectAppConfig" resultType="hashMap">
+		SELECT CFG_KEY, CFG_VAL FROM TB_CONFIG
+	</select>
+
 </mapper>
