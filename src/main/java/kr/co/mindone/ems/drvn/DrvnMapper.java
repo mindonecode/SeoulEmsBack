@@ -708,9 +708,25 @@ public interface DrvnMapper {
 	HashMap<String, Object> selectLatestActualReservoirAvg(HashMap<String, Object> param);
 
 	/**
+	 * (10분 스냅샷) 실측 전력: 설정(dstrb.prdct.pumpActivePwrTag) 유효전력 IKW 태그를 TB_RAWDATA
+	 * actl_ref_ts 윈도우 태그별 최신 1건으로 단순 SUM. IKW 는 순시 kW → 차분/단위환산 없음. 시스템 전체값.
+	 * @param param actl_ref_ts(String), pwrTagList(List&lt;String&gt;)
+	 * @return {value, tag_count} — tag_count=0 이면 매칭 raw 없음.
+	 */
+	HashMap<String, Object> selectLatestActualPowerSum(HashMap<String, Object> param);
+
+	/**
+	 * (10분 스냅샷) 예측 전력: TB_PEAK_PWR_PRDCT_RST.PRDCT_PWR.
+	 * CNFRM_TIME∈[rgstr_time, prdct_time), ANLY_TIME∈[prdct_time, prdct_time+10m) 의 최신 1건.
+	 * @param param rgstr_time(String), prdct_time(String)
+	 * @return {prdct_pwr, cnfrm_time, anly_time} 없으면 null.
+	 */
+	HashMap<String, Object> selectLatestPredictedPower(HashMap<String, Object> param);
+
+	/**
 	 * (10분 스냅샷 backfill) 최근 N 시간 내 한 컬럼이라도 null 인 snapshot 행 조회.
 	 * @param param nowDateTime(String), hoursBack(int)
-	 * @return rgstr_time, prdct_time, pump_grp, 11개 측정 컬럼 (null/값).
+	 * @return rgstr_time, prdct_time, pump_grp, 측정 컬럼들(전력 포함) (null/값).
 	 */
 	java.util.List<HashMap<String, Object>> selectRecentSnapshotsWithNulls(HashMap<String, Object> param);
 
