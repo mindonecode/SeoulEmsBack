@@ -6,6 +6,8 @@ set JAVA_HOME=C:\Program Files\Java\jdk-17
 set JAVA_EXE=%JAVA_HOME%\bin\java.exe
 set NODE_EXE=D:\Program Files\nodejs\node.exe
 set PATH=%JAVA_HOME%\bin;D:\Program Files\nodejs;%PATH%
+set GRADLE_USER_HOME=D:\gradle-home
+if not exist D:\gradle-home mkdir D:\gradle-home
 
 echo ===== ENV CHECK START =====
 echo JAVA_HOME=%JAVA_HOME%

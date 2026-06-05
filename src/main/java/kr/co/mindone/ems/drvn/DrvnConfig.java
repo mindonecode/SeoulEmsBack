@@ -60,6 +60,8 @@ public class DrvnConfig {
 	private String pumpLevel;
 	@Value("${dstrb.prdct.pumpDstrbId}")
 	private String pumpDstrbId;
+	@Value("${dstrb.prdct.pumpActivePwrTag}")
+	private String pumpActivePwrTag;
 	@Value("${dstrb.prdct.pwrCal.calVal}")
 	private String prdctPwrCalVal;
 	@Value("${dstrb.prdct.pumpComb.target.max.down}")
@@ -74,6 +76,8 @@ public class DrvnConfig {
 	private HashMap<Integer, HashMap<Integer, Double>> prdctPwrIdxValMap;
 	private HashMap<Integer, HashMap<Integer, Double>> pumpLevelInfoGrpMap;
 	private LinkedHashMap<Integer, HashMap<String, String>> pumpDstrbIdMap;
+	// 실측 전력 합산 대상 유효전력(IKW) 태그(전 계통 평탄화, 중복 제거). TB_RAWDATA 의 순시 kW.
+	private List<String> pwrTagList;
 	private List<HashMap<String, Object>> calList;
 	private List<HashMap<String, Object>> setPumpList;
 	private HashMap<Integer, HashMap<String, Double>> pumpCombTargetMap;
@@ -174,6 +178,26 @@ public class DrvnConfig {
 		prdctPwrCalValMap = gson.fromJson(prdctPwrCalVal, doubleType);
 		pumpLevelInfoGrpMap = gson.fromJson(pumpLevel, intStrDoubleType);
 		pumpDstrbIdMap = gson.fromJson(pumpDstrbId, linkedStrType);
+
+		// 실측 전력용 유효전력(IKW) 태그: dstrb.prdct.pumpActivePwrTag (계통→펌프IDX→태그명) 평탄화.
+		// TB_RAWDATA 에 순시 kW 로 적재되므로 차분 없이 그대로 합산 대상.
+		pwrTagList = new java.util.ArrayList<>();
+		try {
+			Type pwrTagType = new TypeToken<LinkedHashMap<Integer, LinkedHashMap<String, String>>>() {}.getType();
+			LinkedHashMap<Integer, LinkedHashMap<String, String>> pwrTagMap = gson.fromJson(pumpActivePwrTag, pwrTagType);
+			if (pwrTagMap != null) {
+				for (LinkedHashMap<String, String> grp : pwrTagMap.values()) {
+					if (grp == null) continue;
+					for (String tag : grp.values()) {
+						if (tag != null && !tag.trim().isEmpty() && !pwrTagList.contains(tag.trim())) {
+							pwrTagList.add(tag.trim());
+						}
+					}
+				}
+			}
+		} catch (Exception e) {
+			log.warn("[flow-comb-snapshot] pumpActivePwrTag 파싱 실패 — 실측 전력 합산 비활성: {}", e.getMessage());
+		}
 
 		prdctPwrIdxValMap = gson.fromJson(prdctPwrIdxVal, intStrDoubleType);
 		calList = drvnMapper.selectPumpCombCal();
@@ -6285,6 +6309,12 @@ public class DrvnConfig {
 					}
 				}
 
+				// === 전력 (시스템 전체값: PUMP_GRP 무관, 수위 5종처럼 모든 grp 행에 동일 적재) ===
+				// 예측 전력: TB_PEAK_PWR_PRDCT_RST 에서 CNFRM_TIME→RGSTR_TIME / ANLY_TIME→PRDCT_TIME 경계 매칭.
+				// 실측 전력: actl_ref_ts 기준 전력태그 SUM(VALUE×PWI_UNIT_VALUE). actl_ref_ts null 이면 null.
+				Double prdctPwr = fetchPredictedPower(rgstrTime, prdctTime);
+				Double actlPwr   = (actlRefTs != null) ? fetchActualPowerSum(actlRefTs) : null;
+
 				HashMap<String, Object> insertParam = new HashMap<>();
 				insertParam.put("rgstr_time", rgstrTime);
 				insertParam.put("prdct_time", prdctTime);
@@ -6295,6 +6325,8 @@ public class DrvnConfig {
 				insertParam.put("actl_comb", actlComb);
 				insertParam.put("prdct_prsr", prdctPrsr);
 				insertParam.put("actl_prsr",  actlPrsr);
+				insertParam.put("prdct_pwr", prdctPwr);
+				insertParam.put("actl_pwr",  actlPwr);
 				insertParam.put("prdct_wl_gn",   prdctWlGn);
 				insertParam.put("prdct_wl_ba",   prdctWlBa);
 				insertParam.put("prdct_wl_gr",   prdctWlGr);
@@ -6524,6 +6556,38 @@ public class DrvnConfig {
 		return toDouble(row.get("avg_value"));
 	}
 
+	/**
+	 * 실측 전력 합 (TB_RAWDATA 의 유효전력 IKW 태그 순시값 SUM).
+	 * pwrTagList(설정 dstrb.prdct.pumpActivePwrTag 평탄화) 의 태그를 actl_ref_ts 윈도우 태그별 최신 1건으로 합산.
+	 * IKW 는 순시 kW 이므로 차분/단위환산 없이 그대로 합. 태그 미설정 / 매칭 0 / actlRefTs null → null.
+	 * @param actlRefTs 예측 조합이 결정된 시점 (TB_CTR_PUMPYN_RST.RGSTR_TIME). null 이면 매치 불가.
+	 */
+	private Double fetchActualPowerSum(String actlRefTs) {
+		if (actlRefTs == null || pwrTagList == null || pwrTagList.isEmpty()) return null;
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("actl_ref_ts", actlRefTs);
+		p.put("pwrTagList", pwrTagList);
+		HashMap<String, Object> row = drvnMapper.selectLatestActualPowerSum(p);
+		if (row == null) return null;
+		Object cnt = row.get("tag_count");
+		if (cnt instanceof Number && ((Number) cnt).intValue() == 0) return null;
+		return toDouble(row.get("value"));
+	}
+
+	/**
+	 * 예측 전력 (TB_PEAK_PWR_PRDCT_RST.PRDCT_PWR).
+	 * CNFRM_TIME→rgstrTime / ANLY_TIME→prdctTime 10분 경계 매칭의 최신 1건. 매칭 행 없음 → null.
+	 */
+	private Double fetchPredictedPower(String rgstrTime, String prdctTime) {
+		if (rgstrTime == null || prdctTime == null) return null;
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("rgstr_time", rgstrTime);
+		p.put("prdct_time", prdctTime);
+		HashMap<String, Object> row = drvnMapper.selectLatestPredictedPower(p);
+		if (row == null) return null;
+		return toDouble(row.get("prdct_pwr"));
+	}
+
 	// =========================================================================
 	// [snapshot backfill] 최근 N 시간 내 null 컬럼 보유 행을 매분 재조회.
 	// 정확 시각으로 다시 source 조회 (TB_CTR_TNK_RST / TB_RAWDATA), 도착 시점에 채워짐.
@@ -6652,6 +6716,22 @@ public class DrvnConfig {
 					} else upsert.put(actlKey, null);
 				} else upsert.put(actlKey, null);
 			}
+
+			// ── 예측 전력 (CNFRM_TIME→rgstr_time / ANLY_TIME→prdct_time 경계 매칭) ──
+			if (row.get("prdct_pwr") == null) {
+				Double v = fetchPredictedPower(rgstrTime, prdctTime);
+				if (v != null) { upsert.put("prdct_pwr", v); changed = true;
+					log.info("[snapshot-backfill] grp={} rgstr={} prdct={} field=prdct_pwr value={}", pumpGrp, rgstrTime, prdctTime, v);
+				} else upsert.put("prdct_pwr", null);
+			} else upsert.put("prdct_pwr", null);
+
+			// ── 실측 전력 (actl_ref_ts 기준 전력태그 가중합) ──
+			if (row.get("actl_pwr") == null && actlRefTs != null) {
+				Double v = fetchActualPowerSum(actlRefTs);
+				if (v != null) { upsert.put("actl_pwr", v); changed = true;
+					log.info("[snapshot-backfill] grp={} rgstr={} refTs={} field=actl_pwr value={}", pumpGrp, rgstrTime, actlRefTs, v);
+				} else upsert.put("actl_pwr", null);
+			} else upsert.put("actl_pwr", null);
 
 			if (changed) {
 				try {
