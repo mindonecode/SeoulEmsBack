@@ -380,7 +380,7 @@ public class AiController extends BaseController {
 		HashMap < String, Object > weekItem = new HashMap < > ();
 		weekItem.put("value", Double.parseDouble(df.format(monthTvalue)));
 		weekItem.put("rate", 0);
-		weekItem.put("cost", Double.parseDouble(df.format(monthTcost)) + baseCost);
+		weekItem.put("cost", Double.parseDouble(df.format(monthTcost)));
 		weekItem.put("timezone", "T");
 		weekItem.put("range", "month");
 		tempPwrSumList.add(weekItem);
