@@ -6360,6 +6360,22 @@ public class DrvnService {
 	}
 
 	/**
+	 * 스냅샷 + 정확도 기간별 행 조회 (JSON, 차트용).
+	 * 엑셀 다운로드와 동일한 매퍼(selectSnapshotsWithAccuracyByRange)를 재사용해 동일 컬럼(alias)을 반환한다.
+	 * 수위 컬럼: prdct_wl_*, actl_wl_*, acc_wl_*, err_wl_* (gn/ba/gr/wg/wgok).
+	 * @param from 시작 (inclusive)
+	 * @param to   종료 (inclusive)
+	 * @return [{ rgstr_time, prdct_time, pump_grp, ...각 항목 예측/실측/정확도/오차율 }]
+	 */
+	public List<HashMap<String, Object>> selectSnapshotsWithAccuracy(LocalDateTime from, LocalDateTime to) {
+		DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("from", from.format(f));
+		param.put("to",   to.format(f));
+		return drvnMapper.selectSnapshotsWithAccuracyByRange(param);
+	}
+
+	/**
 	 * 단일 시트 작성: 1행 헤더(굵게/가운데/배경색) + 데이터 행.
 	 * 색 인덱스별로 CellStyle 을 메모이즈해 워크북 스타일 수를 최소화.
 	 * null 값 → 빈칸, Number → 숫자셀, 그 외 → 문자셀.
