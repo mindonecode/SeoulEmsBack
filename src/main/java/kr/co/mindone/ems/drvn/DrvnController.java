@@ -643,6 +643,26 @@ public class DrvnController extends BaseController {
 	 * @param from 시작 (inclusive)
 	 * @param to   종료 (inclusive)
 	 */
+	/**
+	 * [GET] 스냅샷 + 정확도 기간별 JSON 조회 (차트용).
+	 * - 엑셀 다운로드와 동일 데이터(예측/실측/정확도/오차율)를 JSON 배열로 반환.
+	 * - 입력 포맷: download 와 동일 ("yyyy-MM-ddTHH:mm[:ss]" 또는 "yyyy-MM-dd HH:mm[:ss]").
+	 * @param from 시작 (inclusive)
+	 * @param to   종료 (inclusive)
+	 * @return [{ rgstr_time, prdct_time, pump_grp, prdct_wl_gn, actl_wl_gn, err_wl_gn, ... }]
+	 */
+	@GetMapping("/snapshot/list")
+	public ResponseObject<List<HashMap<String, Object>>> listSnapshotAccuracy(
+			@RequestParam("from") String from,
+			@RequestParam("to") String to){
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		if (fromDt.isAfter(toDt)) {
+			throw new IllegalArgumentException("from must be <= to");
+		}
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectSnapshotsWithAccuracy(fromDt, toDt));
+	}
+
 	@GetMapping("/snapshot/download")
 	public void downloadSnapshotAccuracyExcel(HttpServletResponse response,
 											  @RequestParam("from") String from,
