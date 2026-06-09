@@ -2059,8 +2059,8 @@
 
 	<select id="peak_max" resultType="hashMap">
 		SELECT
-			DATE_FORMAT(pdh.ts, '%Y-%m') AS peak_date,
-			ROUND(MAX(CAST(pdh.PEAK_MAX_VALUE AS DECIMAL(20, 6))), 2) AS value,
+			DATE_FORMAT(pdh.ts, '%Y-%m-%d %H:%i') AS peak_date,
+			ROUND(MAX(CAST(pdh.PEAK_MAX_VALUE AS DECIMAL(20, 6))), 0) AS value,
 			pti.PWI_UNIT
 		FROM TB_PEAK_DATA_HOUR pdh
 			JOIN TB_PEAK_TAG_INF pti ON pti.CLSFC = '전체'
