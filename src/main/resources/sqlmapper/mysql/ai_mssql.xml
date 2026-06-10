@@ -1315,7 +1315,7 @@
 		WITH month_total AS (
 		SELECT 
 			COALESCE(ROUND(SUM(CASE WHEN ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) THEN value END), 0), 0) AS tv,
-			COALESCE(MAX(peak_max_value), 0) AS pmv 
+			COALESCE(ROUND(MAX(CAST(PEAK_MAX_VALUE AS DECIMAL(20, 6))), 0), 0) AS pmv 
 		FROM tb_peak_data_hour
 		WHERE ts &gt;= CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) - INTERVAL 11 MONTH
 		AND ts &lt; CAST(CONCAT(#{ymnth}, '01000000') AS DATETIME) + INTERVAL 1 MONTH
@@ -1357,6 +1357,25 @@
 				ON mp.TIMEZONE = rti.TIMEZONE
 			AND rti.MNTH = SUBSTRING(#{ymnth}, 5, 2)
 			AND rti.RATE_IDX = 1
+		),
+
+		base_fee as(
+			SELECT 
+			COALESCE(
+				(SELECT ROUND(MAX(CAST(PEAK_MAX_VALUE AS DECIMAL(20, 6))), 0) 
+				 FROM tb_peak_data_hour 
+				 WHERE ts &gt;= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+				   AND ts &lt; CURDATE()), 
+				0
+			) 
+			* 
+			COALESCE(
+				(SELECT BASE_RATE
+				 FROM TB_RT_RATE_INF 
+				 LIMIT 1), 
+				0
+			) 
+			AS base_cost
 		)
 
 		SELECT 
@@ -1369,15 +1388,16 @@
 			CAST(tf.m_pwr AS UNSIGNED) AS M_PWR,
 			CAST(tf.h_pwr AS UNSIGNED) AS H_PWR,
 			
-			CAST(ROUND(mt.pmv * tri.BASE_RATE, 0) AS UNSIGNED) AS BASE_FEE,
-			CAST(ROUND(tf.l_fee, 0) AS UNSIGNED) AS L_ELCTR_FEE,
-			CAST(ROUND(tf.m_fee, 0) AS UNSIGNED) AS M_ELCTR_FEE,
-			CAST(ROUND(tf.h_fee, 0) AS UNSIGNED) AS H_ELCTR_FEE,
+			CAST(mt.pmv * tri.BASE_RATE AS UNSIGNED) AS BASE_FEE,
+			CAST(tf.l_fee AS UNSIGNED) AS L_ELCTR_FEE,
+			CAST(tf.m_fee AS UNSIGNED) AS M_ELCTR_FEE,
+			CAST(tf.h_fee AS UNSIGNED) AS H_ELCTR_FEE,
 			
-			CAST(TRUNCATE((mt.pmv * tri.BASE_RATE) + tf.smf, 0) AS UNSIGNED) AS TOT_FEE,
+			CAST(TRUNCATE(bf.base_cost + tf.smf, 0) AS UNSIGNED) AS TOT_FEE,
 			CAST(ROUND(mt.pmv, 0) AS UNSIGNED) AS PWR
 		FROM month_total mt
 		CROSS JOIN total_fee tf
+		CROSS JOIN BASE_FEE bf
 		INNER JOIN tb_rt_rate_inf tri 
 			ON tri.MNTH = SUBSTRING(#{ymnth}, 5, 2)
 		AND tri.RATE_IDX = 1
