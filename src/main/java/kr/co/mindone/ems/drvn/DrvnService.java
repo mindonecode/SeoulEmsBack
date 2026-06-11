@@ -67,6 +67,12 @@ public class DrvnService {
 
 	@Autowired
 	DrvnConfig drvnConfig;
+
+	@Autowired
+	private kr.co.mindone.ems.common.CommonMapper commonMapper;
+
+	@Autowired
+	private kr.co.mindone.ems.common.AppConfigStore appConfigStore;
 	@Value("${dstrb.headLoss.cal}")
 	private String headLossJson;
 	@Value("${dstrb.headLoss.grp}")
@@ -162,6 +168,60 @@ public class DrvnService {
 		pumpCombTargetLevelMap = gson.fromJson(pumpCombTargetLevel, doubleType);
 		opt_idx = optIdxTag;
 
+	}
+
+	// === 제어기준 설정 (TB_CONFIG) : PumpDrvnAnly 제어 설정 팝업 연동 ===
+	// 모달 필드 ↔ TB_CONFIG 키 매핑
+	//   북악 상한 → seoul.step.ba.target,  북악 하한 → seoul.step.ba.mh.threshold
+	//   공릉 상한 → seoul.step.gn.target,  공릉 하한 → seoul.step.gn.mh.threshold
+	private static final String CFG_BA_UPPER = "seoul.step.ba.target";
+	private static final String CFG_BA_LOWER = "seoul.step.ba.mh.threshold";
+	private static final String CFG_GN_UPPER = "seoul.step.gn.target";
+	private static final String CFG_GN_LOWER = "seoul.step.gn.mh.threshold";
+
+	/**
+	 * 제어기준(배수지 상/하한 수위) 현재값 조회.
+	 * AppConfigStore 캐시(TB_CONFIG 우선, 없으면 @Value 폴백)를 읽는 DrvnConfig getter 재사용.
+	 * @return {baUpper, baLower, gnUpper, gnLower} (단위: m)
+	 */
+	public HashMap<String, Object> selectControlConfig() {
+		HashMap<String, Object> result = new HashMap<>();
+		result.put("baUpper", drvnConfig.getSeoulBaTarget());
+		result.put("baLower", drvnConfig.getSeoulBaMhThreshold());
+		result.put("gnUpper", drvnConfig.getSeoulGnTarget());
+		result.put("gnLower", drvnConfig.getSeoulGnMhThreshold());
+		return result;
+	}
+
+	/**
+	 * 제어기준(배수지 상/하한 수위) 변경 (TB_CONFIG upsert).
+	 * 저장 직후 AppConfigStore.reload() 로 즉시 캐시 반영(실패해도 다음 제어 산출 사이클 진입 시 반영됨).
+	 * @param param baUpper, baLower, gnUpper, gnLower (숫자/문자 허용)
+	 */
+	public void updateControlConfig(HashMap<String, Object> param) {
+		upsertCfg(CFG_BA_UPPER, param.get("baUpper"));
+		upsertCfg(CFG_BA_LOWER, param.get("baLower"));
+		upsertCfg(CFG_GN_UPPER, param.get("gnUpper"));
+		upsertCfg(CFG_GN_LOWER, param.get("gnLower"));
+		appConfigStore.reload();
+	}
+
+	/** TB_CONFIG 단건 upsert. 값이 비었거나 음수면 건너뜀(부분 저장 허용·방어). */
+	private void upsertCfg(String cfgKey, Object rawVal) {
+		if (rawVal == null || String.valueOf(rawVal).trim().isEmpty()) return;
+		double val;
+		try {
+			val = Double.parseDouble(String.valueOf(rawVal).trim());
+		} catch (NumberFormatException e) {
+			throw new IllegalArgumentException("제어기준 값이 숫자가 아닙니다. key=" + cfgKey + ", val=" + rawVal);
+		}
+		if (val < 0) {
+			throw new IllegalArgumentException("제어기준 값은 0 이상이어야 합니다. key=" + cfgKey + ", val=" + val);
+		}
+		HashMap<String, Object> cfgParam = new HashMap<>();
+		cfgParam.put("cfgKey", cfgKey);
+		cfgParam.put("cfgVal", String.valueOf(val));
+		commonMapper.upsertAppConfig(cfgParam);
 	}
 
 	@Autowired

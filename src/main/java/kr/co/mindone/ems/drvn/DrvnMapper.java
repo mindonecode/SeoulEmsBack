@@ -97,6 +97,14 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> prdctFlowPressure(HashMap<String, Object> map);
 
 	/**
+	 * 이번 10분 예측 배치 도착 여부 판정용.
+	 * 대상 DSTRB_ID 중 RGSTR_TIME 이 [batchStart, batchEnd) 범위에 적재된 distinct DSTRB_ID 개수.
+	 * @param param dstrbIds(List&lt;String&gt;), batchStart(String), batchEnd(String)
+	 * @return 적재 완료된 distinct DSTRB_ID 개수
+	 */
+	Integer countPredictionReady(HashMap<String, Object> param);
+
+	/**
 	 * 탱크 유량 및 압력 데이터를 조회하는 메서드
 	 * @param map 조회 조건을 담은 맵
 	 * @return 탱크 유량 및 압력 데이터를 반환
