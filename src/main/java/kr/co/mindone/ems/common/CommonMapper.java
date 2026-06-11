@@ -180,4 +180,10 @@ public interface CommonMapper {
      * @return CFG_KEY / CFG_VAL 목록
      */
     List<HashMap<String, Object>> selectAppConfig();
+
+    /**
+     * 런타임 설정 단건 upsert (TB_CONFIG). 키가 없으면 INSERT, 있으면 CFG_VAL UPDATE.
+     * @param param cfgKey(String), cfgVal(String)
+     */
+    void upsertAppConfig(HashMap<String, Object> param);
 }
