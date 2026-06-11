@@ -447,6 +447,22 @@
 		limit 1
 	</select>
 
+	<select id="countPredictionReady" parameterType="hashmap" resultType="int">
+		<!--
+		  이번 10분 예측 배치 도착 판정.
+		  대상 DSTRB_ID 중 RGSTR_TIME 이 [batchStart, batchEnd) 범위에 적재된 distinct DSTRB_ID 개수.
+		  호출부에서 이 개수가 대상 DSTRB_ID 수와 같으면 '도착 완료'로 간주.
+		-->
+		SELECT COUNT(DISTINCT UPPER(DSTRB_ID))
+		FROM TB_CTR_TNK_RST
+		WHERE UPPER(DSTRB_ID) IN
+		<foreach item="id" collection="dstrbIds" open="(" separator="," close=")">
+			UPPER(#{id})
+		</foreach>
+			AND RGSTR_TIME &gt;= #{batchStart}
+			AND RGSTR_TIME &lt; #{batchEnd}
+	</select>
+
 	<!--
 	  임의 horizon(분) 예측 조회. prdctFlowPressure 의 일반화 버전.
 	  horizonMin = 10/60/120/180/360 등.

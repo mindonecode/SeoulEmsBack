@@ -91,6 +91,8 @@ public class DrvnConfig {
 	private String wpp_code;
 	private int setMonth;
 	private StringBuffer loadCheckLog = new StringBuffer();
+	// 예측 배치(10분 단위) 중복 산출 방지용. 마지막으로 산출 완료한 배치 경계("yyyy-MM-dd HH:mm:ss").
+	private volatile String lastProcessedBatch = null;
 
 	// === [Seoul/Dev] 부하+수위 기반 단계 조정 설정값 ============================
 	@Value("${seoul.step.gn.tags:}")
@@ -284,9 +286,67 @@ public class DrvnConfig {
 		return out.toArray(new String[0]);
 	}
 
-	@Scheduled(cron = "0,30 * * * * *")
+	/**
+	 * 예측 배치 도착 폴링 게이트.
+	 * <p>
+	 * 예측값은 외부 모듈이 매 10분 정각(00,10,20…분) 단위로 TB_CTR_TNK_RST 에 적재하지만
+	 * 정확히 그 시각에 들어오지 않을 수 있다. 따라서 10초마다 깨어나
+	 *   1) 이번 10분 배치를 이미 산출했으면 skip (중복 산출 방지, UPSERT 멱등 보강)
+	 *   2) 예측이 아직 안 들어왔으면 그냥 반환 → 다음 10초에 재시도
+	 *   3) 예측 도착이 확인되면 1회만 산출하고 배치 경계를 마킹
+	 * 끝내 예측이 안 들어오면 그 배치는 산출하지 않고(skip) 다음 배치를 기다린다.
+	 */
+	@Scheduled(cron = "*/10 * * * * *")
 	public void schedulePumpTask() {
-		setInsertPumpComn(); // 비동기 실행
+		try {
+			LocalDateTime now = LocalDateTime.now();
+			// 이번 10분 배치 경계 (분을 10단위로 내림, 초/나노 제거)
+			LocalDateTime batchStart = now.withMinute(now.getMinute() / 10 * 10).withSecond(0).withNano(0);
+			DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+			String batchKey = batchStart.format(f);
+
+			// 1) 이미 이번 배치를 산출했으면 skip
+			if (batchKey.equals(lastProcessedBatch)) {
+				return;
+			}
+			// 2) 예측 미도착 → 다음 10초에 재시도
+			if (!isPredictionReady(batchStart, f)) {
+				return;
+			}
+			// 3) 도착 확인 → 1회 산출 후 마킹 (setInsertPumpComn 은 @Async 비동기 실행)
+			log.info("=== [예측 배치 {} 도착 확인 → 펌프 조합 산출 트리거] ===", batchKey);
+			lastProcessedBatch = batchKey;
+			setInsertPumpComn();
+		} catch (Exception e) {
+			log.error("펌프 조합 배치 게이트 처리 실패: {}", e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * 이번 10분 배치 예측이 대상 펌프 그룹 전부(flow/pressure DSTRB_ID)에 대해 적재되었는지 확인.
+	 * 대상 DSTRB_ID 중 RGSTR_TIME 이 [batchStart, batchStart+10분) 범위에 들어온 distinct 개수가
+	 * 대상 개수와 같으면 '도착 완료'로 간주.
+	 */
+	private boolean isPredictionReady(LocalDateTime batchStart, DateTimeFormatter f) {
+		if (pumpDstrbIdMap == null || pumpDstrbIdMap.isEmpty()) {
+			return false;
+		}
+		LinkedHashSet<String> dstrbIds = new LinkedHashSet<>();
+		for (HashMap<String, String> m : pumpDstrbIdMap.values()) {
+			if (m == null) continue;
+			if (m.get("flow") != null) dstrbIds.add(m.get("flow"));
+			if (m.get("pressure") != null) dstrbIds.add(m.get("pressure"));
+		}
+		if (dstrbIds.isEmpty()) {
+			return false;
+		}
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("dstrbIds", new ArrayList<>(dstrbIds));
+		param.put("batchStart", batchStart.format(f));
+		param.put("batchEnd", batchStart.plusMinutes(10).format(f));
+
+		Integer ready = drvnMapper.countPredictionReady(param);
+		return ready != null && ready >= dstrbIds.size();
 	}
 
 	/**
@@ -298,6 +358,10 @@ public class DrvnConfig {
 	public void setInsertPumpComn() {
 		try {
 			log.info("=== [펌프 조합 생성 스케줄러 실행됨] ===");
+
+			// 제어 산출 사이클 진입 시 TB_CONFIG 1회 재조회.
+			// 별도 주기 폴링 대신 여기서 갱신 → 이 사이클 내 insertPumpComb 호출들이 동일 설정값 사용.
+			appConfigStore.reload();
 
 			LocalDateTime currentTimeSetMonth = LocalDateTime.now();
 			setMonth = currentTimeSetMonth.getMonthValue();

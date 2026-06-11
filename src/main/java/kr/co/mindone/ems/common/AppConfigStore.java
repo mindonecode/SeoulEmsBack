@@ -3,7 +3,9 @@ package kr.co.mindone.ems.common;
  * packageName    : kr.co.mindone.ems.common
  * fileName       : AppConfigStore
  * description    : TB_CONFIG 런타임 설정 캐시.
- *                  @PostConstruct 최초 로딩 + 60초마다 재로딩하여 앱 재시작 없이 무중단 반영.
+ *                  @PostConstruct 최초 로딩 + 제어 산출 사이클 진입 시 reload() 1회 호출로 갱신.
+ *                  (별도 주기 폴링 없음 — 설정값을 실제 쓰는 제어로직이 돌 때만 DB 재조회)
+ *                  사용자 설정 변경 직후에는 updateControlConfig 에서 reload() 로 즉시 반영.
  *                  조회 실패/키 부재/파싱 실패 시 호출부가 넘긴 fallback 으로 안전 동작.
  * ===========================================================
  * DATE              AUTHOR             NOTE
@@ -13,7 +15,6 @@ package kr.co.mindone.ems.common;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -37,8 +38,11 @@ public class AppConfigStore {
         reload();
     }
 
-    /** 60초마다 TB_CONFIG 재로딩 → 무중단 반영. */
-    @Scheduled(fixedDelay = 60_000)
+    /**
+     * TB_CONFIG 재조회 → 캐시 통째로 교체.
+     * 앱 기동 시(@PostConstruct) 1회, 이후 제어 산출 사이클 진입 시
+     * (DrvnConfig.setInsertPumpComn) 및 사용자 설정 변경 직후 호출된다.
+     */
     public void reload() {
         try {
             List<HashMap<String, Object>> rows = commonMapper.selectAppConfig();

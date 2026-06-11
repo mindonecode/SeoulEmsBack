@@ -195,7 +195,7 @@ public class DrvnService {
 
 	/**
 	 * 제어기준(배수지 상/하한 수위) 변경 (TB_CONFIG upsert).
-	 * 저장 직후 AppConfigStore.reload() 로 60초 대기 없이 즉시 캐시 반영(실패해도 스케줄러가 반영).
+	 * 저장 직후 AppConfigStore.reload() 로 즉시 캐시 반영(실패해도 다음 제어 산출 사이클 진입 시 반영됨).
 	 * @param param baUpper, baLower, gnUpper, gnLower (숫자/문자 허용)
 	 */
 	public void updateControlConfig(HashMap<String, Object> param) {
