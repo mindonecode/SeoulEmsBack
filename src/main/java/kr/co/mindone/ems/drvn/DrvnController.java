@@ -106,6 +106,28 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 제어기준(배수지 상/하한 수위) 현재값 조회. (TB_CONFIG)
+	 * @return {baUpper, baLower, gnUpper, gnLower} (단위: m)
+	 */
+	@Operation(summary = "제어기준 조회", description = "selectControlConfig")
+	@GetMapping("/ctrlConfig")
+	public ResponseObject<HashMap<String, Object>> getCtrlConfig(){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectControlConfig());
+	}
+
+	/**
+	 * [POST] 제어기준(배수지 상/하한 수위) 변경. (TB_CONFIG upsert + 캐시 즉시 반영)
+	 * @param param baUpper, baLower, gnUpper, gnLower (단위: m)
+	 * @return "ok"
+	 */
+	@Operation(summary = "제어기준 변경", description = "updateControlConfig")
+	@PostMapping("/ctrlConfig")
+	public ResponseObject<String> setCtrlConfig(@RequestBody HashMap<String, Object> param){
+		drvnService.updateControlConfig(param);
+		return makeSuccessObj(ResponseMessage.SAVE_SUCCESS, "ok");
+	}
+
+	/**
 	 * [GET] 펌프 예측 가동이력 타임라인 조회 (예측·실측 비교 차트용).
 	 * @param param date(yyyy-MM-dd), pump_grp
 	 * @return [{ts, PUMP_IDX, PUMP_GRP_IDX, name, PUMP_YN}]

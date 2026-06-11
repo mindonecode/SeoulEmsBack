@@ -14,6 +14,7 @@ package kr.co.mindone.ems.drvn;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import kr.co.mindone.ems.ai.AiMapper;
+import kr.co.mindone.ems.common.AppConfigStore;
 import kr.co.mindone.ems.common.holiday.HolidayChecker;
 import kr.co.mindone.ems.epa.EpaService;
 import lombok.extern.slf4j.Slf4j;
@@ -52,6 +53,8 @@ public class DrvnConfig {
 	@Autowired
 	@Lazy
 	EpaService epaService;
+	@Autowired
+	AppConfigStore appConfigStore;   // TB_CONFIG 런타임 설정 캐시 (목표/임계값 무중단 반영)
 	@Value("${dstrb.optidx}")
 	String optIdxTag;
 	@Value("${dstrb.prdct.pwrCal.idx}")
@@ -93,19 +96,25 @@ public class DrvnConfig {
 	@Value("${seoul.step.gn.tags:}")
 	private String seoulGnTagsRaw;          // 공릉 수위 태그 CSV (예: "WB01Q0_P_WTDWLM011_ILE,WB01Q0_P_WTDWLM021_ILE,...")
 	@Value("${seoul.step.ba.tags:}")
-	private String seoulBaTagsRaw;          // 북악 수위 태그 CSV
+	private String seoulBaTagsRaw;          // 북악 유입(1·2지) = 하한 수위 태그 CSV. M/H 안전선 판정용
+	@Value("${seoul.step.ba.upper.tags:}")
+	private String seoulBaUpperTagsRaw;     // 북악 유출(1·2지) = 상한 수위 태그 CSV. L 목표수위 도달 판정용
 	@Value("${seoul.step.active.threshold:3.0}")
 	private double seoulActiveThreshold;    // 활성(가동중) 수조 임계 수위 (m)
+	// 목표/임계값은 런타임에 TB_CONFIG(DB) 우선. 아래 @Value 는 DB 미적용/조회실패 시 폴백 기본값.
 	@Value("${seoul.step.gn.target:6.0}")
-	private double seoulGnTarget;           // 공릉 07:00 목표 수위 (m)
+	private double seoulGnTarget;           // 공릉 07:00 목표 수위 (m) - 폴백
 	@Value("${seoul.step.ba.target:7.6}")
-	private double seoulBaTarget;           // 북악 07:00 목표 수위 (m)
-	@Value("${seoul.step.mh.threshold:4.0}")
-	private double seoulMhThreshold;        // 중간/최대부하 수위 임계 (m)
+	private double seoulBaTarget;           // 북악 07:00 목표 수위 (m) - 폴백
+	@Value("${seoul.step.gn.mh.threshold:4.0}")
+	private double seoulGnMhThreshold;      // 공릉 중간/최대부하 안전선 임계 (m) - 폴백
+	@Value("${seoul.step.ba.mh.threshold:4.0}")
+	private double seoulBaMhThreshold;      // 북악 중간/최대부하 안전선 임계 (m) - 폴백
 	@Value("${seoul.step.load-adjust.enabled:true}")
 	private boolean seoulLoadAdjustEnabled; // 부하(L/M/H) 기반 ±1단계 조정 on/off. false 시 유클리드 거리 결과(closestPointIndex) 그대로 사용
 	private String[] seoulGnTags;           // @PostConstruct 에서 CSV 파싱
-	private String[] seoulBaTags;
+	private String[] seoulBaTags;           // 북악 유입/하한 태그 (M/H)
+	private String[] seoulBaUpperTags;      // 북악 유출/상한 태그 (L)
 
 	// === [Seoul] 배수지별 수조 LEI 태그 (수위 변동 차트 ≥3m 활성 수조 평균용) =====
 	// 공릉(gn)/북악(ba)는 위 seoul.step.*.tags 와 동일 값을 placeholder 로 재사용.
@@ -210,7 +219,10 @@ public class DrvnConfig {
 
 		// Seoul/Dev 수위 태그 CSV → String[] 파싱 (공백 제거, 빈 항목 스킵)
 		seoulGnTags = splitCsvTags(seoulGnTagsRaw);
-		seoulBaTags = splitCsvTags(seoulBaTagsRaw);
+		seoulBaTags = splitCsvTags(seoulBaTagsRaw);            // 북악 유입/하한 (M/H)
+		seoulBaUpperTags = splitCsvTags(seoulBaUpperTagsRaw);  // 북악 유출/상한 (L)
+		// 북악 유출(상한) 태그 미설정 시 유입 태그로 폴백 → 기존 동작 유지
+		if (seoulBaUpperTags.length == 0) seoulBaUpperTags = seoulBaTags;
 
 		// 배수지명 → 수조 태그 배열 (LinkedHashMap 으로 입력 순서 유지).
 		// 빈 항목(태그 미설정)도 일단 빈 배열로 등록해 두면 호출부에서 동일 키 순회 가능.
@@ -250,6 +262,16 @@ public class DrvnConfig {
 	public double getSeoulActiveThreshold() {
 		return seoulActiveThreshold;
 	}
+
+	// === 목표/임계값: TB_CONFIG(DB) 우선, 없으면 @Value 폴백. AppConfigStore 가 60초마다 재로딩 → 무중단 반영 ===
+	/** 공릉 07:00 목표 수위 (m) - 경부하(L) 도달 판정. */
+	public double getSeoulGnTarget()      { return appConfigStore.getDouble("seoul.step.gn.target",       seoulGnTarget); }
+	/** 북악 07:00 목표 수위 (m) - 경부하(L) 도달 판정(유출/상한 평균 기준). */
+	public double getSeoulBaTarget()      { return appConfigStore.getDouble("seoul.step.ba.target",       seoulBaTarget); }
+	/** 공릉 중간/최대부하 안전선 임계 (m). */
+	public double getSeoulGnMhThreshold() { return appConfigStore.getDouble("seoul.step.gn.mh.threshold", seoulGnMhThreshold); }
+	/** 북악 중간/최대부하 안전선 임계 (m) - 유입/하한 평균 기준. */
+	public double getSeoulBaMhThreshold() { return appConfigStore.getDouble("seoul.step.ba.mh.threshold", seoulBaMhThreshold); }
 
 	private static String[] splitCsvTags(String raw) {
 		if (raw == null || raw.trim().isEmpty()) return new String[0];
@@ -3255,10 +3277,13 @@ public class DrvnConfig {
 					final int deadline7 = 7 * 60;                                      // 07:00 = 420분
 					int optMinute    = (nowScore < deadline7) ? deadline7 : deadline7 + 24 * 60;
 
+					double gnTarget = getSeoulGnTarget();
+					double baTarget = getSeoulBaTarget();
+					// 북악은 유출(상한) 평균으로 목표수위 도달 판정. 공릉은 기존 태그 그대로.
 					boolean gnReachable = isStationReachableSinlimStyle(
-							seoulGnTags, seoulGnTarget, dateTime, nowScore, optMinute);
+							seoulGnTags, gnTarget, dateTime, nowScore, optMinute);
 					boolean baReachable = isStationReachableSinlimStyle(
-							seoulBaTags, seoulBaTarget, dateTime, nowScore, optMinute);
+							seoulBaUpperTags, baTarget, dateTime, nowScore, optMinute);
 
 					if (!gnReachable || !baReachable) {
 						seoulDelta = +1;
@@ -3267,12 +3292,15 @@ public class DrvnConfig {
 						seoulDelta = -1;
 						adjReason  = "L: 둘다 도달가능 → −1";
 					}
-					logger.info("[SEOUL/L] ts={} pump_grp={} nowScore={} optMinute={} gn(target={}, reachable={}) ba(target={}, reachable={})",
+					logger.info("[SEOUL/L] ts={} pump_grp={} nowScore={} optMinute={} gn(target={}, reachable={}) ba(target={}, reachable={}, 유출/상한)",
 							ts, pump_grp, nowScore, optMinute,
-							seoulGnTarget, gnReachable, seoulBaTarget, baReachable);
+							gnTarget, gnReachable, baTarget, baReachable);
 
 				} else if ("M".equals(seoulLoad)) {
-					// 22시까지 두 곳 모두 ≥ seoulMhThreshold 유지 가능한가? (추세 기반 예측)
+					// 22시까지 두 곳 모두 각 안전선(공릉/북악 분리) 이상 유지 가능한가? (추세 기반 예측)
+					// 북악은 유입/하한(seoulBaTags) 기준 — 상단 baLevel 그대로 사용.
+					double gnTh = getSeoulGnMhThreshold();
+					double baTh = getSeoulBaMhThreshold();
 					double[] gnSustain = predict22LevelSeoul(seoulGnTags, gnLevel, dateTime);
 					double[] baSustain = predict22LevelSeoul(seoulBaTags, baLevel, dateTime);
 					double gnPred = gnSustain[0];  // 22시 예상수위 (NaN = 변화량 탐색 실패)
@@ -3281,34 +3309,35 @@ public class DrvnConfig {
 					double baRate = baSustain[1];
 					int    gnStep = (int) gnSustain[2];
 					int    baStep = (int) baSustain[2];
-					boolean gnOk = !Double.isNaN(gnPred) && gnPred >= seoulMhThreshold;
-					boolean baOk = !Double.isNaN(baPred) && baPred >= seoulMhThreshold;
+					boolean gnOk = !Double.isNaN(gnPred) && gnPred >= gnTh;
+					boolean baOk = !Double.isNaN(baPred) && baPred >= baTh;
 
 					if (gnOk && baOk) {
 						seoulDelta = -1;
-						adjReason  = "M: 둘다 22시예상≥" + seoulMhThreshold + "m"
-								+ " (gn=" + String.format("%.3f", gnPred)
-								+ ", ba=" + String.format("%.3f", baPred) + ")";
+						adjReason  = "M: 둘다 22시예상≥안전선"
+								+ " (gn=" + String.format("%.3f", gnPred) + "/th" + gnTh
+								+ ", ba=" + String.format("%.3f", baPred) + "/th" + baTh + ")";
 					} else {
 						seoulDelta = +1;
-						adjReason  = "M: 한곳이상 22시예상<" + seoulMhThreshold + "m 또는 탐색실패"
-								+ " (gn=" + (Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred))
-								+ ", ba=" + (Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)) + ")";
+						adjReason  = "M: 한곳이상 22시예상<안전선 또는 탐색실패"
+								+ " (gn=" + (Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred)) + "/th" + gnTh
+								+ ", ba=" + (Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)) + "/th" + baTh + ")";
 					}
-					logger.info("[SEOUL/M] ts={} pump_grp={} gn(cur={}, rate={}m/h, step={}m, pred22={}) ba(cur={}, rate={}m/h, step={}m, pred22={}) th={}m",
+					logger.info("[SEOUL/M] ts={} pump_grp={} gn(cur={}, rate={}m/h, step={}m, pred22={}, th={}m) ba(cur={}, rate={}m/h, step={}m, pred22={}, th={}m)",
 							ts, pump_grp,
 							String.format("%.3f", gnLevel), String.format("%.4f", gnRate), gnStep,
-							(Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred)),
+							(Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred)), gnTh,
 							String.format("%.3f", baLevel), String.format("%.4f", baRate), baStep,
-							(Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)),
-							seoulMhThreshold);
-				} else {  // "H" 최대부하
-					if (gnLevel > seoulMhThreshold && baLevel > seoulMhThreshold) {
+							(Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)), baTh);
+				} else {  // "H" 최대부하 — 공릉/북악 각 안전선 기준. 북악은 유입/하한(baLevel) 기준.
+					double gnTh = getSeoulGnMhThreshold();
+					double baTh = getSeoulBaMhThreshold();
+					if (gnLevel > gnTh && baLevel > baTh) {
 						forceFirstComb = true;
-						adjReason      = "H: 둘다 수위>" + seoulMhThreshold + "m → #1 고정";
+						adjReason      = "H: 둘다 수위>안전선 (gn>" + gnTh + "m, ba>" + baTh + "m) → #1 고정";
 					} else {
 						seoulDelta = +1;
-						adjReason  = "H: 하나라도 수위≤" + seoulMhThreshold + "m";
+						adjReason  = "H: 하나라도 수위≤안전선 (gnTh=" + gnTh + "m, baTh=" + baTh + "m)";
 					}
 				}
 
