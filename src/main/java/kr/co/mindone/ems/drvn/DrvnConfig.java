@@ -5895,6 +5895,206 @@ public class DrvnConfig {
 	}
 
 	/**
+	 * [Seoul/Dev] AI 제어사유 팝업용 부하판정 정보 (읽기 전용).
+	 * insertPumpComb 의 seoul 판정 로직(3303~3406)을 부수효과 없이 발췌:
+	 *  - 경부하(L): 공릉/북악 07시 목표수위 도달 가능 여부(reachable)
+	 *  - 중간부하(M): 22시 예상수위 ≥ 안전선(sustain) + 22시 예상수위(pred22)
+	 *  - 최대부하(H): 현재 수위 > 안전선(sustain) — insertPumpComb 와 동일 기준
+	 * DB write / 상태 변경 없음. 산출 결과(TB_CTR_PUMPYN_RST)에 영향 주지 않음.
+	 *
+	 * @param dateTime 판단 기준 시각
+	 * @return loadZone/loadZoneLabel/judgmentTime + gn/ba {level,active,reachable,sustain,pred22,threshold,target}
+	 */
+	public HashMap<String, Object> buildControlJudgment(LocalDateTime dateTime) {
+		HashMap<String, Object> result = new HashMap<>();
+		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		String ts = dateTime.format(fmt);
+
+		// 부하단계 산출 (reduceMap + 주말/공휴일 보정) — insertPumpComb 3303~3311 동일
+		HashMap<Integer, String> hourMap = (reduceMap != null) ? reduceMap.get(dateTime.getMonthValue()) : null;
+		if (hourMap == null) {
+			HashMap<Integer, HashMap<Integer, String>> rm = getMonthPwrReduc();
+			hourMap = (rm != null) ? rm.get(dateTime.getMonthValue()) : null;
+		}
+		String load = (hourMap != null) ? hourMap.get(dateTime.getHour()) : null;
+		boolean isHoliday;
+		try {
+			isHoliday = new HolidayChecker().isPassDay(ts);
+		} catch (Exception e) {
+			isHoliday = false;
+		}
+		int week = dateTime.getDayOfWeek().getValue();
+		if (week == 7 || isHoliday) {
+			load = "L";
+		} else if (week == 6 && "H".equals(load)) {
+			load = "M";
+		}
+
+		String label;
+		if ("L".equals(load))      label = "경부하";
+		else if ("M".equals(load)) label = "중간부하";
+		else if ("H".equals(load)) label = "최대부하";
+		else                       label = "미정";
+
+		result.put("loadZone", load == null ? "?" : load);
+		result.put("loadZoneLabel", label);
+		result.put("judgmentTime", ts);
+
+		// 현재 활성 평균 수위
+		double[] gn = avgActiveSeoulWaterLevel(seoulGnTags, ts, seoulActiveThreshold);
+		double[] ba = avgActiveSeoulWaterLevel(seoulBaTags, ts, seoulActiveThreshold);
+		double gnLevel = gn[0], baLevel = ba[0];
+
+		HashMap<String, Object> gnObj = new HashMap<>();
+		HashMap<String, Object> baObj = new HashMap<>();
+		gnObj.put("level", gnLevel); gnObj.put("active", (int) gn[1]);
+		baObj.put("level", baLevel); baObj.put("active", (int) ba[1]);
+
+		if ("L".equals(load)) {
+			int nowScore = dateTime.getHour() * 60 + dateTime.getMinute();
+			final int deadline7 = 7 * 60;
+			int optMinute = (nowScore < deadline7) ? deadline7 : deadline7 + 24 * 60;
+			double gnTarget = getSeoulGnTarget();
+			double baTarget = getSeoulBaTarget();
+			// 북악은 유출(상한) 평균(seoulBaUpperTags)으로 도달 판정 — insertPumpComb 3349 와 동일
+			gnObj.put("reachable", isStationReachableSinlimStyle(seoulGnTags, gnTarget, dateTime, nowScore, optMinute));
+			baObj.put("reachable", isStationReachableSinlimStyle(seoulBaUpperTags, baTarget, dateTime, nowScore, optMinute));
+			gnObj.put("target", gnTarget);
+			baObj.put("target", baTarget);
+		} else if ("M".equals(load)) {
+			double gnTh = getSeoulGnMhThreshold();
+			double baTh = getSeoulBaMhThreshold();
+			double gnPred = predict22LevelSeoul(seoulGnTags, gnLevel, dateTime)[0];
+			double baPred = predict22LevelSeoul(seoulBaTags, baLevel, dateTime)[0];
+			gnObj.put("sustain", !Double.isNaN(gnPred) && gnPred >= gnTh);
+			baObj.put("sustain", !Double.isNaN(baPred) && baPred >= baTh);
+			gnObj.put("pred22", Double.isNaN(gnPred) ? null : gnPred); gnObj.put("threshold", gnTh);
+			baObj.put("pred22", Double.isNaN(baPred) ? null : baPred); baObj.put("threshold", baTh);
+		} else if ("H".equals(load)) {
+			double gnTh = getSeoulGnMhThreshold();
+			double baTh = getSeoulBaMhThreshold();
+			// 최대부하는 현재 수위 > 안전선 기준 — insertPumpComb 3399 와 동일
+			gnObj.put("sustain", gnLevel > gnTh); gnObj.put("threshold", gnTh); gnObj.put("pred22", gnLevel);
+			baObj.put("sustain", baLevel > baTh); baObj.put("threshold", baTh); baObj.put("pred22", baLevel);
+		}
+
+		result.put("gn", gnObj);
+		result.put("ba", baObj);
+		return result;
+	}
+
+	/**
+	 * [Seoul/Dev] 제어사유 팝업 차트 예측구간용 배수지별 목표수위 시리즈 (읽기 전용).
+	 * TB_TARGET_LEVEL(태그·시간별 목표) 을 활성(현재 실측 ≥ threshold) 수조 평균으로 산출.
+	 * 각 예측 시각의 HOURS·부하단계 기준: 경부하(L)=상한(USER_MAX_VL ?? MAX_VL),
+	 * 중간/최대(M·H)=하한(USER_MIN_VL ?? MIN_VL).
+	 *
+	 * @param baseTime 기준 시각 (10분 경계로 정렬해 사용)
+	 * @return { gn:[{t,v}...], ba:[{t,v}...] } (예측 시각 +10m/+1h/+2h/+3h)
+	 */
+	public HashMap<String, Object> buildTargetLevelSeries(LocalDateTime baseTime) {
+		LocalDateTime base = baseTime.withMinute((baseTime.getMinute() / 10) * 10).withSecond(0).withNano(0);
+		HashMap<String, Object> result = new HashMap<>();
+		result.put("gn", buildTargetSeriesForStation(seoulGnTags, base));
+		result.put("ba", buildTargetSeriesForStation(seoulBaTags, base));
+		return result;
+	}
+
+	private List<HashMap<String, Object>> buildTargetSeriesForStation(String[] tags, LocalDateTime base) {
+		List<HashMap<String, Object>> series = new ArrayList<>();
+		if (tags == null || tags.length == 0) return series;
+		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		String ts = base.format(fmt);
+
+		// 활성 태그(현재 실측 ≥ 임계) 판정 — avgActiveSeoulWaterLevel 과 동일 기준
+		List<String> activeTags = new ArrayList<>();
+		for (String tag : tags) {
+			HashMap<String, Object> p = new HashMap<>();
+			p.put("tagname", tag);
+			p.put("nowDateTime", ts);
+			Double v = drvnMapper.selectRawData(p);
+			if (v != null && v >= seoulActiveThreshold) activeTags.add(tag);
+		}
+		if (activeTags.isEmpty()) return series;
+
+		List<HashMap<String, Object>> rows = drvnMapper.selectTargetLevelByTags(activeTags);
+		if (rows == null || rows.isEmpty()) return series;
+		// TAG(대문자) → HOURS → row
+		Map<String, Map<Integer, HashMap<String, Object>>> byTag = new HashMap<>();
+		for (HashMap<String, Object> r : rows) {
+			String tag = String.valueOf(r.get("TAG")).toUpperCase();
+			Object ho = r.get("HOURS");
+			if (ho == null) continue;
+			int hours = ((Number) ho).intValue();
+			byTag.computeIfAbsent(tag, k -> new HashMap<>()).put(hours, r);
+		}
+
+		ZoneId zone = ZoneId.systemDefault();
+		// 차트 좌표계와 동일: 과거 baseHour-3h ~ 미래 baseHour+4h 매 정각 + 현재 시점.
+		// 미래는 최소 3시간 목표수위 표시 보장을 위해 +4h 정각까지 확장(프론트 buildReasonWlData 의 endMs 와 동일).
+		LocalDateTime baseHour = base.withMinute(0).withSecond(0).withNano(0);
+		LocalDateTime start = baseHour.minusHours(3);
+		LocalDateTime end = baseHour.plusHours(4);
+		java.util.TreeSet<LocalDateTime> markSet = new java.util.TreeSet<>();
+		LocalDateTime mark = start;
+		while (!mark.isAfter(end)) {
+			markSet.add(mark);
+			mark = mark.plusHours(1);
+		}
+		markSet.add(base); // 현재 시점(실측↔예측 경계)
+		List<LocalDateTime> points = new ArrayList<>(markSet);
+		for (LocalDateTime t : points) {
+			int hours = t.getHour();
+			boolean upper = "L".equals(loadZoneAt(t)); // 경부하=상한, 그 외=하한
+			double sum = 0.0;
+			int cnt = 0;
+			for (String tag : activeTags) {
+				Map<Integer, HashMap<String, Object>> hm = byTag.get(tag.toUpperCase());
+				if (hm == null) continue;
+				HashMap<String, Object> row = hm.get(hours);
+				if (row == null) continue;
+				Double val = pickTargetVal(row, upper);
+				if (val != null) { sum += val; cnt++; }
+			}
+			if (cnt > 0) {
+				HashMap<String, Object> pt = new HashMap<>();
+				pt.put("t", t.atZone(zone).toInstant().toEpochMilli());
+				pt.put("v", sum / cnt);
+				series.add(pt);
+			}
+		}
+		return series;
+	}
+
+	/** 목표수위 행에서 상/하한 선택. USER 값 우선, 없으면 기본값. */
+	private Double pickTargetVal(HashMap<String, Object> row, boolean upper) {
+		Object u = upper ? row.get("USER_MAX_VL") : row.get("USER_MIN_VL");
+		Object d = upper ? row.get("MAX_VL") : row.get("MIN_VL");
+		Object pick = (u != null) ? u : d;
+		return (pick != null) ? ((Number) pick).doubleValue() : null;
+	}
+
+	/** 특정 시각의 부하단계(L/M/H) — reduceMap + 주말/공휴일 보정. */
+	private String loadZoneAt(LocalDateTime t) {
+		HashMap<Integer, String> hourMap = (reduceMap != null) ? reduceMap.get(t.getMonthValue()) : null;
+		if (hourMap == null) {
+			HashMap<Integer, HashMap<Integer, String>> rm = getMonthPwrReduc();
+			hourMap = (rm != null) ? rm.get(t.getMonthValue()) : null;
+		}
+		String load = (hourMap != null) ? hourMap.get(t.getHour()) : null;
+		boolean isHoliday;
+		try {
+			isHoliday = new HolidayChecker().isPassDay(t.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")));
+		} catch (Exception e) {
+			isHoliday = false;
+		}
+		int week = t.getDayOfWeek().getValue();
+		if (week == 7 || isHoliday) load = "L";
+		else if (week == 6 && "H".equals(load)) load = "M";
+		return load;
+	}
+
+	/**
 	 * [Seoul/Dev] 특정 시점 기준, 주어진 수위 태그들 중 활성(≥threshold) 수조들의 평균 수위와 개수.
 	 * 호출부는 활성 개수가 0 이면 시간대 기반 fallback 으로 전환한다.
 	 *

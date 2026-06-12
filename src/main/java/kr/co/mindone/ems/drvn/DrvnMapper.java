@@ -105,6 +105,13 @@ public interface DrvnMapper {
 	Integer countPredictionReady(HashMap<String, Object> param);
 
 	/**
+	 * 태그·시간별 목표수위(TB_TARGET_LEVEL) 조회. 주어진 태그들의 HOURS 0~23 전체 행.
+	 * @param tags 수조 태그 목록
+	 * @return TAG, HOURS, MIN_VL, MAX_VL, USER_MIN_VL, USER_MAX_VL
+	 */
+	List<HashMap<String, Object>> selectTargetLevelByTags(@Param("tags") List<String> tags);
+
+	/**
 	 * 탱크 유량 및 압력 데이터를 조회하는 메서드
 	 * @param map 조회 조건을 담은 맵
 	 * @return 탱크 유량 및 압력 데이터를 반환

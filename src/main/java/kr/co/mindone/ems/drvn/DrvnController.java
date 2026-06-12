@@ -159,6 +159,28 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] AI 제어사유 팝업용 부하판정 (경부하 07시 도달 / 중간·최대 22시 유지여부).
+	 * @param dateTime "yyyy-MM-dd HH:mm" (미지정 시 현재 시각)
+	 * @return loadZone/loadZoneLabel/judgmentTime + gn/ba 판정
+	 */
+	@GetMapping("/controlJudgment")
+	public ResponseObject<HashMap<String, Object>> controlJudgment(
+			@RequestParam(required = false) String dateTime){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.buildControlJudgment(dateTime));
+	}
+
+	/**
+	 * [GET] 제어사유 팝업 차트 예측구간용 배수지별 목표수위 시리즈(TB_TARGET_LEVEL).
+	 * @param dateTime "yyyy-MM-dd HH:mm" (미지정 시 현재 시각)
+	 * @return { gn:[{t,v}...], ba:[{t,v}...] }
+	 */
+	@GetMapping("/targetLevelSeries")
+	public ResponseObject<HashMap<String, Object>> targetLevelSeries(
+			@RequestParam(required = false) String dateTime){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.buildTargetLevelSeries(dateTime));
+	}
+
+	/**
 	 * [GET] 시간 범위에 대한 시간대별 부하 시간대 시리즈 조회 (정시 단위).
 	 * @param startTs "yyyy-MM-dd HH:mm"
 	 * @param endTs   "yyyy-MM-dd HH:mm"
