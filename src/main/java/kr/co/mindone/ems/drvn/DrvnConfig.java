@@ -6003,21 +6003,10 @@ public class DrvnConfig {
 	private List<HashMap<String, Object>> buildTargetSeriesForStation(String[] tags, LocalDateTime base) {
 		List<HashMap<String, Object>> series = new ArrayList<>();
 		if (tags == null || tags.length == 0) return series;
-		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
-		String ts = base.format(fmt);
-
-		// 활성 태그(현재 실측 ≥ 임계) 판정 — avgActiveSeoulWaterLevel 과 동일 기준
-		List<String> activeTags = new ArrayList<>();
-		for (String tag : tags) {
-			HashMap<String, Object> p = new HashMap<>();
-			p.put("tagname", tag);
-			p.put("nowDateTime", ts);
-			Double v = drvnMapper.selectRawData(p);
-			if (v != null && v >= seoulActiveThreshold) activeTags.add(tag);
-		}
-		if (activeTags.isEmpty()) return series;
-
-		List<HashMap<String, Object>> rows = drvnMapper.selectTargetLevelByTags(activeTags);
+		// 목표수위 합산 기준: "현재 실측 ≥ 임계" 태그 필터가 아니라,
+		// 합산하는 목표수위 값 자체가 ≥ seoulActiveThreshold(3.0m) 인 것만 사용한다.
+		// (목표수위 값 ≥ 3m = 해당 수조 정상 동작중으로 판단 → 그 값들만 더해서 평균)
+		List<HashMap<String, Object>> rows = drvnMapper.selectTargetLevelByTags(Arrays.asList(tags));
 		if (rows == null || rows.isEmpty()) return series;
 		// TAG(대문자) → HOURS → row
 		Map<String, Map<Integer, HashMap<String, Object>>> byTag = new HashMap<>();
@@ -6030,11 +6019,10 @@ public class DrvnConfig {
 		}
 
 		ZoneId zone = ZoneId.systemDefault();
-		// 차트 좌표계와 동일: 과거 baseHour-3h ~ 미래 baseHour+4h 매 정각 + 현재 시점.
-		// 미래는 최소 3시간 목표수위 표시 보장을 위해 +4h 정각까지 확장(프론트 buildReasonWlData 의 endMs 와 동일).
+		// 차트 좌표계와 동일: baseHour(현재 내림 정각) ± 3h 매 정각 + 현재 시점.
 		LocalDateTime baseHour = base.withMinute(0).withSecond(0).withNano(0);
 		LocalDateTime start = baseHour.minusHours(3);
-		LocalDateTime end = baseHour.plusHours(4);
+		LocalDateTime end = baseHour.plusHours(3);
 		java.util.TreeSet<LocalDateTime> markSet = new java.util.TreeSet<>();
 		LocalDateTime mark = start;
 		while (!mark.isAfter(end)) {
@@ -6048,13 +6036,14 @@ public class DrvnConfig {
 			boolean upper = "L".equals(loadZoneAt(t)); // 경부하=상한, 그 외=하한
 			double sum = 0.0;
 			int cnt = 0;
-			for (String tag : activeTags) {
+			for (String tag : tags) {
 				Map<Integer, HashMap<String, Object>> hm = byTag.get(tag.toUpperCase());
 				if (hm == null) continue;
 				HashMap<String, Object> row = hm.get(hours);
 				if (row == null) continue;
 				Double val = pickTargetVal(row, upper);
-				if (val != null) { sum += val; cnt++; }
+				// 목표수위 값이 ≥ seoulActiveThreshold(3.0m, 정상 동작중) 인 것만 합산해서 평균
+				if (val != null && val >= seoulActiveThreshold) { sum += val; cnt++; }
 			}
 			if (cnt > 0) {
 				HashMap<String, Object> pt = new HashMap<>();
