@@ -194,6 +194,34 @@ public class DrvnService {
 	}
 
 	/**
+	 * AI 제어사유 팝업용 부하판정 정보 조회 (읽기 전용, DrvnConfig 판정 로직 재사용).
+	 * @param dateTime "yyyy-MM-dd HH:mm" (null/공백이면 현재 시각)
+	 */
+	public HashMap<String, Object> buildControlJudgment(String dateTime) {
+		LocalDateTime dt;
+		if (dateTime == null || dateTime.trim().isEmpty()) {
+			dt = LocalDateTime.now();
+		} else {
+			dt = LocalDateTime.parse(dateTime.trim(), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+		}
+		return drvnConfig.buildControlJudgment(dt);
+	}
+
+	/**
+	 * 제어사유 팝업 차트 예측구간용 배수지별 목표수위 시리즈 (TB_TARGET_LEVEL 기반).
+	 * @param dateTime "yyyy-MM-dd HH:mm" (null/공백이면 현재 시각)
+	 */
+	public HashMap<String, Object> buildTargetLevelSeries(String dateTime) {
+		LocalDateTime dt;
+		if (dateTime == null || dateTime.trim().isEmpty()) {
+			dt = LocalDateTime.now();
+		} else {
+			dt = LocalDateTime.parse(dateTime.trim(), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+		}
+		return drvnConfig.buildTargetLevelSeries(dt);
+	}
+
+	/**
 	 * 제어기준(배수지 상/하한 수위) 변경 (TB_CONFIG upsert).
 	 * 저장 직후 AppConfigStore.reload() 로 즉시 캐시 반영(실패해도 다음 제어 산출 사이클 진입 시 반영됨).
 	 * @param param baUpper, baLower, gnUpper, gnLower (숫자/문자 허용)

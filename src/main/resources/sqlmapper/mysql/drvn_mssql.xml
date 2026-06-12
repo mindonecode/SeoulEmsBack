@@ -463,6 +463,16 @@
 			AND RGSTR_TIME &lt; #{batchEnd}
 	</select>
 
+	<select id="selectTargetLevelByTags" resultType="hashMap">
+		<!-- 태그·시간별 목표수위(TB_TARGET_LEVEL). PK(TAG,HOURS) → 태그별 0~23시 전체 행. -->
+		SELECT TAG, HOURS, MIN_VL, MAX_VL, USER_MIN_VL, USER_MAX_VL
+		FROM TB_TARGET_LEVEL
+		WHERE UPPER(TAG) IN
+		<foreach item="tag" collection="tags" open="(" separator="," close=")">
+			UPPER(#{tag})
+		</foreach>
+	</select>
+
 	<!--
 	  임의 horizon(분) 예측 조회. prdctFlowPressure 의 일반화 버전.
 	  horizonMin = 10/60/120/180/360 등.
