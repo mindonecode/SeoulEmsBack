@@ -912,4 +912,18 @@
 		ORDER BY
 			ANLY_TIME ASC
 	</select>
+
+	<select id="selectTagData24H" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') AS TS,
+			ROUND(VALUE, 2) AS VALUE
+		FROM
+			TB_RAWDATA
+		WHERE
+			TAGNAME = #{tagName}
+			AND TS &gt;= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+			AND TS &lt;= NOW()
+		ORDER BY
+			TS ASC
+	</select>
 </mapper>
