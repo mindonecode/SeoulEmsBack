@@ -49,6 +49,13 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectNowPumpUse(HashMap<String, Object> param);
 
 	/**
+	 * 실측 펌프(PMB_TAG) 기준 TB_RAWDATA 최신 TS를 조회. 예측 주기 비종속.
+	 * @param param pump_grp(0이면 전 그룹)
+	 * @return 'yyyy-MM-dd HH:mm:ss' 형식의 최신 TS, 데이터 없으면 null
+	 */
+	String selectLatestPumpRawTs(HashMap<String, Object> param);
+
+	/**
 	 * 현재 펌프 전력 사용 데이터를 조회하는 메서드
 	 * @param param 조회 조건을 담은 파라미터
 	 * @return 현재 펌프 전력 사용 데이터를 반환

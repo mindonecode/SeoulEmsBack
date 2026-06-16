@@ -173,4 +173,6 @@ public interface EnerSpendMapper {
 	HashMap<String, Object> selectPeakTagUnitValue(HashMap<String, Object> map);
 
 	List<HashMap<String, Object>> selectFuturePeakPredictData();
+
+	List<HashMap<String, Object>> selectTagData24H(HashMap<String, Object> map);
 }

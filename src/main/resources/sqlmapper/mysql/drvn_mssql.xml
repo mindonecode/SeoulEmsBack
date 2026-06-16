@@ -18,6 +18,15 @@
 		from
 		TB_CTR_PUMPYN_RST
 	</select>
+	<!-- 실측 펌프(PMB_TAG) 기준 TB_RAWDATA 최신 TS. 예측 주기 비종속. pump_grp=0이면 전 그룹. -->
+	<select id="selectLatestPumpRawTs" parameterType="hashmap" resultType="String">
+		SELECT DATE_FORMAT(MAX(tr.TS), '%Y-%m-%d %H:%i:%s')
+		FROM TB_RAWDATA tr
+		JOIN TB_CTR_PRF_PUMPMST_INF tcppi ON tr.TAGNAME = tcppi.PMB_TAG
+		<if test="pump_grp != 0">
+			WHERE tcppi.PUMP_GRP = #{pump_grp}
+		</if>
+	</select>
 	<select id="selectPumpPressure" resultType="hashmap" parameterType="hashmap">
 		select DATE_FORMAT(tr.TS, '%Y-%m-%d %H:%i') as ts, tr.VALUE as value
 		from TB_RAWDATA tr, TB_CTR_PRF_PUMPMST_INF tcppi
@@ -92,9 +101,9 @@
 		FROM
 		TB_CTR_PRF_PUMPMST_INF tcppi
 		LEFT JOIN
-		TB_RAWDATA tr_spi ON tr_spi.TAGNAME = tcppi.SPI_TAG AND tr_spi.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{startDate} and TS &gt; DATE_SUB(#{startDate}, interval 10 minute))
+		TB_RAWDATA tr_spi ON tr_spi.TAGNAME = tcppi.SPI_TAG AND tr_spi.TS = (select max(TS) from TB_RAWDATA where TAGNAME = tcppi.SPI_TAG and TS &lt;= #{actl_ref_ts} and TS &gt; DATE_SUB(#{actl_ref_ts}, interval 10 minute))
 		LEFT JOIN
-		TB_RAWDATA tr_pmb ON tr_pmb.TAGNAME = tcppi.PMB_TAG AND tr_pmb.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{startDate} and TS &gt; DATE_SUB(#{startDate}, interval 10 minute))
+		TB_RAWDATA tr_pmb ON tr_pmb.TAGNAME = tcppi.PMB_TAG AND tr_pmb.TS = (select max(TS) from TB_RAWDATA where TAGNAME = tcppi.PMB_TAG and TS &lt;= #{actl_ref_ts} and TS &gt; DATE_SUB(#{actl_ref_ts}, interval 10 minute))
 		<if test="pump_grp != 0">
 			WHERE
 			tcppi.PUMP_GRP = #{pump_grp}
@@ -180,7 +189,7 @@
 			tcppi.PUMP_GRP = #{pump_grp}
 		</if>
 		AND
-		tr.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{startDate} and TS &gt; DATE_SUB(#{startDate}, interval 10 minute))
+		tr.TS = (select max(TS) from TB_RAWDATA where TAGNAME = tcppi.PWI_TAG and TS &lt;= #{actl_ref_ts} and TS &gt; DATE_SUB(#{actl_ref_ts}, interval 10 minute))
 		<!--tr.TS = #{startDate};-->
 		ORDER BY tcppi.PUMP_IDX ASC
 	</select>

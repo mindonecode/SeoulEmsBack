@@ -243,6 +243,8 @@ public class EnerSpendService {
 		HashMap<String, Object> resultMap = new HashMap<>();
 		List<String> predictionChartX = new ArrayList<>();
 		List<Double> predictionChartY = new ArrayList<>();
+		List<String> totalPowerChartX = new ArrayList<>();
+		List<Double> totalPowerChartY = new ArrayList<>();
 		String peakRemainTime = "-";
 		Integer peakRemainMinutes = null;
 
@@ -270,6 +272,34 @@ public class EnerSpendService {
 					allPwi = Double.parseDouble(totalValueText);
 				}
 			}
+		}
+
+		// 1-1. 우측 하단 차트는 총 전력 태그의 최근 24시간 1분 데이터를 사용합니다.
+		HashMap<String, Object> totalPowerChartParam = new HashMap<>();
+		totalPowerChartParam.put("tagName", totalPowerTag);
+		List<HashMap<String, Object>> totalPowerHistory = enerSpendMapper.selectTagData24H(totalPowerChartParam);
+		for (HashMap<String, Object> totalPowerHistoryRow : totalPowerHistory) {
+			if (totalPowerHistoryRow == null) {
+				continue;
+			}
+
+			Object historyTsObj = totalPowerHistoryRow.get("TS");
+			Object historyValueObj = totalPowerHistoryRow.get("VALUE");
+
+			if (historyTsObj != null) {
+				totalPowerChartX.add(historyTsObj.toString());
+			}
+
+			double historyValue = 0.0;
+			if (historyValueObj instanceof Number) {
+				historyValue = ((Number) historyValueObj).doubleValue();
+			} else if (historyValueObj != null) {
+				String historyValueText = historyValueObj.toString().trim();
+				if (!historyValueText.isEmpty() && !"-".equals(historyValueText)) {
+					historyValue = Double.parseDouble(historyValueText);
+				}
+			}
+			totalPowerChartY.add(Math.round(historyValue * 100d) / 100d);
 		}
 
 		// 2. 송수동 모니터링 대상 태그들을 가져와 최신값을 모두 더해 송수펌프 순시 전력을 계산합니다.
@@ -357,7 +387,8 @@ public class EnerSpendService {
 			}
 		}
 
-		// 5. 피크 예상시간 조회
+		// 5. 송수수요예측 펌프사용 전력량 예측값 (향후 현재시간 이후의 값(예측값)을 붙혀서 보여줘야할꺼임)
+		// 그리고 그 중 요금 적용 전력 피크 수치보다 높아지는 시점을 좌측 전력 피크 예상 시간에 표출
 		List<HashMap<String, Object>> futurePeakPredictData = enerSpendMapper.selectFuturePeakPredictData();
 		for (HashMap<String, Object> futurePeakRow : futurePeakPredictData) {
 			if (futurePeakRow == null) {
@@ -414,6 +445,8 @@ public class EnerSpendService {
 		resultMap.put("peakRemainMinutes", peakRemainMinutes);
 		resultMap.put("predictionChartX", predictionChartX);
 		resultMap.put("predictionChartY", predictionChartY);
+		resultMap.put("totalPowerChartX", totalPowerChartX);
+		resultMap.put("totalPowerChartY", totalPowerChartY);
 		resultMap.put("ym", ym);
 		resultMap.put("baseTag", totalPowerTag);
 		resultMap.put("ts", ts);
