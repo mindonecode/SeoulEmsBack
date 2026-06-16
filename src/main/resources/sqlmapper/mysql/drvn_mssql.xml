@@ -18,13 +18,15 @@
 		from
 		TB_CTR_PUMPYN_RST
 	</select>
-	<!-- 실측 펌프(PMB_TAG) 기준 TB_RAWDATA 최신 TS. 예측 주기 비종속. pump_grp=0이면 전 그룹. -->
+	<!-- 실측 펌프(PMB_TAG) 기준 TB_RAWDATA 최신 TS. 예측 주기 비종속. pump_grp=0이면 전 그룹.
+	     최근 5분 이내 데이터만 인정 -> 그 안의 최신 시각 반환, 5분 내 없으면 NULL(현재 조합 비움). -->
 	<select id="selectLatestPumpRawTs" parameterType="hashmap" resultType="String">
 		SELECT DATE_FORMAT(MAX(tr.TS), '%Y-%m-%d %H:%i:%s')
 		FROM TB_RAWDATA tr
 		JOIN TB_CTR_PRF_PUMPMST_INF tcppi ON tr.TAGNAME = tcppi.PMB_TAG
+		WHERE tr.TS &gt;= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
 		<if test="pump_grp != 0">
-			WHERE tcppi.PUMP_GRP = #{pump_grp}
+			AND tcppi.PUMP_GRP = #{pump_grp}
 		</if>
 	</select>
 	<select id="selectPumpPressure" resultType="hashmap" parameterType="hashmap">
@@ -103,7 +105,9 @@
 		LEFT JOIN
 		TB_RAWDATA tr_spi ON tr_spi.TAGNAME = tcppi.SPI_TAG AND tr_spi.TS = (select max(TS) from TB_RAWDATA where TAGNAME = tcppi.SPI_TAG and TS &lt;= #{actl_ref_ts} and TS &gt; DATE_SUB(#{actl_ref_ts}, interval 10 minute))
 		LEFT JOIN
-		TB_RAWDATA tr_pmb ON tr_pmb.TAGNAME = tcppi.PMB_TAG AND tr_pmb.TS = (select max(TS) from TB_RAWDATA where TAGNAME = tcppi.PMB_TAG and TS &lt;= #{actl_ref_ts} and TS &gt; DATE_SUB(#{actl_ref_ts}, interval 10 minute))
+		<!-- 가동여부(PMB)는 PMB_TAG 집합의 공통 최신시각(actl_ref_ts)을 정확 매칭 -> 세 화면(대시보드/알람/제어현황)이 같은 시점의 동일 조합을 표출. PMB 는 동시 수집되므로 그 시각에 모든 펌프가 존재.
+		     (주파수 SPI 는 보조값이라 그 시각에 없을 수 있어 10분 윈도우 유지) -->
+		TB_RAWDATA tr_pmb ON tr_pmb.TAGNAME = tcppi.PMB_TAG AND tr_pmb.TS = #{actl_ref_ts}
 		<if test="pump_grp != 0">
 			WHERE
 			tcppi.PUMP_GRP = #{pump_grp}
@@ -2730,20 +2734,33 @@
 		ORDER BY TS, TAGNAME
 	</select>
 
+	<!--
+	  PMB 는 불규칙 시각에 기록되므로, 각 펌프(TAGNAME)별 10분 버킷마다 그 구간의
+	  "마지막 TS 값" 1건만 뽑아 반환한다(차트는 10분 단위로 표출).
+	  버킷 키 = FLOOR(UNIX_TIMESTAMP(TS)/600) (10분=600초). 행 수 = 펌프수 × 버킷수 로 축소.
+	-->
 	<select id="selectPumpRunHistoryByGrp" parameterType="hashmap" resultType="HashMap">
-		SELECT
-			rd.TS         AS TS,
-			rd.TAGNAME    AS TAGNAME,
-			rd.VALUE      AS VALUE,
-			cppi.PUMP_IDX AS PUMP_IDX
-		FROM TB_RAWDATA rd
-		JOIN TB_CTR_PRF_PUMPMST_INF cppi
-		  ON cppi.PMB_TAG = rd.TAGNAME
-		WHERE cppi.PUMP_GRP = #{PUMP_GRP}
-		  AND cppi.USE_YN = '1'
-		  AND rd.TS &gt;= #{startDate}
-		  AND rd.TS &lt;= #{endDate}
-		ORDER BY rd.TS
+		SELECT t.TS AS TS, t.TAGNAME AS TAGNAME, t.VALUE AS VALUE, t.PUMP_IDX AS PUMP_IDX
+		FROM (
+			SELECT
+				rd.TS         AS TS,
+				rd.TAGNAME    AS TAGNAME,
+				rd.VALUE      AS VALUE,
+				cppi.PUMP_IDX AS PUMP_IDX,
+				ROW_NUMBER() OVER (
+					PARTITION BY rd.TAGNAME, FLOOR(UNIX_TIMESTAMP(rd.TS) / 600)
+					ORDER BY rd.TS DESC
+				) AS rn
+			FROM TB_RAWDATA rd
+			JOIN TB_CTR_PRF_PUMPMST_INF cppi
+			  ON cppi.PMB_TAG = rd.TAGNAME
+			WHERE cppi.PUMP_GRP = #{PUMP_GRP}
+			  AND cppi.USE_YN = '1'
+			  AND rd.TS &gt;= #{startDate}
+			  AND rd.TS &lt;= #{endDate}
+		) t
+		WHERE t.rn = 1
+		ORDER BY t.TS
 	</select>
 
 	<!--

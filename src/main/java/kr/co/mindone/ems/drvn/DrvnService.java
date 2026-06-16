@@ -383,18 +383,21 @@ public class DrvnService {
 
 			List<HashMap<String, Object>> flowListFirst = drvnMapper.selectPumpFlow(param);
 
-			// 실측 가동 펌프 기준시각: 예측 주기에 종속된 startDate 대신 PMB_TAG 실제 최신 TS 사용.
-			// (예측 차트와 공유되는 startDate 는 변경하지 않음)
+			// 실측 가동 펌프 기준시각: 최근 5분 내 PMB_TAG 공통 최신 TS(예측 주기 비종속).
+			// 5분 내 데이터 없으면 현재 조합을 비운다(예측 차트와 공유되는 startDate 는 변경하지 않음).
 			String actlRefTs = drvnMapper.selectLatestPumpRawTs(param);
+			List<HashMap<String, Object>> selectNowPumpUse;
+			List<HashMap<String, Object>> selectNowPumpPwrUse;
 			if (actlRefTs == null) {
-				actlRefTs = (String) param.get("startDate");  // raw 미수집 시 기존 동작으로 폴백
-				log.warn("systemCurResistanceCurves: PMB_TAG 최신 TS 없음 → startDate 폴백. pump_grp={}", pump_grp);
+				log.warn("systemCurResistanceCurves: 최근 5분 내 PMB 데이터 없음 → 현재 조합 빈값. pump_grp={}", pump_grp);
+				selectNowPumpUse = new ArrayList<>();
+				selectNowPumpPwrUse = new ArrayList<>();
+			} else {
+				param.put("actl_ref_ts", actlRefTs);
+				selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
+				selectNowPumpPwrUse = drvnMapper.selectNowPumpPwrUse(param);
 			}
-			param.put("actl_ref_ts", actlRefTs);
-
-			List<HashMap<String, Object>> selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
 			HashMap<Integer, Double> nowPwrMap = new HashMap<>();
-			List<HashMap<String, Object>> selectNowPumpPwrUse = drvnMapper.selectNowPumpPwrUse(param);
 			for (HashMap<String, Object> pwrMap : selectNowPumpPwrUse) {
 				int pump_idx = (int) pwrMap.get("PUMP_GRP_IDX");
 				double pumpPwr = (double) pwrMap.get("value");
@@ -688,16 +691,17 @@ public class DrvnService {
 
 				param.put("pump_grp", 0);
 
-				// 실측 가동 펌프 기준시각: 예측 주기에 종속된 startDate 대신 PMB_TAG 실제 최신 TS 사용.
-				// (예측 차트와 공유되는 startDate 는 변경하지 않음)
+				// 실측 가동 펌프 기준시각: 최근 5분 내 PMB_TAG 공통 최신 TS(예측 주기 비종속).
+				// 5분 내 데이터 없으면 현재 조합을 비운다.
 				String actlRefTs = drvnMapper.selectLatestPumpRawTs(param);
-				if (actlRefTs == null) {
-					actlRefTs = (String) param.get("startDate");  // raw 미수집 시 기존 동작으로 폴백
-					log.warn("systemCurResistanceCurves(GS): PMB_TAG 최신 TS 없음 → startDate 폴백.");
+				boolean noActlRef = (actlRefTs == null);
+				if (noActlRef) {
+					log.warn("systemCurResistanceCurves(GS): 최근 5분 내 PMB 데이터 없음 → 현재 조합 빈값.");
+				} else {
+					param.put("actl_ref_ts", actlRefTs);
 				}
-				param.put("actl_ref_ts", actlRefTs);
 
-				List<HashMap<String, Object>> selectNowPumpPwrUse = drvnMapper.selectNowPumpPwrUse(param);
+				List<HashMap<String, Object>> selectNowPumpPwrUse = noActlRef ? new ArrayList<>() : drvnMapper.selectNowPumpPwrUse(param);
 
 				Map<Integer, Double> nowPwrMap = selectNowPumpPwrUse.stream()
 						.collect(Collectors.toMap(pwrMap -> (Integer) pwrMap.get("PUMP_IDX"), pwrMap -> (Double) pwrMap.get("value")));
@@ -705,7 +709,7 @@ public class DrvnService {
 //				Double selectHeadLossFirst = drvnMapper.selectHeadLoss(param);
 				Double linkFirst = drvnMapper.selectGsAllCurLinkFirst(param);
 				Double nodeFirst = drvnMapper.selectGsAllCurNodeFirst(param);
-				List<HashMap<String, Object>> selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
+				List<HashMap<String, Object>> selectNowPumpUse = noActlRef ? new ArrayList<>() : drvnMapper.selectNowPumpUse(param);
 				List<Double> pressureListFirst = totalFirstData.get("pressure");
 				List<Double> selectflowPressureFirst = totalFirstData.get("flow");
 
@@ -5672,7 +5676,9 @@ public class DrvnService {
 		final int futureMinutes = (daysAgo > 0) ? 360 : 0;
 		final int bucketCount = (totalMinutes + futureMinutes) / bucketMinutes;
 
-		long anchorMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
+		// 기준 시각을 10분(=600초) 정각으로 내림 → 버킷 경계가 이력 쿼리의 10분 버킷과 정렬(현재/1일전/1주전 공통)
+		long rawAnchorMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
+		long anchorMs = (rawAnchorMs / 600_000L) * 600_000L;
 		long startMs = anchorMs - (long) totalMinutes * 60_000L;
 		long endMs = anchorMs + (long) futureMinutes * 60_000L;
 		Timestamp startTs = new Timestamp(startMs);
@@ -5687,31 +5693,10 @@ public class DrvnService {
 		HashMap<Integer, Double> weightMap = pumpLevelInfoGrpMap != null
 				? pumpLevelInfoGrpMap.get(pumpGrp) : null;
 
-		// 시드: 윈도 시작 직전 각 펌프의 마지막 VALUE 로 currentState 초기화.
-		// PMB 가 상태 변화 위주로 기록되므로 시드 없이는 daysAgo>0 윈도 초입 버킷이
-		// 모두 OFF(0대) 로 잘못 표시될 수 있음.
-		// seedStartDate: startDate 이전 전체 이력 풀스캔(TB_RAWDATA)을 막기 위한 조회 하한.
-		// 펌프 ON/OFF 는 변동이 잦아 7일이면 직전 상태를 안정적으로 포착. 이 구간에 기록이 없으면
-		// 시드는 비고, currentState 는 0(OFF)로 시작하는 기존 폴백 로직을 그대로 따른다.
-		final long SEED_LOOKBACK_MS = 7L * 86_400_000L;
-		Timestamp seedStartTs = new Timestamp(startMs - SEED_LOOKBACK_MS);
-		HashMap<String, Object> seedParam = new HashMap<>();
-		seedParam.put("PUMP_GRP", pumpGrp);
-		seedParam.put("startDate", startTs);
-		seedParam.put("seedStartDate", seedStartTs);
-		List<HashMap<String, Object>> seedList = drvnMapper.selectPumpLastStateBeforeGrp(seedParam);
-
-		// rawList 는 SQL 의 ORDER BY rd.TS 로 시간 오름차순 정렬됨.
-		// pumpIdx -> 가장 최근에 본 VALUE (1=ON, 0=OFF)
+		// 이력 쿼리가 10분 버킷별 마지막값을 주므로, 윈도 시작 직전 상태를 별도 시드 조회하지 않고
+		// currentState 0(OFF)에서 시작한다(과거 15일 범위 조회 제거 → 해당 daysAgo 윈도만 조회).
+		// rawList 는 SQL ORDER BY t.TS 로 시간 오름차순. 데이터 없는 버킷은 직전 상태를 그대로 유지.
 		HashMap<Integer, Double> currentState = new HashMap<>();
-		if (seedList != null) {
-			for (HashMap<String, Object> row : seedList) {
-				if (row == null || row.get("PUMP_IDX") == null || row.get("VALUE") == null) continue;
-				int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
-				double value = Double.parseDouble(row.get("VALUE").toString());
-				currentState.put(pumpIdx, value);
-			}
-		}
 		int sampleIdx = 0;
 		int sampleSize = rawList != null ? rawList.size() : 0;
 
