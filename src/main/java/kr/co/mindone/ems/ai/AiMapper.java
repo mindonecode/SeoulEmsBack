@@ -224,10 +224,11 @@ public interface AiMapper {
 
 	/**
 	 * 펌프 On/Off 상태를 조회한다.
-	 * 
+	 *
+	 * @param param actl_ref_ts(실측 펌프 기준시각)
 	 * @return 펌프 On/Off 리스트
 	 */
-	List<HashMap<String, Object>> selectPumpOnOffStatus();
+	List<HashMap<String, Object>> selectPumpOnOffStatus(HashMap<String, Object> param);
 
 	/**
 	 * 펌프 조합을 조회한다.

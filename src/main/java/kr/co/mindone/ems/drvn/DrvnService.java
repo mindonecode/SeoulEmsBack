@@ -179,6 +179,10 @@ public class DrvnService {
 	private static final String CFG_GN_UPPER = "seoul.step.gn.target";
 	private static final String CFG_GN_LOWER = "seoul.step.gn.mh.threshold";
 
+	// selectMultiTagPrdctRange(TB_CTR_TNK_RST) 서브쿼리 RGSTR_TIME 하한.
+	// 예측은 10분 주기 적재라 최신 RGSTR 은 보통 수분 내 → 누적 이력 풀스캔 방지용 하한.
+	private static final int RGSTR_LOOKBACK_DAYS = 2;
+
 	/**
 	 * 제어기준(배수지 상/하한 수위) 현재값 조회.
 	 * AppConfigStore 캐시(TB_CONFIG 우선, 없으면 @Value 폴백)를 읽는 DrvnConfig getter 재사용.
@@ -211,14 +215,14 @@ public class DrvnService {
 	 * 제어사유 팝업 차트 예측구간용 배수지별 목표수위 시리즈 (TB_TARGET_LEVEL 기반).
 	 * @param dateTime "yyyy-MM-dd HH:mm" (null/공백이면 현재 시각)
 	 */
-	public HashMap<String, Object> buildTargetLevelSeries(String dateTime) {
+	public HashMap<String, Object> buildTargetLevelSeries(String dateTime, Integer pastHours, Integer futureHours) {
 		LocalDateTime dt;
 		if (dateTime == null || dateTime.trim().isEmpty()) {
 			dt = LocalDateTime.now();
 		} else {
 			dt = LocalDateTime.parse(dateTime.trim(), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
 		}
-		return drvnConfig.buildTargetLevelSeries(dt);
+		return drvnConfig.buildTargetLevelSeries(dt, pastHours, futureHours);
 	}
 
 	/**
@@ -383,18 +387,21 @@ public class DrvnService {
 
 			List<HashMap<String, Object>> flowListFirst = drvnMapper.selectPumpFlow(param);
 
-			// 실측 가동 펌프 기준시각: 예측 주기에 종속된 startDate 대신 PMB_TAG 실제 최신 TS 사용.
-			// (예측 차트와 공유되는 startDate 는 변경하지 않음)
+			// 실측 가동 펌프 기준시각: 최근 5분 내 PMB_TAG 공통 최신 TS(예측 주기 비종속).
+			// 5분 내 데이터 없으면 현재 조합을 비운다(예측 차트와 공유되는 startDate 는 변경하지 않음).
 			String actlRefTs = drvnMapper.selectLatestPumpRawTs(param);
+			List<HashMap<String, Object>> selectNowPumpUse;
+			List<HashMap<String, Object>> selectNowPumpPwrUse;
 			if (actlRefTs == null) {
-				actlRefTs = (String) param.get("startDate");  // raw 미수집 시 기존 동작으로 폴백
-				log.warn("systemCurResistanceCurves: PMB_TAG 최신 TS 없음 → startDate 폴백. pump_grp={}", pump_grp);
+				log.warn("systemCurResistanceCurves: 최근 5분 내 PMB 데이터 없음 → 현재 조합 빈값. pump_grp={}", pump_grp);
+				selectNowPumpUse = new ArrayList<>();
+				selectNowPumpPwrUse = new ArrayList<>();
+			} else {
+				param.put("actl_ref_ts", actlRefTs);
+				selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
+				selectNowPumpPwrUse = drvnMapper.selectNowPumpPwrUse(param);
 			}
-			param.put("actl_ref_ts", actlRefTs);
-
-			List<HashMap<String, Object>> selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
 			HashMap<Integer, Double> nowPwrMap = new HashMap<>();
-			List<HashMap<String, Object>> selectNowPumpPwrUse = drvnMapper.selectNowPumpPwrUse(param);
 			for (HashMap<String, Object> pwrMap : selectNowPumpPwrUse) {
 				int pump_idx = (int) pwrMap.get("PUMP_GRP_IDX");
 				double pumpPwr = (double) pwrMap.get("value");
@@ -688,16 +695,17 @@ public class DrvnService {
 
 				param.put("pump_grp", 0);
 
-				// 실측 가동 펌프 기준시각: 예측 주기에 종속된 startDate 대신 PMB_TAG 실제 최신 TS 사용.
-				// (예측 차트와 공유되는 startDate 는 변경하지 않음)
+				// 실측 가동 펌프 기준시각: 최근 5분 내 PMB_TAG 공통 최신 TS(예측 주기 비종속).
+				// 5분 내 데이터 없으면 현재 조합을 비운다.
 				String actlRefTs = drvnMapper.selectLatestPumpRawTs(param);
-				if (actlRefTs == null) {
-					actlRefTs = (String) param.get("startDate");  // raw 미수집 시 기존 동작으로 폴백
-					log.warn("systemCurResistanceCurves(GS): PMB_TAG 최신 TS 없음 → startDate 폴백.");
+				boolean noActlRef = (actlRefTs == null);
+				if (noActlRef) {
+					log.warn("systemCurResistanceCurves(GS): 최근 5분 내 PMB 데이터 없음 → 현재 조합 빈값.");
+				} else {
+					param.put("actl_ref_ts", actlRefTs);
 				}
-				param.put("actl_ref_ts", actlRefTs);
 
-				List<HashMap<String, Object>> selectNowPumpPwrUse = drvnMapper.selectNowPumpPwrUse(param);
+				List<HashMap<String, Object>> selectNowPumpPwrUse = noActlRef ? new ArrayList<>() : drvnMapper.selectNowPumpPwrUse(param);
 
 				Map<Integer, Double> nowPwrMap = selectNowPumpPwrUse.stream()
 						.collect(Collectors.toMap(pwrMap -> (Integer) pwrMap.get("PUMP_IDX"), pwrMap -> (Double) pwrMap.get("value")));
@@ -705,7 +713,7 @@ public class DrvnService {
 //				Double selectHeadLossFirst = drvnMapper.selectHeadLoss(param);
 				Double linkFirst = drvnMapper.selectGsAllCurLinkFirst(param);
 				Double nodeFirst = drvnMapper.selectGsAllCurNodeFirst(param);
-				List<HashMap<String, Object>> selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
+				List<HashMap<String, Object>> selectNowPumpUse = noActlRef ? new ArrayList<>() : drvnMapper.selectNowPumpUse(param);
 				List<Double> pressureListFirst = totalFirstData.get("pressure");
 				List<Double> selectflowPressureFirst = totalFirstData.get("flow");
 
@@ -5444,6 +5452,7 @@ public class DrvnService {
 		prdctParam.put("tagList", waterLevelTagList);
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", now.format(fmt));
+		prdctParam.put("rgstrLowerBound", now.minusDays(RGSTR_LOOKBACK_DAYS).format(fmt));
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
 
 		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.
@@ -5672,7 +5681,9 @@ public class DrvnService {
 		final int futureMinutes = (daysAgo > 0) ? 360 : 0;
 		final int bucketCount = (totalMinutes + futureMinutes) / bucketMinutes;
 
-		long anchorMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
+		// 기준 시각을 10분(=600초) 정각으로 내림 → 버킷 경계가 이력 쿼리의 10분 버킷과 정렬(현재/1일전/1주전 공통)
+		long rawAnchorMs = System.currentTimeMillis() - (long) daysAgo * 86_400_000L;
+		long anchorMs = (rawAnchorMs / 600_000L) * 600_000L;
 		long startMs = anchorMs - (long) totalMinutes * 60_000L;
 		long endMs = anchorMs + (long) futureMinutes * 60_000L;
 		Timestamp startTs = new Timestamp(startMs);
@@ -5687,31 +5698,10 @@ public class DrvnService {
 		HashMap<Integer, Double> weightMap = pumpLevelInfoGrpMap != null
 				? pumpLevelInfoGrpMap.get(pumpGrp) : null;
 
-		// 시드: 윈도 시작 직전 각 펌프의 마지막 VALUE 로 currentState 초기화.
-		// PMB 가 상태 변화 위주로 기록되므로 시드 없이는 daysAgo>0 윈도 초입 버킷이
-		// 모두 OFF(0대) 로 잘못 표시될 수 있음.
-		// seedStartDate: startDate 이전 전체 이력 풀스캔(TB_RAWDATA)을 막기 위한 조회 하한.
-		// 펌프 ON/OFF 는 변동이 잦아 7일이면 직전 상태를 안정적으로 포착. 이 구간에 기록이 없으면
-		// 시드는 비고, currentState 는 0(OFF)로 시작하는 기존 폴백 로직을 그대로 따른다.
-		final long SEED_LOOKBACK_MS = 7L * 86_400_000L;
-		Timestamp seedStartTs = new Timestamp(startMs - SEED_LOOKBACK_MS);
-		HashMap<String, Object> seedParam = new HashMap<>();
-		seedParam.put("PUMP_GRP", pumpGrp);
-		seedParam.put("startDate", startTs);
-		seedParam.put("seedStartDate", seedStartTs);
-		List<HashMap<String, Object>> seedList = drvnMapper.selectPumpLastStateBeforeGrp(seedParam);
-
-		// rawList 는 SQL 의 ORDER BY rd.TS 로 시간 오름차순 정렬됨.
-		// pumpIdx -> 가장 최근에 본 VALUE (1=ON, 0=OFF)
+		// 이력 쿼리가 10분 버킷별 마지막값을 주므로, 윈도 시작 직전 상태를 별도 시드 조회하지 않고
+		// currentState 0(OFF)에서 시작한다(과거 15일 범위 조회 제거 → 해당 daysAgo 윈도만 조회).
+		// rawList 는 SQL ORDER BY t.TS 로 시간 오름차순. 데이터 없는 버킷은 직전 상태를 그대로 유지.
 		HashMap<Integer, Double> currentState = new HashMap<>();
-		if (seedList != null) {
-			for (HashMap<String, Object> row : seedList) {
-				if (row == null || row.get("PUMP_IDX") == null || row.get("VALUE") == null) continue;
-				int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
-				double value = Double.parseDouble(row.get("VALUE").toString());
-				currentState.put(pumpIdx, value);
-			}
-		}
 		int sampleIdx = 0;
 		int sampleSize = rawList != null ? rawList.size() : 0;
 
@@ -5849,25 +5839,41 @@ public class DrvnService {
 				pending.add(seg);
 			}
 
-			// 1.5차 패스: 동일 scheduler tick 산출물만 유지 + 과거 시점 예측 제외.
+			// 1.5차 패스: 동일 scheduler tick 산출물만 유지 + 과거 시점 예측 정리.
 			//   - RGSTR_TIME 정렬 미스: 한 horizon 은 12:21 tick, 다른 horizon 은 12:01 tick 이면
 			//     prdctTime 이 너무 가깝게 배치되어 segment 자연 너비가 0~수 픽셀 → bump 충돌.
 			//   - 최신 rgstrMs 기준 5분 window 안에 있는 horizon 만 표시 → 동일 tick 의 산출물끼리만
 			//     보여서 prdctTime 간격이 정상화(50/60/60/180 분).
-			//   - 과거 시점(prdctMs <= nowMs) 예측은 의미 없으므로 제외.
+			//   - 과거 시점(prdctMs <= nowMs) horizon 은 원칙적으로 제외하되, 가장 미래에 가까운
+			//     1개(=leading)는 남긴다. RGSTR_TIME 이 10분 정각으로 floor 되어 10분 horizon 의
+			//     prdctTime(=floor+10m) 이 배치 윈도 후반부/신규 배치 지연 시 nowMs 를 먼저 지나
+			//     통째로 사라지던 문제 방지. 남긴 leading segment 는 2차 패스에서 startMin 을
+			//     nowMin 으로 clamp 하여 now 직후부터 표시.
 			if (!pending.isEmpty()) {
 				long maxRgstrMs = pending.stream()
 						.mapToLong(s -> ((Number) s.get("rgstrMs")).longValue())
 						.max().orElse(0L);
 				long minAllowedRgstrMs = maxRgstrMs - 5L * 60_000L;
-				pending.removeIf(s ->
-						((Number) s.get("rgstrMs")).longValue() < minAllowedRgstrMs
-								|| ((Number) s.get("prdctMs")).longValue() <= nowMs);
+				// 먼저 동일 tick window 밖(다른 배치 혼입) 만 제거.
+				pending.removeIf(s -> ((Number) s.get("rgstrMs")).longValue() < minAllowedRgstrMs);
+				// 과거 시점 horizon 중 가장 미래에 가까운(prdctMs 최대) 1개만 leading 으로 보존,
+				// 나머지 과거 horizon 은 제거.
+				long keepPastPrdctMs = pending.stream()
+						.mapToLong(s -> ((Number) s.get("prdctMs")).longValue())
+						.filter(ms -> ms <= nowMs)
+						.max().orElse(Long.MIN_VALUE);
+				pending.removeIf(s -> {
+					long prdctMs2 = ((Number) s.get("prdctMs")).longValue();
+					return prdctMs2 <= nowMs && prdctMs2 != keepPastPrdctMs;
+				});
 			}
 
 			// 2차 패스: prdctTime 부터 다음 horizon prdctTime 까지 plateau 로 endMin 설정.
 			//   마지막 segment 는 rightEdgeMin 까지 확장 (now+6h+padding).
+			//   첫 segment 의 start 는 nowMin(현재분 위치) 으로 clamp → forecast 가 항상 now 직후부터
+			//   시작하고, 10분 horizon 의 prdctTime(=now+10m) 앞 공백/통째 누락을 방지.
 			pending.sort((a, b) -> Long.compare((Long) a.get("centerMin"), (Long) b.get("centerMin")));
+			long nowMin = (nowMs - startMs) / 60_000L;
 			List<HashMap<String, Object>> chained = new ArrayList<>();
 			for (int i = 0; i < pending.size(); i++) {
 				HashMap<String, Object> seg = pending.get(i);
@@ -5875,6 +5881,8 @@ public class DrvnService {
 				long end = (i + 1 < pending.size())
 						? ((Number) pending.get(i + 1).get("centerMin")).longValue()
 						: rightEdgeMin;
+				// 첫 segment(가장 이른 horizon) 는 now 직후부터 그리도록 시작점을 nowMin 으로 clamp.
+				if (chained.isEmpty()) start = nowMin;
 				// 옵션 B: 너비 0 segment 제외. 마지막 HORIZON=360 의 prdctTime 이
 				// rightEdgeMin(=now+6h) 과 겹쳐 start == end 가 되면 표시 의미가 없으므로 skip.
 				if (end <= start) continue;
@@ -6018,6 +6026,7 @@ public class DrvnService {
 		prdctParam.put("tagList", allTags);
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", nowDateTimeStr);
+		prdctParam.put("rgstrLowerBound", now.minusDays(RGSTR_LOOKBACK_DAYS).format(fmt));
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
 
 		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.

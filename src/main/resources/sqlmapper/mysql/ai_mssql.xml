@@ -2351,7 +2351,9 @@
 			TB_RAWDATA rd, TB_CTR_PRF_PUMPMST_INF cppi
 		WHERE
 			rd.tagname = cppi.PMB_TAG
-			AND rd.ts = (SELECT MAX(TS) FROM TB_RAWDATA WHERE TS &gt;= DATE_SUB(NOW(), INTERVAL 10 MINUTE) )
+			<!-- actl_ref_ts = selectLatestPumpRawTs = PMB_TAG 집합의 MAX(TS)(단일 최신시점).
+			     그 단일 시각을 정확 매칭해 모든 펌프를 같은 시점의 값으로 조회(시점 일관성 보장). -->
+			AND rd.ts = #{actl_ref_ts}
 		ORDER BY cppi.PUMP_GRP, cppi.PUMP_IDX ASC
 	</select>
 
@@ -3211,14 +3213,27 @@
 			GROUP BY A.RGSTR_TIME
 		) rst
 		LEFT JOIN (
-			SELECT tr.TS as TS,
+			<!--
+			  PMB_TAG 집합의 "공통 최신 단일시점" 매칭:
+			    서브쿼리에서 TB_RAWDATA 를 PMB_TAG 와 JOIN 한 뒤 그 집합의 MAX(TS) 로
+			    단일 시각 T 하나를 구하고, 그 T 의 PMB 값들로만 조합을 만든다.
+			    -> 모든 펌프가 같은 시각의 값(시점 일관성 보장) + PMB 외 센서 태그의
+			       더 최신 TS 가 끼어들어 누락되던 문제도 제거.
+			    (태그별 MAX 는 펌프마다 다른 시각이 섞여 실재하지 않은 조합이 될 수 있어 금지)
+			-->
+			SELECT MAX(tr.TS) as TS,
 				GROUP_CONCAT(CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END ORDER BY tc.PUMP_IDX ASC) AS PUMP_USE_RST
 			FROM TB_RAWDATA tr
 				JOIN TB_CTR_PRF_PUMPMST_INF tc
 				ON tr.TAGNAME = tc.PMB_TAG
 			WHERE tc.PUMP_GRP = #{pump_grp}
-				AND tr.TS = (select max(TS) from TB_RAWDATA where TS &lt;= #{nowDate} and TS &gt; DATE_SUB(#{nowDate}, interval 15 minute))
-			GROUP BY tr.TS
+				AND tr.TS = (
+					select max(r2.TS)
+					from TB_RAWDATA r2
+						JOIN TB_CTR_PRF_PUMPMST_INF c2 ON r2.TAGNAME = c2.PMB_TAG
+					where c2.PUMP_GRP = #{pump_grp}
+						and r2.TS &lt;= #{nowDate} and r2.TS &gt; DATE_SUB(#{nowDate}, interval 5 minute)
+				)
 		) raw
 		<!--
 		  ON 1=1 (cross join):
