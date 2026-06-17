@@ -413,6 +413,7 @@
 			TB_CTR_TNK_RST tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
+			and tctr.MODEL_NAME = 'XGBoost'
 			and
 			tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 minute)
 			and
@@ -451,10 +452,12 @@
 			TB_CTR_TNK_RST tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
+			and tctr.MODEL_NAME = 'XGBoost'
 			and tctr.RGSTR_TIME = (
 				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
 				 WHERE UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
 				   AND RGSTR_TIME &lt;= #{nowDateTime}
+				   AND MODEL_NAME = 'XGBoost'
 			)
 			and tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL 10 MINUTE)
 		limit 1
@@ -474,16 +477,24 @@
 		</foreach>
 			AND RGSTR_TIME &gt;= #{batchStart}
 			AND RGSTR_TIME &lt; #{batchEnd}
+			AND MODEL_NAME = 'XGBoost'
 	</select>
 
 	<select id="selectTargetLevelByTags" resultType="hashMap">
-		<!-- 태그·시간별 목표수위(TB_TARGET_LEVEL). PK(TAG,HOURS) → 태그별 0~23시 전체 행. -->
-		SELECT TAG, HOURS, MIN_VL, MAX_VL, USER_MIN_VL, USER_MAX_VL
-		FROM TB_TARGET_LEVEL
-		WHERE UPPER(TAG) IN
-		<foreach item="tag" collection="tags" open="(" separator="," close=")">
-			UPPER(#{tag})
-		</foreach>
+		<!-- 태그·시간별 목표수위(TB_TARGET_LEVEL). 매일 업서트되는 테이블이므로
+		     (TAG,HOURS) 별 최신 MDFCN_DT(마지막 갱신) 행만 반환한다.
+		     CRT_DT 는 최초 생성시각이라 갱신 판단 기준으로 부적합 → MDFCN_DT 사용. -->
+		SELECT t.TAG, t.HOURS, t.MIN_VL, t.MAX_VL, t.USER_MIN_VL, t.USER_MAX_VL
+		FROM TB_TARGET_LEVEL t
+		JOIN (
+			SELECT TAG, HOURS, MAX(MDFCN_DT) AS MX_MDFCN
+			FROM TB_TARGET_LEVEL
+			WHERE UPPER(TAG) IN
+			<foreach item="tag" collection="tags" open="(" separator="," close=")">
+				UPPER(#{tag})
+			</foreach>
+			GROUP BY TAG, HOURS
+		) m ON m.TAG = t.TAG AND m.HOURS = t.HOURS AND m.MX_MDFCN = t.MDFCN_DT
 	</select>
 
 	<!--
@@ -498,10 +509,12 @@
 			TB_CTR_TNK_RST tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
+			and tctr.MODEL_NAME = 'XGBoost'
 			and tctr.RGSTR_TIME = (
 				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
 				 WHERE UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
 				   AND RGSTR_TIME &lt;= #{nowDateTime}
+				   AND MODEL_NAME = 'XGBoost'
 			)
 			and tctr.PRDCT_TIME = DATE_ADD(tctr.RGSTR_TIME, INTERVAL #{horizonMin} MINUTE)
 		limit 1
@@ -531,6 +544,8 @@
 			TB_CTR_TNK_RST
 		WHERE
 				UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
+			AND
+				MODEL_NAME = 'XGBoost'
 			AND
 				RGSTR_TIME &lt;= #{nowDateTime}
 			AND
@@ -711,7 +726,8 @@
 			LEFT JOIN
 				TB_CTR_TNK_INF tnt on tnt.DSTRB_Q_ID = tctr.DSTRB_ID
 		WHERE
-			UPPER(tnt.DSTRB_Q_ID) in
+			tctr.MODEL_NAME = 'XGBoost'
+			AND UPPER(tnt.DSTRB_Q_ID) in
 			<foreach item="id" collection="dstrb_id" open="(" separator="," close=")">
 				UPPER(#{id})
 			</foreach>
@@ -745,7 +761,8 @@
 			LEFT JOIN
 				TB_CTR_TNK_INF tnt on tnt.DSTRB_P_ID = tctr.DSTRB_ID
 		WHERE
-			UPPER(tnt.DSTRB_P_ID) in
+			tctr.MODEL_NAME = 'XGBoost'
+			AND UPPER(tnt.DSTRB_P_ID) in
 					<foreach item="id" collection="dstrb_id" open="(" separator="," close=")">
 						UPPER(#{id})
 					</foreach>
@@ -811,6 +828,7 @@
 			TB_CTR_TNK_RST tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
+			AND tctr.MODEL_NAME = 'XGBoost'
 			AND
 			<if test="first != true">
 					tctr.RGSTR_TIME &lt;= #{startDate}
@@ -867,6 +885,7 @@
 			SELECT PRDCT_VALUE
 			FROM TB_CTR_TNK_RST
 			WHERE DSTRB_ID = #{DSTRB_ID}
+			  AND MODEL_NAME = 'XGBoost'
 			  AND PRDCT_VALUE IS NOT NULL
 			  AND PRDCT_VALUE != 0
 			  AND RGSTR_TIME <![CDATA[ <= ]]> #{nowDateTime}
@@ -941,6 +960,7 @@
 			</if>
 		WHERE
 			tcti.TYPE = #{type}
+			AND tctr.MODEL_NAME = 'XGBoost'
 		<if test="pump_grp != null">
 			AND
 				tcti.USE_YN IN (#{pump_grp}, 0)
@@ -967,6 +987,7 @@
 		</if>
 		WHERE
 		tcti.TYPE = 0
+		AND tctr.MODEL_NAME = 'XGBoost'
 		<if test="pump_grp != null">
 			AND
 				tcti.USE_YN IN (#{pump_grp}, 0)
@@ -1187,7 +1208,8 @@
 		join
 			TB_CTR_TNK_RST tctr on tcti.DSTRB_Q_ID = tctr.DSTRB_ID
 		WHERE
-		UPPER(tcti.DSTRB_Q_ID) in
+		tctr.MODEL_NAME = 'XGBoost'
+		AND UPPER(tcti.DSTRB_Q_ID) in
 		<foreach item="id" collection="dstrbList" open="(" separator="," close=")">
 			UPPER(#{id})
 		</foreach>
@@ -1392,6 +1414,8 @@
 		WHERE
 				UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
 			and
+				tctr.MODEL_NAME = 'XGBoost'
+			and
 				tctr.RGSTR_TIME &lt;= #{endDate}
 			and
 				tctr.RGSTR_TIME &gt;= #{startDate}
@@ -1412,6 +1436,7 @@
 		'Q_GS_OLD_Predict', 'P_GS_OLD_Predict',
 		'Q_GS_NEW_Predict', 'P_GS_NEW_Predict'
 		)
+		AND tctr.MODEL_NAME = 'XGBoost'
 		AND tctr.RGSTR_TIME &lt;= #{endDate}
 		AND tctr.RGSTR_TIME &gt;= #{startDate}
 		GROUP BY
@@ -2942,11 +2967,16 @@
 					#{ptime}
 				</foreach>
 				AND RGSTR_TIME &lt;= #{nowDateTime}
+				<if test="rgstrLowerBound != null">
+				AND RGSTR_TIME &gt;= #{rgstrLowerBound}
+				</if>
+				AND MODEL_NAME = 'XGBoost'
 			GROUP BY DSTRB_ID, PRDCT_TIME
 		) m
 			ON t.DSTRB_ID = m.DSTRB_ID
 			AND t.PRDCT_TIME = m.PRDCT_TIME
 			AND t.RGSTR_TIME = m.MAX_RGSTR
+		WHERE t.MODEL_NAME = 'XGBoost'
 		ORDER BY t.PRDCT_TIME, t.DSTRB_ID
 	</select>
 
@@ -2971,6 +3001,7 @@
 				#{ptime}
 			</foreach>
 			AND PRDCT_TIME = DATE_ADD(RGSTR_TIME, INTERVAL 10 MINUTE)
+			AND MODEL_NAME = 'XGBoost'
 		ORDER BY PRDCT_TIME, DSTRB_ID
 	</select>
 
@@ -2988,11 +3019,13 @@
 	<select id="selectLatestPredictedFlowTnk" parameterType="hashmap" resultType="hashmap">
 		SELECT
 			ROUND(tctr.PRDCT_VALUE, 1) AS prdct_flow,
-			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time
+			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time,
+			tctr.MODEL_NAME AS model_name
 		FROM TB_CTR_TNK_RST tctr
 		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
 			AND tctr.RGSTR_TIME = #{rgstr_time}
 			AND tctr.PRDCT_TIME = #{prdct_time}
+			AND tctr.MODEL_NAME = 'XGBoost'
 		LIMIT 1
 	</select>
 
@@ -3063,14 +3096,16 @@
 			 PRDCT_PRSR, ACTL_PRSR,
 			 PRDCT_PWR, ACTL_PWR,
 			 PRDCT_WL_GN, PRDCT_WL_BA, PRDCT_WL_GR, PRDCT_WL_WG, PRDCT_WL_WGOK,
-			 ACTL_WL_GN,  ACTL_WL_BA,  ACTL_WL_GR,  ACTL_WL_WG,  ACTL_WL_WGOK)
+			 ACTL_WL_GN,  ACTL_WL_BA,  ACTL_WL_GR,  ACTL_WL_WG,  ACTL_WL_WGOK,
+			 MODEL_NAME)
 		VALUES
 			(#{rgstr_time}, #{prdct_time}, #{pump_grp},
 			 #{prdct_flow}, #{actl_flow}, #{prdct_comb}, #{actl_comb},
 			 #{prdct_prsr}, #{actl_prsr},
 			 #{prdct_pwr}, #{actl_pwr},
 			 #{prdct_wl_gn}, #{prdct_wl_ba}, #{prdct_wl_gr}, #{prdct_wl_wg}, #{prdct_wl_wgok},
-			 #{actl_wl_gn},  #{actl_wl_ba},  #{actl_wl_gr},  #{actl_wl_wg},  #{actl_wl_wgok})
+			 #{actl_wl_gn},  #{actl_wl_ba},  #{actl_wl_gr},  #{actl_wl_wg},  #{actl_wl_wgok},
+			 #{model_name})
 		ON DUPLICATE KEY UPDATE
 			PRDCT_TIME    = #{prdct_time},
 			PRDCT_FLOW    = COALESCE(#{prdct_flow}, PRDCT_FLOW),
@@ -3090,7 +3125,8 @@
 			ACTL_WL_BA    = COALESCE(#{actl_wl_ba},    ACTL_WL_BA),
 			ACTL_WL_GR    = COALESCE(#{actl_wl_gr},    ACTL_WL_GR),
 			ACTL_WL_WG    = COALESCE(#{actl_wl_wg},    ACTL_WL_WG),
-			ACTL_WL_WGOK  = COALESCE(#{actl_wl_wgok},  ACTL_WL_WGOK)
+			ACTL_WL_WGOK  = COALESCE(#{actl_wl_wgok},  ACTL_WL_WGOK),
+			MODEL_NAME    = COALESCE(#{model_name},    MODEL_NAME)
 	</insert>
 
 	<!--
@@ -3196,6 +3232,7 @@
 		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
 			AND tctr.RGSTR_TIME = #{rgstr_time}
 			AND tctr.PRDCT_TIME = #{prdct_time}
+			AND tctr.MODEL_NAME = 'XGBoost'
 		LIMIT 1
 	</select>
 
@@ -3227,6 +3264,7 @@
 			</foreach>
 			AND tctr.RGSTR_TIME = #{rgstr_time}
 			AND tctr.PRDCT_TIME = #{prdct_time}
+			AND tctr.MODEL_NAME = 'XGBoost'
 			AND tctr.PRDCT_VALUE IS NOT NULL
 			AND tctr.PRDCT_VALUE <![CDATA[ >= ]]> #{threshold}
 	</select>

@@ -179,6 +179,10 @@ public class DrvnService {
 	private static final String CFG_GN_UPPER = "seoul.step.gn.target";
 	private static final String CFG_GN_LOWER = "seoul.step.gn.mh.threshold";
 
+	// selectMultiTagPrdctRange(TB_CTR_TNK_RST) 서브쿼리 RGSTR_TIME 하한.
+	// 예측은 10분 주기 적재라 최신 RGSTR 은 보통 수분 내 → 누적 이력 풀스캔 방지용 하한.
+	private static final int RGSTR_LOOKBACK_DAYS = 2;
+
 	/**
 	 * 제어기준(배수지 상/하한 수위) 현재값 조회.
 	 * AppConfigStore 캐시(TB_CONFIG 우선, 없으면 @Value 폴백)를 읽는 DrvnConfig getter 재사용.
@@ -211,14 +215,14 @@ public class DrvnService {
 	 * 제어사유 팝업 차트 예측구간용 배수지별 목표수위 시리즈 (TB_TARGET_LEVEL 기반).
 	 * @param dateTime "yyyy-MM-dd HH:mm" (null/공백이면 현재 시각)
 	 */
-	public HashMap<String, Object> buildTargetLevelSeries(String dateTime) {
+	public HashMap<String, Object> buildTargetLevelSeries(String dateTime, Integer pastHours, Integer futureHours) {
 		LocalDateTime dt;
 		if (dateTime == null || dateTime.trim().isEmpty()) {
 			dt = LocalDateTime.now();
 		} else {
 			dt = LocalDateTime.parse(dateTime.trim(), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
 		}
-		return drvnConfig.buildTargetLevelSeries(dt);
+		return drvnConfig.buildTargetLevelSeries(dt, pastHours, futureHours);
 	}
 
 	/**
@@ -5448,6 +5452,7 @@ public class DrvnService {
 		prdctParam.put("tagList", waterLevelTagList);
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", now.format(fmt));
+		prdctParam.put("rgstrLowerBound", now.minusDays(RGSTR_LOOKBACK_DAYS).format(fmt));
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
 
 		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.
@@ -5834,25 +5839,41 @@ public class DrvnService {
 				pending.add(seg);
 			}
 
-			// 1.5차 패스: 동일 scheduler tick 산출물만 유지 + 과거 시점 예측 제외.
+			// 1.5차 패스: 동일 scheduler tick 산출물만 유지 + 과거 시점 예측 정리.
 			//   - RGSTR_TIME 정렬 미스: 한 horizon 은 12:21 tick, 다른 horizon 은 12:01 tick 이면
 			//     prdctTime 이 너무 가깝게 배치되어 segment 자연 너비가 0~수 픽셀 → bump 충돌.
 			//   - 최신 rgstrMs 기준 5분 window 안에 있는 horizon 만 표시 → 동일 tick 의 산출물끼리만
 			//     보여서 prdctTime 간격이 정상화(50/60/60/180 분).
-			//   - 과거 시점(prdctMs <= nowMs) 예측은 의미 없으므로 제외.
+			//   - 과거 시점(prdctMs <= nowMs) horizon 은 원칙적으로 제외하되, 가장 미래에 가까운
+			//     1개(=leading)는 남긴다. RGSTR_TIME 이 10분 정각으로 floor 되어 10분 horizon 의
+			//     prdctTime(=floor+10m) 이 배치 윈도 후반부/신규 배치 지연 시 nowMs 를 먼저 지나
+			//     통째로 사라지던 문제 방지. 남긴 leading segment 는 2차 패스에서 startMin 을
+			//     nowMin 으로 clamp 하여 now 직후부터 표시.
 			if (!pending.isEmpty()) {
 				long maxRgstrMs = pending.stream()
 						.mapToLong(s -> ((Number) s.get("rgstrMs")).longValue())
 						.max().orElse(0L);
 				long minAllowedRgstrMs = maxRgstrMs - 5L * 60_000L;
-				pending.removeIf(s ->
-						((Number) s.get("rgstrMs")).longValue() < minAllowedRgstrMs
-								|| ((Number) s.get("prdctMs")).longValue() <= nowMs);
+				// 먼저 동일 tick window 밖(다른 배치 혼입) 만 제거.
+				pending.removeIf(s -> ((Number) s.get("rgstrMs")).longValue() < minAllowedRgstrMs);
+				// 과거 시점 horizon 중 가장 미래에 가까운(prdctMs 최대) 1개만 leading 으로 보존,
+				// 나머지 과거 horizon 은 제거.
+				long keepPastPrdctMs = pending.stream()
+						.mapToLong(s -> ((Number) s.get("prdctMs")).longValue())
+						.filter(ms -> ms <= nowMs)
+						.max().orElse(Long.MIN_VALUE);
+				pending.removeIf(s -> {
+					long prdctMs2 = ((Number) s.get("prdctMs")).longValue();
+					return prdctMs2 <= nowMs && prdctMs2 != keepPastPrdctMs;
+				});
 			}
 
 			// 2차 패스: prdctTime 부터 다음 horizon prdctTime 까지 plateau 로 endMin 설정.
 			//   마지막 segment 는 rightEdgeMin 까지 확장 (now+6h+padding).
+			//   첫 segment 의 start 는 nowMin(현재분 위치) 으로 clamp → forecast 가 항상 now 직후부터
+			//   시작하고, 10분 horizon 의 prdctTime(=now+10m) 앞 공백/통째 누락을 방지.
 			pending.sort((a, b) -> Long.compare((Long) a.get("centerMin"), (Long) b.get("centerMin")));
+			long nowMin = (nowMs - startMs) / 60_000L;
 			List<HashMap<String, Object>> chained = new ArrayList<>();
 			for (int i = 0; i < pending.size(); i++) {
 				HashMap<String, Object> seg = pending.get(i);
@@ -5860,6 +5881,8 @@ public class DrvnService {
 				long end = (i + 1 < pending.size())
 						? ((Number) pending.get(i + 1).get("centerMin")).longValue()
 						: rightEdgeMin;
+				// 첫 segment(가장 이른 horizon) 는 now 직후부터 그리도록 시작점을 nowMin 으로 clamp.
+				if (chained.isEmpty()) start = nowMin;
 				// 옵션 B: 너비 0 segment 제외. 마지막 HORIZON=360 의 prdctTime 이
 				// rightEdgeMin(=now+6h) 과 겹쳐 start == end 가 되면 표시 의미가 없으므로 skip.
 				if (end <= start) continue;
@@ -6003,6 +6026,7 @@ public class DrvnService {
 		prdctParam.put("tagList", allTags);
 		prdctParam.put("prdctTimeList", prdctTimeStrs);
 		prdctParam.put("nowDateTime", nowDateTimeStr);
+		prdctParam.put("rgstrLowerBound", now.minusDays(RGSTR_LOOKBACK_DAYS).format(fmt));
 		List<HashMap<String, Object>> prdctRows = drvnMapper.selectMultiTagPrdctRange(prdctParam);
 
 		// 새 batch (t0 cycle) 미등록 시 직전 10분 batch 의 미래 시점으로 fallback.

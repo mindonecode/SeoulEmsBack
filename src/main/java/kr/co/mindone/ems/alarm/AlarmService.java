@@ -83,16 +83,21 @@ public class AlarmService {
 			// 목표피크 설정이 비어있으면 알람 비교 불가 → 조용히 스킵.
 			return;
 		}
-		String peakGoalStringValue = (String) peakGoal.get(0).get("value");
+		// PEAK_VALUE 는 숫자형 컬럼이라 MyBatis 가 Double 로 매핑 → (String) 강제 캐스팅 금지.
+		// Double/BigDecimal/Integer/String 무엇이 와도 안전하게 문자열화 후 숫자 파싱.
+		Object peakGoalRaw = peakGoal.get(0).get("value");
+		if (peakGoalRaw == null) {
+			return;
+		}
 
 		//전력 알람 링크
 		String pathLink = LOCALHOST + url;
 
 		int peakGoalValue;
 		try {
-			peakGoalValue = Integer.parseInt(peakGoalStringValue);
+			peakGoalValue = (int) Math.round(Double.parseDouble(String.valueOf(peakGoalRaw)));
 		} catch (NumberFormatException e) {
-			System.err.println("String을 int로 변환하는데 실패했습니다.");
+			System.err.println("목표피크 값을 숫자로 변환하는데 실패했습니다: " + peakGoalRaw);
 			return;
 		}
 

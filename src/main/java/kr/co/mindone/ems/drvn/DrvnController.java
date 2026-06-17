@@ -176,8 +176,10 @@ public class DrvnController extends BaseController {
 	 */
 	@GetMapping("/targetLevelSeries")
 	public ResponseObject<HashMap<String, Object>> targetLevelSeries(
-			@RequestParam(required = false) String dateTime){
-		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.buildTargetLevelSeries(dateTime));
+			@RequestParam(required = false) String dateTime,
+			@RequestParam(required = false) Integer pastHours,
+			@RequestParam(required = false) Integer futureHours){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.buildTargetLevelSeries(dateTime, pastHours, futureHours));
 	}
 
 	/**

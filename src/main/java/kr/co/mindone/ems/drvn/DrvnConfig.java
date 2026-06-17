@@ -5992,15 +5992,18 @@ public class DrvnConfig {
 	 * @param baseTime 기준 시각 (10분 경계로 정렬해 사용)
 	 * @return { gn:[{t,v}...], ba:[{t,v}...] } (예측 시각 +10m/+1h/+2h/+3h)
 	 */
-	public HashMap<String, Object> buildTargetLevelSeries(LocalDateTime baseTime) {
+	public HashMap<String, Object> buildTargetLevelSeries(LocalDateTime baseTime, Integer pastHours, Integer futureHours) {
 		LocalDateTime base = baseTime.withMinute((baseTime.getMinute() / 10) * 10).withSecond(0).withNano(0);
+		// 과거/미래 표시 시간: 미지정 시 3h(제어사유 팝업). 제어현황 차트는 과거 24h/미래 6h 로 호출.
+		int ph = (pastHours == null || pastHours <= 0) ? 3 : pastHours;
+		int fh = (futureHours == null || futureHours <= 0) ? 3 : futureHours;
 		HashMap<String, Object> result = new HashMap<>();
-		result.put("gn", buildTargetSeriesForStation(seoulGnTags, base));
-		result.put("ba", buildTargetSeriesForStation(seoulBaTags, base));
+		result.put("gn", buildTargetSeriesForStation(seoulGnTags, base, ph, fh));
+		result.put("ba", buildTargetSeriesForStation(seoulBaTags, base, ph, fh));
 		return result;
 	}
 
-	private List<HashMap<String, Object>> buildTargetSeriesForStation(String[] tags, LocalDateTime base) {
+	private List<HashMap<String, Object>> buildTargetSeriesForStation(String[] tags, LocalDateTime base, int pastHours, int futureHours) {
 		List<HashMap<String, Object>> series = new ArrayList<>();
 		if (tags == null || tags.length == 0) return series;
 		// 목표수위 합산 기준: "현재 실측 ≥ 임계" 태그 필터가 아니라,
@@ -6019,10 +6022,11 @@ public class DrvnConfig {
 		}
 
 		ZoneId zone = ZoneId.systemDefault();
-		// 차트 좌표계와 동일: baseHour(현재 내림 정각) ± 3h 매 정각 + 현재 시점.
+		// 차트 좌표계와 동일: baseHour(현재 내림 정각) 기준 과거 pastHours ~ 미래 futureHours 매 정각 + 현재 시점.
+		// 목표수위는 시간대(HOURS 0~23)별 설정이라 날짜 무관 → 과거 24h 도 동일 hour-of-day 로 조회 가능.
 		LocalDateTime baseHour = base.withMinute(0).withSecond(0).withNano(0);
-		LocalDateTime start = baseHour.minusHours(3);
-		LocalDateTime end = baseHour.plusHours(3);
+		LocalDateTime start = baseHour.minusHours(pastHours);
+		LocalDateTime end = baseHour.plusHours(futureHours);
 		java.util.TreeSet<LocalDateTime> markSet = new java.util.TreeSet<>();
 		LocalDateTime mark = start;
 		while (!mark.isAfter(end)) {
@@ -6514,7 +6518,9 @@ public class DrvnConfig {
 				param.put("dstrb_id", flowDstrbId);
 
 				// 예측 유량: TB_CTR_TNK_RST 에서 RGSTR_TIME / PRDCT_TIME 정확 동치 행의 PRDCT_VALUE. 없으면 null (이후 backfill 이 같은 시각 재조회).
+				// 같은 행의 MODEL_NAME(예측 모델명)도 함께 가져와 snapshot 에 적재.
 				Double prdctFlow = null;
+				String modelName = null;
 				HashMap<String, Object> prdctRow = drvnMapper.selectLatestPredictedFlowTnk(param);
 				if (prdctRow != null) {
 					Object pf = prdctRow.get("prdct_flow");
@@ -6522,6 +6528,8 @@ public class DrvnConfig {
 					else if (pf != null) {
 						try { prdctFlow = Double.parseDouble(pf.toString()); } catch (NumberFormatException ignore) {}
 					}
+					Object mn = prdctRow.get("model_name");
+					if (mn != null) modelName = mn.toString();
 				}
 
 				// 예측 조합: TB_CTR_PUMPYN_RST 최신 RGSTR_TIME (≤ rgstrTime) 의 ON 펌프 IDX CSV + 결정 시각 (actl_ref_ts).
@@ -6619,6 +6627,7 @@ public class DrvnConfig {
 				insertParam.put("actl_wl_gr",   actlWlGr);
 				insertParam.put("actl_wl_wg",   actlWlWg);
 				insertParam.put("actl_wl_wgok", actlWlWgok);
+				insertParam.put("model_name", modelName);
 				drvnMapper.insertFlowCombSnapshot(insertParam);
 				processed++;
 
@@ -6932,7 +6941,11 @@ public class DrvnConfig {
 				if (v != null) { upsert.put("prdct_flow", v); changed = true;
 					log.info("[snapshot-backfill] grp={} rgstr={} prdct={} field=prdct_flow value={}", pumpGrp, rgstrTime, prdctTime, v);
 				} else upsert.put("prdct_flow", null);
-			} else upsert.put("prdct_flow", null);
+				// 같은 예측 행의 MODEL_NAME 보강(없으면 null -> COALESCE 로 기존값 보존)
+				String mn = (r != null && r.get("model_name") != null) ? r.get("model_name").toString() : null;
+				upsert.put("model_name", mn);
+				if (mn != null) changed = true;
+			} else { upsert.put("prdct_flow", null); upsert.put("model_name", null); }
 
 			// ── 실측 유량 (actl_ref_ts 기준) ──
 			if (row.get("actl_flow") == null && flowDstrbId != null && !flowDstrbId.isEmpty() && actlRefTs != null) {
