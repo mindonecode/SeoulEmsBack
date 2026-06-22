@@ -106,6 +106,28 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 제어기준(배수지 상/하한 수위) 현재값 조회. (TB_CONFIG)
+	 * @return {baUpper, baLower, gnUpper, gnLower} (단위: m)
+	 */
+	@Operation(summary = "제어기준 조회", description = "selectControlConfig")
+	@GetMapping("/ctrlConfig")
+	public ResponseObject<HashMap<String, Object>> getCtrlConfig(){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectControlConfig());
+	}
+
+	/**
+	 * [POST] 제어기준(배수지 상/하한 수위) 변경. (TB_CONFIG upsert + 캐시 즉시 반영)
+	 * @param param baUpper, baLower, gnUpper, gnLower (단위: m)
+	 * @return "ok"
+	 */
+	@Operation(summary = "제어기준 변경", description = "updateControlConfig")
+	@PostMapping("/ctrlConfig")
+	public ResponseObject<String> setCtrlConfig(@RequestBody HashMap<String, Object> param){
+		drvnService.updateControlConfig(param);
+		return makeSuccessObj(ResponseMessage.SAVE_SUCCESS, "ok");
+	}
+
+	/**
 	 * [GET] 펌프 예측 가동이력 타임라인 조회 (예측·실측 비교 차트용).
 	 * @param param date(yyyy-MM-dd), pump_grp
 	 * @return [{ts, PUMP_IDX, PUMP_GRP_IDX, name, PUMP_YN}]
@@ -134,6 +156,30 @@ public class DrvnController extends BaseController {
 	@GetMapping("/getCurrentLoadZone")
 	public ResponseObject<HashMap<String, Object>> getCurrentLoadZone(){
 		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.getCurrentLoadZone());
+	}
+
+	/**
+	 * [GET] AI 제어사유 팝업용 부하판정 (경부하 07시 도달 / 중간·최대 22시 유지여부).
+	 * @param dateTime "yyyy-MM-dd HH:mm" (미지정 시 현재 시각)
+	 * @return loadZone/loadZoneLabel/judgmentTime + gn/ba 판정
+	 */
+	@GetMapping("/controlJudgment")
+	public ResponseObject<HashMap<String, Object>> controlJudgment(
+			@RequestParam(required = false) String dateTime){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.buildControlJudgment(dateTime));
+	}
+
+	/**
+	 * [GET] 제어사유 팝업 차트 예측구간용 배수지별 목표수위 시리즈(TB_TARGET_LEVEL).
+	 * @param dateTime "yyyy-MM-dd HH:mm" (미지정 시 현재 시각)
+	 * @return { gn:[{t,v}...], ba:[{t,v}...] }
+	 */
+	@GetMapping("/targetLevelSeries")
+	public ResponseObject<HashMap<String, Object>> targetLevelSeries(
+			@RequestParam(required = false) String dateTime,
+			@RequestParam(required = false) Integer pastHours,
+			@RequestParam(required = false) Integer futureHours){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.buildTargetLevelSeries(dateTime, pastHours, futureHours));
 	}
 
 	/**
@@ -643,6 +689,26 @@ public class DrvnController extends BaseController {
 	 * @param from 시작 (inclusive)
 	 * @param to   종료 (inclusive)
 	 */
+	/**
+	 * [GET] 스냅샷 + 정확도 기간별 JSON 조회 (차트용).
+	 * - 엑셀 다운로드와 동일 데이터(예측/실측/정확도/오차율)를 JSON 배열로 반환.
+	 * - 입력 포맷: download 와 동일 ("yyyy-MM-ddTHH:mm[:ss]" 또는 "yyyy-MM-dd HH:mm[:ss]").
+	 * @param from 시작 (inclusive)
+	 * @param to   종료 (inclusive)
+	 * @return [{ rgstr_time, prdct_time, pump_grp, prdct_wl_gn, actl_wl_gn, err_wl_gn, ... }]
+	 */
+	@GetMapping("/snapshot/list")
+	public ResponseObject<List<HashMap<String, Object>>> listSnapshotAccuracy(
+			@RequestParam("from") String from,
+			@RequestParam("to") String to){
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		if (fromDt.isAfter(toDt)) {
+			throw new IllegalArgumentException("from must be <= to");
+		}
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectSnapshotsWithAccuracy(fromDt, toDt));
+	}
+
 	@GetMapping("/snapshot/download")
 	public void downloadSnapshotAccuracyExcel(HttpServletResponse response,
 											  @RequestParam("from") String from,

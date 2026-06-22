@@ -871,15 +871,12 @@
 	</select>
 
 	<select id="selectPeakTagUnitValue" parameterType="hashMap" resultType="hashMap">
-		SELECT
-			MAX(T1.VALUE) * T2.PWI_UNIT_VALUE AS pwiUnitValue
-		FROM
-			tb_rawdata T1
-			JOIN tb_peak_tag_inf T2 ON T1.TAGNAME = T2.PWI_TAG
-		WHERE
-			T1.TAGNAME = #{pwi_tag} 
-			AND T1.TS &gt;= DATE_SUB(NOW() , INTERVAL 1 YEAR)
-		LIMIT 1;
+		SELECT 
+			COALESCE(ROUND(MAX(CAST(PEAK_MAX_VALUE AS DECIMAL(20, 6))), 0), 0) AS pwiUnitValue 
+		FROM tb_peak_data_hour
+		WHERE ts &gt;= CAST(CONCAT(DATE_FORMAT(NOW(), '%Y%m'), '01000000') AS DATETIME) - INTERVAL 11 MONTH
+		AND ts &lt; CAST(CONCAT(DATE_FORMAT(NOW(), '%Y%m'), '01000000') AS DATETIME) + INTERVAL 1 MONTH
+		AND value &gt;= 7000
 	</select>
 
 	<select id="selectFuturePeakPredictData" resultType="hashMap">
@@ -911,5 +908,19 @@
 			rn = 1
 		ORDER BY
 			ANLY_TIME ASC
+	</select>
+
+	<select id="selectTagData24H" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') AS TS,
+			ROUND(VALUE, 2) AS VALUE
+		FROM
+			TB_RAWDATA
+		WHERE
+			TAGNAME = #{tagName}
+			AND TS &gt;= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+			AND TS &lt;= NOW()
+		ORDER BY
+			TS ASC
 	</select>
 </mapper>

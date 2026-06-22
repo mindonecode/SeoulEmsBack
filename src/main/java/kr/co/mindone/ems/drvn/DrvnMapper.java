@@ -49,6 +49,13 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectNowPumpUse(HashMap<String, Object> param);
 
 	/**
+	 * 실측 펌프(PMB_TAG) 기준 TB_RAWDATA 최신 TS를 조회. 예측 주기 비종속.
+	 * @param param pump_grp(0이면 전 그룹)
+	 * @return 'yyyy-MM-dd HH:mm:ss' 형식의 최신 TS, 데이터 없으면 null
+	 */
+	String selectLatestPumpRawTs(HashMap<String, Object> param);
+
+	/**
 	 * 현재 펌프 전력 사용 데이터를 조회하는 메서드
 	 * @param param 조회 조건을 담은 파라미터
 	 * @return 현재 펌프 전력 사용 데이터를 반환
@@ -95,6 +102,21 @@ public interface DrvnMapper {
 	 * @return 성능 곡선 유량 및 압력 데이터를 반환
 	 */
 	List<HashMap<String, Object>> prdctFlowPressure(HashMap<String, Object> map);
+
+	/**
+	 * 이번 10분 예측 배치 도착 여부 판정용.
+	 * 대상 DSTRB_ID 중 RGSTR_TIME 이 [batchStart, batchEnd) 범위에 적재된 distinct DSTRB_ID 개수.
+	 * @param param dstrbIds(List&lt;String&gt;), batchStart(String), batchEnd(String)
+	 * @return 적재 완료된 distinct DSTRB_ID 개수
+	 */
+	Integer countPredictionReady(HashMap<String, Object> param);
+
+	/**
+	 * 태그·시간별 목표수위(TB_TARGET_LEVEL) 조회. 주어진 태그들의 HOURS 0~23 전체 행.
+	 * @param tags 수조 태그 목록
+	 * @return TAG, HOURS, MIN_VL, MAX_VL, USER_MIN_VL, USER_MAX_VL
+	 */
+	List<HashMap<String, Object>> selectTargetLevelByTags(@Param("tags") List<String> tags);
 
 	/**
 	 * 탱크 유량 및 압력 데이터를 조회하는 메서드

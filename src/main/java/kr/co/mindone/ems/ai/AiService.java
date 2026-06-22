@@ -40,6 +40,7 @@ import java.util.stream.Collectors;
 
 @PropertySource("classpath:application-${spring.profiles.active}.properties")
 @Service
+@lombok.extern.slf4j.Slf4j
 public class AiService {
     @Autowired
     private AiMapper aiMapper;
@@ -400,7 +401,17 @@ public class AiService {
      * @return 펌프 온/오프 상태 리스트
      */
     List<HashMap<String, Object>> selectPumpOnOffStatus() {
-        return aiMapper.selectPumpOnOffStatus();
+        // 제어현황과 동일 로직: 예측 시각이 아닌 PMB_TAG 실측 최신 TS 기준 + 태그별 최신 매칭.
+        HashMap<String, Object> param = new HashMap<>();
+        param.put("pump_grp", 0);  // 대시보드는 전 그룹
+        String actlRefTs = drvnMapper.selectLatestPumpRawTs(param);
+        if (actlRefTs == null) {
+            // 최근 5분 내 실측 PMB 데이터 없음 -> 현재 조합 비움
+            log.warn("selectPumpOnOffStatus: 최근 5분 내 PMB 데이터 없음 → 현재 조합 빈값.");
+            return new ArrayList<>();
+        }
+        param.put("actl_ref_ts", actlRefTs);
+        return aiMapper.selectPumpOnOffStatus(param);
     }
 
     /**

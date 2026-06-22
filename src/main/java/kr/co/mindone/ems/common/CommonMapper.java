@@ -174,4 +174,16 @@ public interface CommonMapper {
      * @return 직전 태그 데이터
      */
     List<HashMap<String, Object>> selectWtlvData(HashMap<String, Object> tagIds);
+
+    /**
+     * 런타임 설정 전체 조회 (TB_CONFIG). AppConfigStore 캐시 적재용.
+     * @return CFG_KEY / CFG_VAL 목록
+     */
+    List<HashMap<String, Object>> selectAppConfig();
+
+    /**
+     * 런타임 설정 단건 upsert (TB_CONFIG). 키가 없으면 INSERT, 있으면 CFG_VAL UPDATE.
+     * @param param cfgKey(String), cfgVal(String)
+     */
+    void upsertAppConfig(HashMap<String, Object> param);
 }
