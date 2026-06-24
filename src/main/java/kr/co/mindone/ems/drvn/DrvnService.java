@@ -397,6 +397,7 @@ public class DrvnService {
 			param.put("actl_ref_ts", actlRefTs);
 
 			List<HashMap<String, Object>> selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
+			List<HashMap<String, Object>> selectNowPumpPwrUse = drvnMapper.selectNowPumpPwrUse(param);
 			HashMap<Integer, Double> nowPwrMap = new HashMap<>();
 			for (HashMap<String, Object> pwrMap : selectNowPumpPwrUse) {
 				int pump_idx = (int) pwrMap.get("PUMP_GRP_IDX");
@@ -708,7 +709,7 @@ public class DrvnService {
 //				Double selectHeadLossFirst = drvnMapper.selectHeadLoss(param);
 				Double linkFirst = drvnMapper.selectGsAllCurLinkFirst(param);
 				Double nodeFirst = drvnMapper.selectGsAllCurNodeFirst(param);
-				List<HashMap<String, Object>> selectNowPumpUse = noActlRef ? new ArrayList<>() : drvnMapper.selectNowPumpUse(param);
+				List<HashMap<String, Object>> selectNowPumpUse = drvnMapper.selectNowPumpUse(param);
 				List<Double> pressureListFirst = totalFirstData.get("pressure");
 				List<Double> selectflowPressureFirst = totalFirstData.get("flow");
 
