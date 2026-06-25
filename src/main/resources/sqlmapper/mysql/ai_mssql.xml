@@ -2079,14 +2079,24 @@
 
 	<select id="peak_max" resultType="hashMap">
 		SELECT
-			DATE_FORMAT(pdh.ts, '%Y-%m-%d %H:%i') AS peak_date,
-			ROUND(MAX(CAST(pdh.PEAK_MAX_VALUE AS DECIMAL(20, 6))), 0) AS value,
-			pti.PWI_UNIT
-		FROM TB_PEAK_DATA_HOUR pdh
-			JOIN TB_PEAK_TAG_INF pti ON pti.CLSFC = '전체'
-		WHERE pdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
-			AND pdh.ts &lt;= LAST_DAY(NOW())
-		GROUP BY DATE_FORMAT(pdh.ts, '%Y-%m'), pti.PWI_UNIT
+			peak_date,
+			value,
+			PWI_UNIT
+		FROM (
+			SELECT
+				DATE_FORMAT(pdh.ts, '%Y-%m-%d %H:%i') AS peak_date,
+				ROUND(CAST(pdh.PEAK_MAX_VALUE AS DECIMAL(20, 6)), 0) AS value,
+				pti.PWI_UNIT,
+				ROW_NUMBER() OVER (
+					PARTITION BY DATE_FORMAT(pdh.ts, '%Y-%m'), pti.PWI_UNIT 
+					ORDER BY CAST(pdh.PEAK_MAX_VALUE AS DECIMAL(20, 6)) DESC, pdh.ts ASC
+				) AS rn
+			FROM TB_PEAK_DATA_HOUR pdh
+				JOIN TB_PEAK_TAG_INF pti ON pti.CLSFC = '전체'
+			WHERE pdh.ts &gt;= DATE_FORMAT(NOW() - INTERVAL 13 MONTH, '%Y-%m-01 00:00:00')
+				AND pdh.ts &lt;= LAST_DAY(NOW())
+		) t
+		WHERE rn = 1
 		ORDER BY peak_date
 	</select>
 

@@ -1936,50 +1936,10 @@ public class AiService {
      */
     public List<HashMap<String, Object>> selectPumpPrdctOnOffStatus(HashMap<String, Object> map) {
 
-        // selectPumpPrdctInquiryOnOffStatus
-
-        /*
-         * List<HashMap<String, Object>> preList =
-         * aiMapper.selectPumpPrdctInquiryOnOffStatus(map);
-         * if(preList.isEmpty())
-         * {
-         * preList = aiMapper.selectPumpPrdctOnOffStatus(map);
-         * }
-         */
-        List<HashMap<String, Object>> preList = aiMapper.selectPumpPrdctOnOffStatus(map);
-        // System.out.println("selectPumpPrdctOnOffStatus map:"+map.toString());
-        // System.out.println("preList:"+preList.toString());
-        // System.out.println("preList size:"+preList.size());
-        // List<HashMap<String, Object>> curList = aiMapper.setLastCurPumpUse(map);
-        List<HashMap<String, Object>> curList = aiMapper.setLastCurPumpUseFreq(map);
-        List<HashMap<String, Object>> priList = aiMapper.setLastCurPumpUsePri(map);
-
-        // System.out.println("curList:"+curList.toString());
-        // System.out.println("curList size:"+curList.size());
-        for (int i = 0; i < preList.size(); i++) {
-            HashMap<String, Object> curMap = curList.get(i);
-            HashMap<String, Object> priMap = priList.get(i);
-            // System.out.println("curMap:"+curMap.toString());
-            String pumpUseStr = (String) curMap.get("PMB_VALUE");
-            double pumpUse = Double.parseDouble(pumpUseStr);
-            // System.out.println("pumpUseStr :"+ pumpUseStr);
-            if (pumpUse > 0) {
-                preList.get(i).put("nowUse", "On");
-            } else {
-                preList.get(i).put("nowUse", "Off");
-            }
-
-            String pumpUseFreqStr = curMap.get("SPI_VALUE").toString();
-            double pumpUseFreq = Double.parseDouble(pumpUseFreqStr);
-
-            String pumpUsePRIStr = priMap.get("PRI").toString();
-            double pumpUsePri = Double.parseDouble(pumpUsePRIStr);
-
-            preList.get(i).put("nowFreq", pumpUseFreq);
-            preList.get(i).put("nowPri", pumpUsePri);
-            // preList.get(i).put("nowUse","On");
-        }
-        return preList;
+        // 예측 결과 단일 조회 (TB_RAWDATA 미접촉) = 가장 가벼운 예측조합 소스.
+        // 과거의 nowUse/nowFreq/nowPri 보강(setLastCurPumpUseFreq/Pri)은 TB_RAWDATA 를 펌프당
+        // 2회 조인해 약 6.5초가 걸렸고, 어떤 화면에서도 해당 필드를 사용하지 않아 제거함.
+        return aiMapper.selectPumpPrdctOnOffStatus(map);
     }
 
     /**

@@ -129,104 +129,150 @@
 	</select>
 
 	<select id="nowRunAllPumpList" resultType="hashMap">
+		<!-- 태그별 최신 1행을 선집계(rn=1)한 뒤 펌프에 LEFT JOIN.
+		     예전엔 raw 행을 2회 LEFT JOIN 후 GROUP BY 해 태그당 행수의 곱집합이
+		     만들어졌고, value 가 MAX(ts) 행 값이라는 보장도 없었음. 이를 제거. -->
 		SELECT
 		    cppi.PUMP_IDX,
 		    cppi.PUMP_GRP,
 		    cppi.PUMP_GRP_NM,
 		    cppi.PUMP_NM,
 			cppi.PUMP_TYP,
-		    rd_pmb.TAGNAME AS PMB_TAGNAME,
-		    rd_spi.TAGNAME AS SPI_TAGNAME,
-		    MAX(rd_pmb.ts) AS PMB_TS,
-		    MAX(rd_spi.ts) AS SPI_TS,
+		    pmb.TAGNAME AS PMB_TAGNAME,
+		    spi.TAGNAME AS SPI_TAGNAME,
+		    pmb.TS AS PMB_TS,
+		    spi.TS AS SPI_TS,
 		    CASE
-		        WHEN rd_pmb.value = 1 THEN "On"
+		        WHEN pmb.value = 1 THEN "On"
 		        ELSE "Off"
 		    END AS PUMP_YN,
-		    ROUND(rd_spi.value,0) as 'FREQ'
+		    ROUND(spi.value,0) as 'FREQ'
 		FROM
 		    TB_CTR_PRF_PUMPMST_INF cppi
-		    LEFT JOIN TB_RAWDATA rd_pmb ON cppi.PMB_TAG = rd_pmb.TAGNAME
-		        AND rd_pmb.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-		        AND rd_pmb.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-		    LEFT JOIN TB_RAWDATA rd_spi ON cppi.SPI_TAG = rd_spi.TAGNAME
-		        AND rd_spi.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-		        AND rd_spi.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    LEFT JOIN (
+		        SELECT TAGNAME, TS, value FROM (
+		            SELECT TAGNAME, TS, value,
+		                   ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		            FROM TB_RAWDATA
+		            WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		              AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		        ) t WHERE rn = 1
+		    ) pmb ON cppi.PMB_TAG = pmb.TAGNAME
+		    LEFT JOIN (
+		        SELECT TAGNAME, TS, value FROM (
+		            SELECT TAGNAME, TS, value,
+		                   ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		            FROM TB_RAWDATA
+		            WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		              AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		        ) t WHERE rn = 1
+		    ) spi ON cppi.SPI_TAG = spi.TAGNAME
 		WHERE
-		    cppi.USE_YN = 1
-		GROUP BY
-		    cppi.PUMP_IDX, rd_pmb.TAGNAME, rd_spi.TAGNAME;
+		    cppi.USE_YN = 1;
 	</select>
 
 	<select id="nowRunAllPriPumpList" resultType="hashMap">
+		<!-- 태그별 최신 1행을 선집계(rn=1)한 뒤 펌프에 LEFT JOIN.
+		     예전엔 raw 행을 2회 LEFT JOIN 후 GROUP BY 해 태그당 행수의 곱집합이
+		     만들어졌고, value 가 MAX(ts) 행 값이라는 보장도 없었음. 이를 제거. -->
 		SELECT
 		cppi.PUMP_IDX,
 		cppi.PUMP_GRP,
 		cppi.PUMP_GRP_NM,
 		cppi.PUMP_NM,
 		cppi.PUMP_TYP,
-		rd_pmb.TAGNAME AS PMB_TAGNAME,
-		rd_pri.TAGNAME AS PRI_TAGNAME,
-		MAX(rd_pmb.ts) AS PMB_TS,
-		MAX(rd_pri.ts) AS PRI_TS,
+		pmb.TAGNAME AS PMB_TAGNAME,
+		pri.TAGNAME AS PRI_TAGNAME,
+		pmb.TS AS PMB_TS,
+		pri.TS AS PRI_TS,
 		CASE
-		WHEN rd_pmb.value = 1 THEN "On"
+		WHEN pmb.value = 1 THEN "On"
 		ELSE "Off"
 		END AS PUMP_YN,
-		ROUND(rd_pri.value, 2) AS 'PRI'
+		ROUND(pri.value, 2) AS 'PRI'
 		FROM
 		TB_CTR_PRF_PUMPMST_INF cppi
-		LEFT JOIN TB_RAWDATA rd_pmb ON cppi.PMB_TAG = rd_pmb.TAGNAME
-		AND rd_pmb.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-		AND rd_pmb.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-
-		LEFT JOIN TB_RAWDATA rd_pri ON cppi.PRI_T_TAG = rd_pri.TAGNAME
-		AND rd_pri.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-		AND rd_pri.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-
+		LEFT JOIN (
+		    SELECT TAGNAME, TS, value FROM (
+		        SELECT TAGNAME, TS, value,
+		               ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		        FROM TB_RAWDATA
+		        WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		          AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    ) t WHERE rn = 1
+		) pmb ON cppi.PMB_TAG = pmb.TAGNAME
+		LEFT JOIN (
+		    SELECT TAGNAME, TS, value FROM (
+		        SELECT TAGNAME, TS, value,
+		               ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		        FROM TB_RAWDATA
+		        WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		          AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    ) t WHERE rn = 1
+		) pri ON cppi.PRI_T_TAG = pri.TAGNAME
 		WHERE
-		cppi.USE_YN = 1
-		GROUP BY
-		cppi.PUMP_IDX, rd_pmb.TAGNAME, rd_pri.TAGNAME;
+		cppi.USE_YN = 1;
 	</select>
 
 	<select id="nowRunAllPumpItem" parameterType="hashMap" resultType="hashMap">
+		<!-- 태그별 최신 1행을 선집계(rn=1)한 뒤 펌프에 LEFT JOIN.
+		     예전엔 raw 행을 3회 LEFT JOIN 후 GROUP BY 해 태그당 행수의 곱집합이
+		     만들어졌고, value 가 MAX(ts) 행 값이라는 보장도 없었음. 이를 제거. -->
 		SELECT
 		cppi.PUMP_IDX,
 		cppi.PUMP_GRP,
 		cppi.PUMP_GRP_NM,
 		cppi.PUMP_NM,
 		cppi.PUMP_TYP,
-		rd_pmb.TAGNAME AS PMB_TAGNAME,
-		rd_spi.TAGNAME AS SPI_TAGNAME,
-		rd_pri.TAGNAME AS PRI_TAGNAME,
-		MAX(rd_pmb.ts) AS PMB_TS,
-		MAX(rd_spi.ts) AS SPI_TS,
-		MAX(rd_pri.ts) AS PRI_TS,
+		pmb.TAGNAME AS PMB_TAGNAME,
+		spi.TAGNAME AS SPI_TAGNAME,
+		pri.TAGNAME AS PRI_TAGNAME,
+		pmb.TS AS PMB_TS,
+		spi.TS AS SPI_TS,
+		pri.TS AS PRI_TS,
 		CASE
-		WHEN rd_pmb.value = 1 THEN "On"
+		WHEN pmb.value = 1 THEN "On"
 		ELSE "Off"
 		END AS PUMP_YN,
-		ROUND(rd_spi.value,0) as 'FREQ',
-		ROUND(rd_pri.value, 2) AS 'PRI'
+		ROUND(spi.value,0) as 'FREQ',
+		ROUND(pri.value, 2) AS 'PRI'
 		FROM
 		TB_CTR_PRF_PUMPMST_INF cppi
-		LEFT JOIN TB_RAWDATA rd_pmb ON cppi.PMB_TAG = rd_pmb.TAGNAME
-			AND rd_pmb.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-			AND rd_pmb.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-		LEFT JOIN TB_RAWDATA rd_spi ON cppi.SPI_TAG = rd_spi.TAGNAME
-			AND rd_spi.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-			AND rd_spi.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-		LEFT JOIN TB_RAWDATA rd_pri ON cppi.PRI_T_TAG = rd_pri.TAGNAME
-			AND rd_pri.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-			AND rd_pri.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		LEFT JOIN (
+		    SELECT TAGNAME, TS, value FROM (
+		        SELECT TAGNAME, TS, value,
+		               ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		        FROM TB_RAWDATA
+		        WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		          AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    ) t WHERE rn = 1
+		) pmb ON cppi.PMB_TAG = pmb.TAGNAME
+		LEFT JOIN (
+		    SELECT TAGNAME, TS, value FROM (
+		        SELECT TAGNAME, TS, value,
+		               ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		        FROM TB_RAWDATA
+		        WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		          AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    ) t WHERE rn = 1
+		) spi ON cppi.SPI_TAG = spi.TAGNAME
+		LEFT JOIN (
+		    SELECT TAGNAME, TS, value FROM (
+		        SELECT TAGNAME, TS, value,
+		               ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		        FROM TB_RAWDATA
+		        WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		          AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    ) t WHERE rn = 1
+		) pri ON cppi.PRI_T_TAG = pri.TAGNAME
 		WHERE
-		cppi.USE_YN = 1 AND cppi.PUMP_IDX = #{PUMP_IDX}
-		GROUP BY
-		cppi.PUMP_IDX, rd_pmb.TAGNAME, rd_spi.TAGNAME, rd_pri.TAGNAME;
+		cppi.USE_YN = 1 AND cppi.PUMP_IDX = #{PUMP_IDX};
 	</select>
 
 	<select id="nowInverterPumpItem" parameterType="hashMap" resultType="hashMap">
+		<!-- 태그별 최신 1행을 선집계(rn=1)한 뒤 펌프에 LEFT JOIN.
+		     예전엔 raw 행을 2회 LEFT JOIN 후 GROUP BY 해 태그당 행수의 곱집합이
+		     만들어졌고, value 가 MAX(ts) 행 값이라는 보장도 없었음. 이를 제거. -->
 		SELECT
 		cppi.PUMP_IDX,
 		cppi.PUMP_GRP,
@@ -238,27 +284,37 @@
 		cppi.CTR_MANUAL_TAG,
 		cppi.CTR_AUTO_FREQ_TAG,
 		cppi.CTR_SYNC_TAG,
-		rd_pmb.TAGNAME AS PMB_TAGNAME,
-		rd_spi.TAGNAME AS SPI_TAGNAME,
-		MAX(rd_pmb.ts) AS PMB_TS,
-		MAX(rd_spi.ts) AS SPI_TS,
+		pmb.TAGNAME AS PMB_TAGNAME,
+		spi.TAGNAME AS SPI_TAGNAME,
+		pmb.TS AS PMB_TS,
+		spi.TS AS SPI_TS,
 		CASE
-		WHEN rd_pmb.value = 1 THEN "On"
+		WHEN pmb.value = 1 THEN "On"
 		ELSE "Off"
 		END AS PUMP_YN,
-		ROUND(rd_spi.value,0) as 'FREQ'
+		ROUND(spi.value,0) as 'FREQ'
 		FROM
 		TB_CTR_PRF_PUMPMST_INF cppi
-		LEFT JOIN TB_RAWDATA rd_pmb ON cppi.PMB_TAG = rd_pmb.TAGNAME
-		AND rd_pmb.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-		AND rd_pmb.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-		LEFT JOIN TB_RAWDATA rd_spi ON cppi.SPI_TAG = rd_spi.TAGNAME
-		AND rd_spi.TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-		AND rd_spi.TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		LEFT JOIN (
+		    SELECT TAGNAME, TS, value FROM (
+		        SELECT TAGNAME, TS, value,
+		               ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		        FROM TB_RAWDATA
+		        WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		          AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    ) t WHERE rn = 1
+		) pmb ON cppi.PMB_TAG = pmb.TAGNAME
+		LEFT JOIN (
+		    SELECT TAGNAME, TS, value FROM (
+		        SELECT TAGNAME, TS, value,
+		               ROW_NUMBER() OVER (PARTITION BY TAGNAME ORDER BY TS DESC) AS rn
+		        FROM TB_RAWDATA
+		        WHERE TS &gt; DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+		          AND TS &lt;= DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+		    ) t WHERE rn = 1
+		) spi ON cppi.SPI_TAG = spi.TAGNAME
 		WHERE
-		cppi.USE_YN = 1 AND cppi.PUMP_TYP = 2
-		GROUP BY
-		cppi.PUMP_IDX, rd_pmb.TAGNAME, rd_spi.TAGNAME;
+		cppi.USE_YN = 1 AND cppi.PUMP_TYP = 2;
 	</select>
 
 	<insert id="insertHmiTagLog" parameterType="hashMap">

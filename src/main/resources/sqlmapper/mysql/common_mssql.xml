@@ -482,48 +482,36 @@
 	</select>
 
 	<select id="selectWtlvData" parameterType="hashMap" resultType="hashMap">
+		<!-- "약 1시간 전" 값 조회. selectLatestTagData 와 동일한 단일 스캔 패턴:
+		     상수 윈도(NOW 기준 1~2시간 전) + TAGNAME IN + ROW_NUMBER 로 최신 1행만 선택.
+		     예전엔 TS 경계가 조인 CTE(latest_input)의 컬럼에 의존해(STR_TO_DATE) 인덱스
+		     레인지를 못 타고 사실상 전체 스캔 + TB_RAWDATA 2회 접근(MAX 후 재조인)이라 6초+
+		     걸렸음. NOW 기준 상수 윈도라 TS 인덱스 레인지를 타고 단일 스캔으로 끝남. -->
 		WITH tags AS (
 		<foreach item="item" index="index" collection="tagIds" separator=" UNION ALL ">
 			SELECT #{item} AS TAGNAME
 		</foreach>
 		),
-		latest_input AS (
-		<choose>
-			<when test="latestTags != null and latestTags.size() > 0">
-				<foreach item="item" collection="latestTags" separator=" UNION ALL ">
-					SELECT
-						#{item.TAGNAME} AS TAGNAME,
-						#{item.TS} AS LATEST_TS
-				</foreach>
-			</when>
-			<otherwise>
-				SELECT
-					NULL AS TAGNAME,
-					NULL AS LATEST_TS
-				WHERE 1 = 0
-			</otherwise>
-		</choose>
-		),
-		prev_ts AS (
-		SELECT
-		L.TAGNAME,
-		MAX(R.TS) AS PREV_TS
-		FROM TB_RAWDATA R
-		JOIN latest_input L
-		ON R.TAGNAME = L.TAGNAME
-		WHERE R.TS &lt;= DATE_SUB(STR_TO_DATE(L.LATEST_TS, '%Y-%m-%d %H:%i:%s'), INTERVAL 1 HOUR)
-		GROUP BY L.TAGNAME
+		prev AS (
+			SELECT
+				TAGNAME, VALUE, TS,
+				ROW_NUMBER() OVER(PARTITION BY TAGNAME ORDER BY TS DESC) as rn
+			FROM TB_RAWDATA
+			WHERE
+				TS &lt;= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+				AND TS &gt; DATE_SUB(NOW(), INTERVAL 2 HOUR)
+				AND TAGNAME IN (
+					<foreach item="item" index="index" collection="tagIds" separator=",">
+						#{item}
+					</foreach>
+				)
 		)
 		SELECT
 		T.TAGNAME,
-		IFNULL(ROUND(R.VALUE, 2), '-') AS VALUE,
-		DATE_FORMAT(R.TS, '%Y-%m-%d %H:%i:%s') AS TS
+		IFNULL(ROUND(P.VALUE, 2), '-') AS VALUE,
+		DATE_FORMAT(P.TS, '%Y-%m-%d %H:%i:%s') AS TS
 		FROM tags T
-		LEFT JOIN prev_ts P
-		ON T.TAGNAME = P.TAGNAME
-		LEFT JOIN TB_RAWDATA R
-		ON R.TAGNAME = P.TAGNAME
-		AND R.TS = P.PREV_TS
+		LEFT JOIN prev P ON T.TAGNAME = P.TAGNAME AND P.rn = 1
 	</select>
 
 	<!-- 런타임 설정 전체 조회 (AppConfigStore 캐시 적재용) -->

@@ -3397,8 +3397,8 @@ public class DrvnConfig {
 					double gnTh = getSeoulGnMhThreshold();
 					double baTh = getSeoulBaMhThreshold();
 					if (gnLevel > gnTh && baLevel > baTh) {
-						forceFirstComb = true;
-						adjReason      = "H: 둘다 수위>안전선 (gn>" + gnTh + "m, ba>" + baTh + "m) → #1 고정";
+						seoulDelta = -1;
+						adjReason  = "H: 둘다 수위>안전선 (gn>" + gnTh + "m, ba>" + baTh + "m) → −1";
 					} else {
 						seoulDelta = +1;
 						adjReason  = "H: 하나라도 수위≤안전선 (gnTh=" + gnTh + "m, baTh=" + baTh + "m)";
