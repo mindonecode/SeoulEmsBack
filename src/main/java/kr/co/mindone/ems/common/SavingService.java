@@ -327,8 +327,9 @@ public class SavingService {
         double nowDayGoalValue = 0.0;
         System.out.println("nowGoal#Map:"+map.toString());
         HashMap<String, Object> nowGoalMap = commonService.selectDayGoal(map);
-        System.out.println("nowGoalMap:"+nowGoalMap.toString());
-        if (nowGoalMap.get("goalValue") != null) {
+        // 조회 결과가 없으면 selectDayGoal 이 null 을 반환 → 목표값 0.0 으로 처리(NPE 방지).
+        System.out.println("nowGoalMap:" + nowGoalMap);
+        if (nowGoalMap != null && nowGoalMap.get("goalValue") != null) {
             nowDayGoalValue = Double.parseDouble(nowGoalMap.get("goalValue").toString());
         }
 

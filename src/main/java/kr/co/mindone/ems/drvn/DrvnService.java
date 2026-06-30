@@ -231,15 +231,24 @@ public class DrvnService {
 	 * @param param baUpper, baLower, gnUpper, gnLower (숫자/문자 허용)
 	 */
 	public void updateControlConfig(HashMap<String, Object> param) {
-		upsertCfg(CFG_BA_UPPER, param.get("baUpper"));
-		upsertCfg(CFG_BA_LOWER, param.get("baLower"));
-		upsertCfg(CFG_GN_UPPER, param.get("gnUpper"));
-		upsertCfg(CFG_GN_LOWER, param.get("gnLower"));
+		// 변경 전 스냅샷(현재 캐시값) — upsert/reload 전에 확보해야 정확한 이전값이 이력에 남는다.
+		double befBaUpper = drvnConfig.getSeoulBaTarget();
+		double befBaLower = drvnConfig.getSeoulBaMhThreshold();
+		double befGnUpper = drvnConfig.getSeoulGnTarget();
+		double befGnLower = drvnConfig.getSeoulGnMhThreshold();
+		upsertCfg(CFG_BA_UPPER, befBaUpper, param.get("baUpper"));
+		upsertCfg(CFG_BA_LOWER, befBaLower, param.get("baLower"));
+		upsertCfg(CFG_GN_UPPER, befGnUpper, param.get("gnUpper"));
+		upsertCfg(CFG_GN_LOWER, befGnLower, param.get("gnLower"));
 		appConfigStore.reload();
 	}
 
-	/** TB_CONFIG 단건 upsert. 값이 비었거나 음수면 건너뜀(부분 저장 허용·방어). */
-	private void upsertCfg(String cfgKey, Object rawVal) {
+	/**
+	 * TB_CONFIG 단건 upsert. 값이 비었거나 음수면 건너뜀(부분 저장 허용·방어).
+	 * 값이 실제로 바뀐 경우 TB_CTR_CFG_HIST 에 변경 이력을 적재한다.
+	 * @param befVal 변경 전 값(현재 캐시값)
+	 */
+	private void upsertCfg(String cfgKey, double befVal, Object rawVal) {
 		if (rawVal == null || String.valueOf(rawVal).trim().isEmpty()) return;
 		double val;
 		try {
@@ -250,10 +259,38 @@ public class DrvnService {
 		if (val < 0) {
 			throw new IllegalArgumentException("제어기준 값은 0 이상이어야 합니다. key=" + cfgKey + ", val=" + val);
 		}
+		String newCfgVal = String.valueOf(val);
 		HashMap<String, Object> cfgParam = new HashMap<>();
 		cfgParam.put("cfgKey", cfgKey);
-		cfgParam.put("cfgVal", String.valueOf(val));
+		cfgParam.put("cfgVal", newCfgVal);
 		commonMapper.upsertAppConfig(cfgParam);
+		// 변경 이력 적재 (값이 실제로 달라진 경우만, 적재 실패는 무시하여 본 저장을 보호).
+		if (val != befVal) {
+			insertCfgHist("CONFIG", cfgKey, String.valueOf(befVal), newCfgVal, null);
+		}
+	}
+
+	/** 제어 설정 변경 이력 적재 공통 헬퍼 (TB_CTR_CFG_HIST). 적재 실패는 무시(본 저장 보호). */
+	private void insertCfgHist(String cfgType, String cfgKey, String befVal, String aftVal, String updtUser) {
+		try {
+			HashMap<String, Object> h = new HashMap<>();
+			h.put("cfgType", cfgType);
+			h.put("cfgKey", cfgKey);
+			h.put("befVal", befVal);
+			h.put("aftVal", aftVal);
+			h.put("updtUser", updtUser);
+			commonMapper.insertCtrCfgHist(h);
+		} catch (Exception e) {
+			System.out.println("[insertCfgHist] 변경이력 적재 실패(무시). type=" + cfgType + ", key=" + cfgKey + ", err=" + e.getMessage());
+		}
+	}
+
+	/**
+	 * 제어 설정 변경 이력 조회 (TB_CTR_CFG_HIST, 최신순).
+	 * @param param cfgType(optional: 'CONFIG'|'CYCLE')
+	 */
+	public List<HashMap<String, Object>> selectCtrlSettingHist(HashMap<String, Object> param) {
+		return commonMapper.selectCtrCfgHist(param);
 	}
 
 	@Autowired
@@ -5357,9 +5394,9 @@ public class DrvnService {
 		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:00");
 		DateTimeFormatter shortFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-		// 조회 대상 태그: 5개 배수지의 모든 수조 LEI 태그를 flatten.
+		// 조회 대상 태그: 차트 표출 배수지(공릉/북악전단/북악후단)의 모든 수조 LEI 태그를 flatten.
 		// (mapper selectWaterLevelByMinuteRange 가 tagList foreach 로 동적 IN 처리)
-		LinkedHashMap<String, String[]> reservoirTagMap = drvnConfig.getSeoulReservoirTagMap();
+		LinkedHashMap<String, String[]> reservoirTagMap = drvnConfig.getSeoulWaterLevelTagMap();
 		List<String> waterLevelTagList = new ArrayList<>();
 		if (reservoirTagMap != null) {
 			for (String[] arr : reservoirTagMap.values()) {
@@ -5527,7 +5564,7 @@ public class DrvnService {
 		//      "<배수지>_AVG_W2"         ← 1주 전 비교 (키 이름은 호환 위해 W2 유지)
 		//      "<배수지>_AVG_PRDCT_HIST" ← 과거 10분 horizon 예측
 		//    임계 미만 수조는 평균에서 제외. 시점별 활성 수조 0개면 누락(connectNulls 동작).
-		LinkedHashMap<String, String[]> tagMap = drvnConfig.getSeoulReservoirTagMap();
+		LinkedHashMap<String, String[]> tagMap = drvnConfig.getSeoulWaterLevelTagMap();
 		if (tagMap != null && !tagMap.isEmpty()) {
 			String[][] siblingPairs = {
 				{"", "_AVG"},
@@ -5932,6 +5969,10 @@ public class DrvnService {
 	}
 
 	public void insertCombPwrUnit(List<HashMap<String, Object>> insertArr) {
+		// 적재할 조합이 없으면 foreach 가 빈 VALUES 절을 만들어 SQL 문법 오류가 난다 → 빈 경우 스킵.
+		if (insertArr == null || insertArr.isEmpty()) {
+			return;
+		}
 		drvnMapper.insertCombPwrUnit(insertArr);
 	}
 
