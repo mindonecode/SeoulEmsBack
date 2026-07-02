@@ -128,6 +128,19 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 제어 설정 변경이력 조회. (TB_CTR_CFG_HIST, 최신순)
+	 * @param cfgType (optional) 'CONFIG'(제어기준) | 'CYCLE'(제어주기). 없으면 전체.
+	 * @return 변경 이력 목록
+	 */
+	@Operation(summary = "제어 설정 변경이력 조회", description = "selectCtrlSettingHist")
+	@GetMapping("/ctrlSettingHist")
+	public ResponseObject<List<HashMap<String, Object>>> getCtrlSettingHist(@RequestParam(required = false) String cfgType){
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("cfgType", cfgType);
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectCtrlSettingHist(p));
+	}
+
+	/**
 	 * [GET] 펌프 예측 가동이력 타임라인 조회 (예측·실측 비교 차트용).
 	 * @param param date(yyyy-MM-dd), pump_grp
 	 * @return [{ts, PUMP_IDX, PUMP_GRP_IDX, name, PUMP_YN}]

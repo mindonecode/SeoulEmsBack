@@ -965,7 +965,13 @@ public class AiService {
         int nowIntGoal = 0;
 
         for (HashMap<String, Object> nowGoalItem : nowGoalList) {
-            nowIntGoal = Integer.parseInt(nowGoalItem.get("value").toString());
+            // 목표피크 설정값은 "11000.0" 처럼 소수점 문자열로 올 수 있어 Integer.parseInt 가 실패한다.
+            // AlarmService.peakAlarm 과 동일하게 Double 파싱 후 반올림한다.
+            Object goalRaw = nowGoalItem.get("value");
+            if (goalRaw == null) {
+                continue;
+            }
+            nowIntGoal = (int) Math.round(Double.parseDouble(String.valueOf(goalRaw)));
         }
 
         if (nowIntGoal == 0) {
@@ -1373,42 +1379,50 @@ public class AiService {
 
             map.put("func_type", "saveCost");
             List<HashMap<String, Object>> costTagList = wppTagList(map);
-            costResultMap.put("tag", costTagList.get(0).get("TAG").toString());
-            costResultMap.put("time", savingMap.get("DATE"));
-            double costValue = Double.parseDouble(savingMap.get("SAVINGCOST").toString());
-            if (0 < costValue) {
-                costValue = Math.abs(costValue);
-            } else {
-                costValue = costValue * -1;
+            // 해당 func_type 태그가 설정되지 않은 정수장에서는 빈 리스트가 와서 get(0) 이 IndexOutOfBounds.
+            // 태그가 있을 때만 절감비용 항목을 추가한다.
+            if (!costTagList.isEmpty()) {
+                costResultMap.put("tag", costTagList.get(0).get("TAG").toString());
+                costResultMap.put("time", savingMap.get("DATE"));
+                double costValue = Double.parseDouble(savingMap.get("SAVINGCOST").toString());
+                if (0 < costValue) {
+                    costValue = Math.abs(costValue);
+                } else {
+                    costValue = costValue * -1;
+                }
+                costResultMap.put("value", costValue);
+                resultList.add(costResultMap);
             }
-            costResultMap.put("value", costValue);
-            resultList.add(costResultMap);
 
             map.put("func_type", "savePwr");
             List<HashMap<String, Object>> pwrTagList = wppTagList(map);
-            pwrResultMap.put("tag", pwrTagList.get(0).get("TAG").toString());
-            pwrResultMap.put("time", savingMap.get("DATE"));
-            double pwrValue = Double.parseDouble(savingMap.get("SAVINGKWH").toString());
-            if (0 < pwrValue) {
-                pwrValue = Math.abs(pwrValue);
-            } else {
-                pwrValue = pwrValue * -1;
+            if (!pwrTagList.isEmpty()) {
+                pwrResultMap.put("tag", pwrTagList.get(0).get("TAG").toString());
+                pwrResultMap.put("time", savingMap.get("DATE"));
+                double pwrValue = Double.parseDouble(savingMap.get("SAVINGKWH").toString());
+                if (0 < pwrValue) {
+                    pwrValue = Math.abs(pwrValue);
+                } else {
+                    pwrValue = pwrValue * -1;
+                }
+                pwrResultMap.put("value", pwrValue);
+                resultList.add(pwrResultMap);
             }
-            pwrResultMap.put("value", pwrValue);
-            resultList.add(pwrResultMap);
 
             map.put("func_type", "saveCo2");
             List<HashMap<String, Object>> co2TagList = wppTagList(map);
-            co2ResultMap.put("tag", co2TagList.get(0).get("TAG").toString());
-            co2ResultMap.put("time", savingMap.get("DATE"));
-            double co2Value = Double.parseDouble(savingMap.get("SAVINGCO2").toString());
-            if (0 < co2Value) {
-                co2Value = Math.abs(co2Value);
-            } else {
-                co2Value = co2Value * -1;
+            if (!co2TagList.isEmpty()) {
+                co2ResultMap.put("tag", co2TagList.get(0).get("TAG").toString());
+                co2ResultMap.put("time", savingMap.get("DATE"));
+                double co2Value = Double.parseDouble(savingMap.get("SAVINGCO2").toString());
+                if (0 < co2Value) {
+                    co2Value = Math.abs(co2Value);
+                } else {
+                    co2Value = co2Value * -1;
+                }
+                co2ResultMap.put("value", co2Value);
+                resultList.add(co2ResultMap);
             }
-            co2ResultMap.put("value", co2Value);
-            resultList.add(co2ResultMap);
         }
         // System.out.println("selectSavingResult:"+resultList.toString());
         return resultList;

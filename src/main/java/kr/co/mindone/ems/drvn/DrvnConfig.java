@@ -260,6 +260,21 @@ public class DrvnConfig {
 		return seoulReservoirTagMap;
 	}
 
+	/**
+	 * 수위 변동 차트 전용 배수지 태그 맵.
+	 * 북악을 전단(유입, seoul.step.ba.tags)/후단(유출, seoul.step.ba.upper.tags) 으로 분리해
+	 * 차트가 두 단계를 별도 라인으로 표출하도록 한다.
+	 * 공통 {@link #getSeoulReservoirTagMap()}(제어판정·엑셀 등 공유)은 건드리지 않는다.
+	 * 구리/월계/월곡은 차트 미사용 → 제외(프론트 reservoirs 가 명시 선택).
+	 */
+	public LinkedHashMap<String, String[]> getSeoulWaterLevelTagMap() {
+		LinkedHashMap<String, String[]> m = new LinkedHashMap<>();
+		m.put("공릉",     seoulReservoirTagMap.get("공릉"));
+		m.put("북악전단", seoulBaTags);        // 유입 (seoul.step.ba.tags)  = 하한 평균
+		m.put("북악후단", seoulBaUpperTags);   // 유출 (seoul.step.ba.upper.tags) = 상한 평균(미설정 시 전단 폴백)
+		return m;
+	}
+
 	/** 활성(가동중) 수조 판단 임계 수위 (m). */
 	public double getSeoulActiveThreshold() {
 		return seoulActiveThreshold;
@@ -5990,7 +6005,9 @@ public class DrvnConfig {
 	 * 중간/최대(M·H)=하한(USER_MIN_VL ?? MIN_VL).
 	 *
 	 * @param baseTime 기준 시각 (10분 경계로 정렬해 사용)
-	 * @return { gn:[{t,v}...], ba:[{t,v}...] } (예측 시각 +10m/+1h/+2h/+3h)
+	 * @return { gn:{lower,upper}, baFront:{lower,upper}, baRear:{lower,upper} }
+	 *         (각 lower/upper = [{t,v}...], 예측 시각 +10m/+1h/+2h/+3h)
+	 *         북악 전단=유입(seoul.step.ba.tags), 후단=유출(seoul.step.ba.upper.tags).
 	 */
 	public HashMap<String, Object> buildTargetLevelSeries(LocalDateTime baseTime, Integer pastHours, Integer futureHours) {
 		LocalDateTime base = baseTime.withMinute((baseTime.getMinute() / 10) * 10).withSecond(0).withNano(0);
@@ -5998,19 +6015,28 @@ public class DrvnConfig {
 		int ph = (pastHours == null || pastHours <= 0) ? 3 : pastHours;
 		int fh = (futureHours == null || futureHours <= 0) ? 3 : futureHours;
 		HashMap<String, Object> result = new HashMap<>();
-		result.put("gn", buildTargetSeriesForStation(seoulGnTags, base, ph, fh));
-		result.put("ba", buildTargetSeriesForStation(seoulBaTags, base, ph, fh));
+		result.put("gn",      buildTargetSeriesForStation(seoulGnTags, base, ph, fh));
+		result.put("baFront", buildTargetSeriesForStation(seoulBaTags, base, ph, fh));        // 유입
+		result.put("baRear",  buildTargetSeriesForStation(seoulBaUpperTags, base, ph, fh));   // 유출
 		return result;
 	}
 
-	private List<HashMap<String, Object>> buildTargetSeriesForStation(String[] tags, LocalDateTime base, int pastHours, int futureHours) {
-		List<HashMap<String, Object>> series = new ArrayList<>();
-		if (tags == null || tags.length == 0) return series;
+	/**
+	 * 배수지 목표수위 시리즈를 하한·상한 두 라인으로 산출.
+	 * @return { lower:[{t,v}...], upper:[{t,v}...] } — 부하단계 무관, 두 경계 모두 표출용.
+	 */
+	private HashMap<String, Object> buildTargetSeriesForStation(String[] tags, LocalDateTime base, int pastHours, int futureHours) {
+		HashMap<String, Object> out = new HashMap<>();
+		List<HashMap<String, Object>> lower = new ArrayList<>();
+		List<HashMap<String, Object>> upper = new ArrayList<>();
+		out.put("lower", lower);
+		out.put("upper", upper);
+		if (tags == null || tags.length == 0) return out;
 		// 목표수위 합산 기준: "현재 실측 ≥ 임계" 태그 필터가 아니라,
 		// 합산하는 목표수위 값 자체가 ≥ seoulActiveThreshold(3.0m) 인 것만 사용한다.
 		// (목표수위 값 ≥ 3m = 해당 수조 정상 동작중으로 판단 → 그 값들만 더해서 평균)
 		List<HashMap<String, Object>> rows = drvnMapper.selectTargetLevelByTags(Arrays.asList(tags));
-		if (rows == null || rows.isEmpty()) return series;
+		if (rows == null || rows.isEmpty()) return out;
 		// TAG(대문자) → HOURS → row
 		Map<String, Map<Integer, HashMap<String, Object>>> byTag = new HashMap<>();
 		for (HashMap<String, Object> r : rows) {
@@ -6037,26 +6063,35 @@ public class DrvnConfig {
 		List<LocalDateTime> points = new ArrayList<>(markSet);
 		for (LocalDateTime t : points) {
 			int hours = t.getHour();
-			boolean upper = "L".equals(loadZoneAt(t)); // 경부하=상한, 그 외=하한
-			double sum = 0.0;
-			int cnt = 0;
-			for (String tag : tags) {
-				Map<Integer, HashMap<String, Object>> hm = byTag.get(tag.toUpperCase());
-				if (hm == null) continue;
-				HashMap<String, Object> row = hm.get(hours);
-				if (row == null) continue;
-				Double val = pickTargetVal(row, upper);
-				// 목표수위 값이 ≥ seoulActiveThreshold(3.0m, 정상 동작중) 인 것만 합산해서 평균
-				if (val != null && val >= seoulActiveThreshold) { sum += val; cnt++; }
-			}
-			if (cnt > 0) {
-				HashMap<String, Object> pt = new HashMap<>();
-				pt.put("t", t.atZone(zone).toInstant().toEpochMilli());
-				pt.put("v", sum / cnt);
-				series.add(pt);
-			}
+			long epochMs = t.atZone(zone).toInstant().toEpochMilli();
+			// 하한·상한 각각 활성(≥seoulActiveThreshold) 수조 평균으로 산출.
+			addTargetAvgPoint(lower, byTag, tags, hours, false, epochMs);
+			addTargetAvgPoint(upper, byTag, tags, hours, true, epochMs);
 		}
-		return series;
+		return out;
+	}
+
+	/** 시점별 상한 or 하한 목표수위 평균을 산출해 series 에 추가(활성 수조 0개면 미추가). */
+	private void addTargetAvgPoint(List<HashMap<String, Object>> series,
+			Map<String, Map<Integer, HashMap<String, Object>>> byTag,
+			String[] tags, int hours, boolean upper, long epochMs) {
+		double sum = 0.0;
+		int cnt = 0;
+		for (String tag : tags) {
+			Map<Integer, HashMap<String, Object>> hm = byTag.get(tag.toUpperCase());
+			if (hm == null) continue;
+			HashMap<String, Object> row = hm.get(hours);
+			if (row == null) continue;
+			Double val = pickTargetVal(row, upper);
+			// 목표수위 값이 ≥ seoulActiveThreshold(3.0m, 정상 동작중) 인 것만 합산해서 평균
+			if (val != null && val >= seoulActiveThreshold) { sum += val; cnt++; }
+		}
+		if (cnt > 0) {
+			HashMap<String, Object> pt = new HashMap<>();
+			pt.put("t", epochMs);
+			pt.put("v", sum / cnt);
+			series.add(pt);
+		}
 	}
 
 	/** 목표수위 행에서 상/하한 선택. USER 값 우선, 없으면 기본값. */

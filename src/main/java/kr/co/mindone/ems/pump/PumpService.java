@@ -39,6 +39,9 @@ public class PumpService {
     private kr.co.mindone.ems.drvn.DrvnMapper drvnMapper;
 
     @Autowired
+    private kr.co.mindone.ems.common.CommonMapper commonMapper;
+
+    @Autowired
     private KafkaProperties kafkaProperties;
 
     private static final int PUMP_RUN_COMMAND_SUCCESS = 0; //동작성공
@@ -148,10 +151,31 @@ public class PumpService {
         if (lockMin <= 0) {
             throw new IllegalArgumentException("제어주기(분)는 1 이상이어야 합니다. 입력=" + lockMin);
         }
+        // 변경 전 현재값 확보 (upsert 전, null 가능 → 미설정 상태).
+        Integer befMin = null;
+        try {
+            befMin = drvnMapper.selectCtrlCycleMin();
+        } catch (Exception e) {
+            System.out.println("[updateControlLockMinutes] 이전 제어주기 조회 실패(무시). err=" + e.getMessage());
+        }
         HashMap<String, Object> param = new HashMap<>();
         param.put("lockMin", lockMin);
         param.put("updtUser", updtUser);
         drvnMapper.upsertCtrlCycleMin(param);
+        // 변경 이력 적재 (값이 실제로 달라진 경우만, 적재 실패는 무시하여 본 저장을 보호).
+        if (befMin == null || befMin != lockMin) {
+            try {
+                HashMap<String, Object> h = new HashMap<>();
+                h.put("cfgType", "CYCLE");
+                h.put("cfgKey", "LOCK_MIN");
+                h.put("befVal", befMin == null ? null : String.valueOf(befMin));
+                h.put("aftVal", String.valueOf(lockMin));
+                h.put("updtUser", updtUser);
+                commonMapper.insertCtrCfgHist(h);
+            } catch (Exception e) {
+                System.out.println("[updateControlLockMinutes] 변경이력 적재 실패(무시). err=" + e.getMessage());
+            }
+        }
         return lockMin;
     }
 
@@ -2868,6 +2892,8 @@ public class PumpService {
 
         int inserted = 0;
         String lastOptIdx = "";
+        // 제어 명령 발생 알람 메시지 구성용 (기존 pumpCommandWM 포맷과 동일: "펌프명: 가동|펌프명: 정지")
+        StringJoiner alarmDetail = new StringJoiner("|");
         for (HashMap<String, Object> row : latest) {
             if (row == null || row.get("PUMP_IDX") == null) continue;
             if (row.get("OPT_IDX") == null) {
@@ -2898,9 +2924,23 @@ public class PumpService {
                 continue;
             }
             insertPumpControlData(optIdx, ctrNm, tag, anlyCd, 1);
+            alarmDetail.add(ctrNm + ": " + ("RUN".equals(anlyCd) ? "가동" : "정지"));
             inserted++;
         }
         System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn inserted " + inserted + " rows (OPT_IDX=" + lastOptIdx + ")");
+
+        // [seoul/dev] 제어 명령 발생 알람 적재.
+        // seoul/dev 는 SCADA/Kafka 우회(devInsert 직접 INSERT)로 인해 pumpCommand 계열의
+        // emsPumpAlarmInsert 호출부에 도달하지 못해 제어 알람이 누락되었음. 명령이 실제
+        // 적재된 경우(inserted > 0)에만 TB_EMS_ALR 에 알람 1건을 직접 적재해 복구한다.
+        if (inserted > 0) {
+            HashMap<String, Object> alarm = new HashMap<>();
+            alarm.put("alr_typ", "PUMP");
+            alarm.put("nowDate", nowStringDate());
+            alarm.put("msg", "[AI운전] 펌프 제어 명령을 적용했습니다.||" + alarmDetail.toString());
+            alarm.put("link", "");
+            emsPumpAlarmInsert(alarm);
+        }
         return inserted;
     }
 

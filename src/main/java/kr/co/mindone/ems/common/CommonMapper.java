@@ -186,4 +186,17 @@ public interface CommonMapper {
      * @param param cfgKey(String), cfgVal(String)
      */
     void upsertAppConfig(HashMap<String, Object> param);
+
+    /**
+     * 제어 설정 변경 이력 1행 적재 (TB_CTR_CFG_HIST).
+     * @param param cfgType('CONFIG'|'CYCLE'), cfgKey, befVal, aftVal, updtUser
+     */
+    void insertCtrCfgHist(HashMap<String, Object> param);
+
+    /**
+     * 제어 설정 변경 이력 조회 (최신순). cfgType 없으면 전체.
+     * @param param cfgType(optional)
+     * @return 변경 이력 목록
+     */
+    List<HashMap<String, Object>> selectCtrCfgHist(HashMap<String, Object> param);
 }

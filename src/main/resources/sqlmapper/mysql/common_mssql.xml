@@ -526,4 +526,22 @@
 		ON DUPLICATE KEY UPDATE CFG_VAL = #{cfgVal}
 	</insert>
 
+	<!-- 제어 설정 변경 이력 적재 (TB_CTR_CFG_HIST). CFG_TYPE 으로 CONFIG/CYCLE 구분 -->
+	<insert id="insertCtrCfgHist" parameterType="hashMap">
+		INSERT INTO TB_CTR_CFG_HIST (CFG_TYPE, CFG_KEY, BEF_VAL, AFT_VAL, UPDT_USER)
+		VALUES (#{cfgType}, #{cfgKey}, #{befVal}, #{aftVal}, #{updtUser})
+	</insert>
+
+	<!-- 제어 설정 변경 이력 조회 (최신순). cfgType 없으면 전체 -->
+	<select id="selectCtrCfgHist" parameterType="hashMap" resultType="hashMap">
+		SELECT HIST_IDX, CFG_TYPE, CFG_KEY, BEF_VAL, AFT_VAL, UPDT_USER,
+		       DATE_FORMAT(RGSTR_TIME, '%Y-%m-%d %H:%i:%s') AS RGSTR_TIME
+		FROM TB_CTR_CFG_HIST
+		<where>
+			<if test="cfgType != null and cfgType != ''">CFG_TYPE = #{cfgType}</if>
+		</where>
+		ORDER BY RGSTR_TIME DESC, HIST_IDX DESC
+		LIMIT 500
+	</select>
+
 </mapper>
