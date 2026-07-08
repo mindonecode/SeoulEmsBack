@@ -114,6 +114,21 @@ public class DrvnConfig {
 	private double seoulBaMhThreshold;      // 북악 중간/최대부하 안전선 임계 (m) - 폴백
 	@Value("${seoul.step.load-adjust.enabled:true}")
 	private boolean seoulLoadAdjustEnabled; // 부하(L/M/H) 기반 ±1단계 조정 on/off. false 시 유클리드 거리 결과(closestPointIndex) 그대로 사용
+
+	// === [Seoul] 관압 알람 (A/B/C) : TB_RAWDATA 실측 관압이 기준값 초과 시 알람 =====
+	// 태그는 고정(분단위 적재), 임계값(Kg/cm²)은 TB_CONFIG(DB) 우선, @Value 는 폴백.
+	@Value("${seoul.pressure.a.tag:PK00KD_P_WTPYPL001_IPR}")
+	private String seoulPressureATag;       // 관압 A 태그
+	@Value("${seoul.pressure.b.tag:PK00KD_P_WTPYPL002_IPR}")
+	private String seoulPressureBTag;       // 관압 B 태그
+	@Value("${seoul.pressure.c.tag:PK00KD_P_WTPYPL003_IPR}")
+	private String seoulPressureCTag;       // 관압 C 태그
+	@Value("${seoul.pressure.a.threshold:30.0}")
+	private double seoulPressureAThreshold; // 관압 A 기준값 (Kg/cm²) - 폴백
+	@Value("${seoul.pressure.b.threshold:25.0}")
+	private double seoulPressureBThreshold; // 관압 B 기준값 (Kg/cm²) - 폴백
+	@Value("${seoul.pressure.c.threshold:20.0}")
+	private double seoulPressureCThreshold; // 관압 C 기준값 (Kg/cm²) - 폴백
 	private String[] seoulGnTags;           // @PostConstruct 에서 CSV 파싱
 	private String[] seoulBaTags;           // 북악 유입/하한 태그 (M/H)
 	private String[] seoulBaUpperTags;      // 북악 유출/상한 태그 (L)
@@ -289,6 +304,20 @@ public class DrvnConfig {
 	public double getSeoulGnMhThreshold() { return appConfigStore.getDouble("seoul.step.gn.mh.threshold", seoulGnMhThreshold); }
 	/** 북악 중간/최대부하 안전선 임계 (m) - 유입/하한 평균 기준. */
 	public double getSeoulBaMhThreshold() { return appConfigStore.getDouble("seoul.step.ba.mh.threshold", seoulBaMhThreshold); }
+
+	// === 관압 A/B/C 알람 : 태그는 고정, 기준값은 TB_CONFIG(DB) 우선 + @Value 폴백 ===
+	/** 관압 A 태그 (TB_RAWDATA.TAGNAME). */
+	public String getSeoulPressureATag() { return seoulPressureATag; }
+	/** 관압 B 태그 (TB_RAWDATA.TAGNAME). */
+	public String getSeoulPressureBTag() { return seoulPressureBTag; }
+	/** 관압 C 태그 (TB_RAWDATA.TAGNAME). */
+	public String getSeoulPressureCTag() { return seoulPressureCTag; }
+	/** 관압 A 기준값 (Kg/cm²) - 초과 시 알람. */
+	public double getSeoulPressureAThreshold() { return appConfigStore.getDouble("seoul.pressure.a.threshold", seoulPressureAThreshold); }
+	/** 관압 B 기준값 (Kg/cm²) - 초과 시 알람. */
+	public double getSeoulPressureBThreshold() { return appConfigStore.getDouble("seoul.pressure.b.threshold", seoulPressureBThreshold); }
+	/** 관압 C 기준값 (Kg/cm²) - 초과 시 알람. */
+	public double getSeoulPressureCThreshold() { return appConfigStore.getDouble("seoul.pressure.c.threshold", seoulPressureCThreshold); }
 
 	private static String[] splitCsvTags(String raw) {
 		if (raw == null || raw.trim().isEmpty()) return new String[0];

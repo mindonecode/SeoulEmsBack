@@ -105,6 +105,20 @@ public class PumpService {
     }
 
     /**
+     * [dev/seoul 2단계 제어] 전체 OFF 명령을 먼저 발사한 뒤, 실제 예측 제어명령을 몇 분 뒤에 발사할지(분).
+     * 기본 5분. 0 이하로 설정하면 지연 없이 즉시 예측명령을 발사(2단계 기능 off).
+     */
+    @Value("${seoul.control.preoff.delay.minutes:5}")
+    private int preOffDelayMinutes;
+
+    /**
+     * SchedulerConfig 의 taskScheduler 빈 (ThreadPoolTaskScheduler, poolSize=5).
+     * 전체 OFF 발사 후 preOffDelayMinutes 뒤에 실제 예측명령을 1회 예약 실행하는 데 사용.
+     */
+    @Autowired
+    private org.springframework.scheduling.TaskScheduler taskScheduler;
+
+    /**
      * In-memory fallback lock 시각 (PUMP_GRP 별 마지막 제어 발사 시각).
      * DB INSERT (TB_MNL_CHN_LOG) 가 어떤 이유로 실패해도 JVM 메모리 안에서 30분 카운트가 끊기지 않도록 함.
      * 운영 중 1분마다 자동제어가 들어가던 현상의 직접 원인: insertManualOperLog 가 실패 → DB MAX 시각 안 갱신 → 가드 풀려 매분 발사.
@@ -1663,6 +1677,7 @@ public class PumpService {
                             + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime"));
                     continue;
                 }
+                // AI 추천 팝업도 자동 제어와 동일하게 2단계(전체 OFF 선행 + 5분 지연) 발사
                 int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpInt);
                 if (inserted > 0) {
                     recordControlCommand(pumpGrpInt, "ai_command");
@@ -2858,21 +2873,152 @@ public class PumpService {
     }
 
     /**
-     * [DEV] 거리 계산 결과(TB_CTR_PUMPYN_RST의 가장 최신 OPT_IDX)의 PUMP_YN 값을 그대로
-     * RUN/STOP 명령으로 변환해 TB_HMI_CTR_TAG에 적재. 운영 흐름(SCADA/Kafka 의존) 우회용.
+     * [DEV/SEOUL] 2단계 제어명령 발사 진입점 (자동 제어 · AI 추천 팝업 공통).
+     * 현재 실측 가동상태(PMB_TAG)와 목표 예측조합(selectLatestPumpYnByGrp)을 비교(diff)해
+     * 바뀌는 펌프만 단계적으로 전환한다. 전체를 껐다 켜지 않는다.
+     * 1) 즉시: 정지 대상(현재 ON & 목표 OFF)이 있으면 "유지 조합"(현재 ∧ 목표) 전체를 발사한다.
+     *    → 꺼야 할 펌프만 STOP, 계속 돌 펌프는 RUN 유지, 신규 기동 펌프는 아직 켜지 않음.
+     *    예) 현재 1,2,3,4 / 목표 2,3,4,5 → 1단계 = 0,1,1,1,0,0,0,0,0 (1만 정지, 5는 아직).
+     * 2) preOffDelayMinutes(기본 5분) 뒤: 기동 대상(현재 OFF & 목표 ON)이 있으면 목표조합 전체를
+     *    지연 예약 발사(insertPredictionCommands)해 신규 펌프를 기동한다. 예) 2단계 = 0,1,1,1,1,0,0,0,0.
+     *    (preOffDelayMinutes <= 0 이면 지연 없이 즉시 목표조합 발사 — 지연 기능 off)
+     *
+     * 반환값은 "제어 시퀀스가 개시되었는지"를 나타내는 양수. 호출부는 이 값이 0보다 크면
+     * recordControlCommand 로 lock 을 기록해 지연 대기 중 1분 주기 스케줄러의 중복 재발사를 막는다.
+     * 변화(정지/기동 대상)가 전혀 없으면 아무 명령도 내지 않고 0 을 반환한다.
+     *
      * @param pumpGrp 대상 펌프 그룹
-     * @return INSERT된 row 수
+     * @return 개시된 제어 액션 수(1단계 발사 row + 2단계 예약). 변화 없으면 0
      */
     public int devInsertHmiTagFromLatestPumpYn(int pumpGrp) {
         java.util.HashMap<String, Object> param = new java.util.HashMap<>();
         param.put("PUMP_GRP", pumpGrp);
-        List<HashMap<String, Object>> latest = pumpMapper.selectLatestPumpYnByGrp(param);
-        if (latest == null || latest.isEmpty()) {
+        List<HashMap<String, Object>> target = pumpMapper.selectLatestPumpYnByGrp(param);
+        if (target == null || target.isEmpty()) {
             System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: no PUMP_YN row for PUMP_GRP=" + pumpGrp);
             return 0;
         }
+
+        // 현재 실측 가동 펌프 집합 (PMB_TAG 기준 On)
+        java.util.Set<Integer> running = selectRunningPumpIdx(pumpGrp);
+
+        // diff 계산: toStop(현재 ON & 목표 OFF), toStart(현재 OFF & 목표 ON)
+        boolean hasStop = false;
+        boolean hasStart = false;
+        for (HashMap<String, Object> row : target) {
+            if (row == null || row.get("PUMP_IDX") == null) continue;
+            int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
+            boolean targetOn = "1".equals(String.valueOf(row.get("PUMP_YN")));
+            boolean nowOn = running.contains(pumpIdx);
+            if (nowOn && !targetOn) hasStop = true;
+            if (!nowOn && targetOn) hasStart = true;
+        }
+
+        if (!hasStop && !hasStart) {
+            System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: no change (current == target) PUMP_GRP=" + pumpGrp);
+            return 0;
+        }
+
+        int actions = 0;
+
+        // 1단계(즉시): 정지 대상이 있으면 유지 조합(현재 ∧ 목표) 전체 발사
+        if (hasStop) {
+            int n = insertCombination(target,
+                    (idx, yn) -> "1".equals(yn) && running.contains(idx),
+                    "[AI운전] 정지 대상 펌프를 정지했습니다.");
+            System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase1(keep) fired " + n
+                    + " rows (PUMP_GRP=" + pumpGrp + ")");
+            actions += n;
+        }
+
+        // 2단계(5분 뒤): 기동 대상이 있으면 목표조합 전체를 지연 예약
+        if (hasStart) {
+            if (preOffDelayMinutes > 0) {
+                java.time.Instant fireAt = java.time.Instant.now().plus(java.time.Duration.ofMinutes(preOffDelayMinutes));
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase2(target) 예약 "
+                        + preOffDelayMinutes + "분 뒤(PUMP_GRP=" + pumpGrp + ")");
+                taskScheduler.schedule(() -> {
+                    try {
+                        insertPredictionCommands(pumpGrp);
+                    } catch (Exception e) {
+                        System.out.println("[DEV] 지연 예측명령 발사 실패 PUMP_GRP=" + pumpGrp + " err=" + e.getMessage());
+                    }
+                }, fireAt);
+                actions += 1; // 시퀀스 개시 표시 → 호출부 lock 기록 유도
+            } else {
+                // 지연 비활성화(preOffDelayMinutes <= 0): 즉시 목표조합 발사
+                actions += insertPredictionCommands(pumpGrp);
+            }
+        }
+        return actions;
+    }
+
+    /**
+     * [DEV/SEOUL] 현재 실측 가동 중인 펌프 PUMP_IDX 집합을 반환.
+     * TB_CTR_PRF_PUMPMST_INF.PMB_TAG → TB_RAWDATA.value(1=On) 실측 기준(nowRunAllPumpList raw).
+     * Java 래퍼 nowRunAllPumpList() 는 PRI inner-join 으로 펌프가 누락될 수 있어 raw mapper 를
+     * 직접 호출하고 PUMP_GRP 로 필터한다. 실측 PUMP_YN 은 "On"/"Off" 문자열.
+     * 실측 피드가 10분 이상 stale 이면 전 펌프가 "Off" 로 조회되어 빈 집합이 반환될 수 있으나,
+     * 2단계는 항상 목표조합 전체를 발사하므로 최종 상태는 목표로 수렴한다.
+     * @param pumpGrp 대상 펌프 그룹
+     * @return 현재 가동(On) 펌프의 PUMP_IDX 집합 (실측 없으면 빈 집합)
+     */
+    private java.util.Set<Integer> selectRunningPumpIdx(int pumpGrp) {
+        java.util.Set<Integer> running = new java.util.HashSet<>();
+        List<HashMap<String, Object>> now = pumpMapper.nowRunAllPumpList();
+        if (now == null) return running;
+        for (HashMap<String, Object> row : now) {
+            if (row == null || row.get("PUMP_IDX") == null || row.get("PUMP_GRP") == null) continue;
+            try {
+                if (Integer.parseInt(row.get("PUMP_GRP").toString()) != pumpGrp) continue;
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if ("On".equalsIgnoreCase(String.valueOf(row.get("PUMP_YN")))) {
+                running.add(Integer.parseInt(row.get("PUMP_IDX").toString()));
+            }
+        }
+        return running;
+    }
+
+    /**
+     * [DEV] 목표 예측조합(TB_CTR_PUMPYN_RST 최신 PUMP_YN) 전체를 RUN/STOP 명령으로 발사.
+     * 2단계 제어의 실제 예측명령 발사부 — devInsertHmiTagFromLatestPumpYn 에서 지연 예약 실행됨.
+     * 발사 시점에 최신 PUMP_YN 을 재조회하므로 항상 최신 예측 조합을 적용한다.
+     * 운영 흐름(SCADA/Kafka 의존) 우회용.
+     * @param pumpGrp 대상 펌프 그룹
+     * @return INSERT된 row 수
+     */
+    private int insertPredictionCommands(int pumpGrp) {
+        java.util.HashMap<String, Object> param = new java.util.HashMap<>();
+        param.put("PUMP_GRP", pumpGrp);
+        List<HashMap<String, Object>> latest = pumpMapper.selectLatestPumpYnByGrp(param);
+        if (latest == null || latest.isEmpty()) {
+            System.out.println("[DEV] insertPredictionCommands: no PUMP_YN row for PUMP_GRP=" + pumpGrp);
+            return 0;
+        }
+        // 목표조합 전체: PUMP_YN=1 → RUN, 그 외 → STOP
+        return insertCombination(latest,
+                (idx, yn) -> "1".equals(yn),
+                "[AI운전] 펌프 제어 명령을 적용했습니다.");
+    }
+
+    /**
+     * [DEV/SEOUL] 주어진 목표 행 목록을 조합으로 렌더링해 TB_HMI_CTR_TAG 에 전체 발사한다.
+     * shouldRun 판정이 true 면 RUN(CTR_AUTO_TAG), false 면 STOP(CTR_AUTO_STOP_TAG) 로 적재하며
+     * insertPumpControlData 의 dev/seoul 정규화로 RUN→"1"/1, STOP→"0"/0 이 된다.
+     * INSERT 순서는 PUMP_IDX DESC(9→1)로 강제하고, 실제 적재가 있으면 알람 1건을 남긴다.
+     * 1단계(유지 조합)와 2단계(목표 조합) 발사가 이 메서드를 공유한다.
+     * @param target     목표 행 목록(각 행: OPT_IDX, PUMP_IDX, PUMP_YN)
+     * @param shouldRun  (pumpIdx, pumpYn) → RUN 여부 판정
+     * @param alarmTitle 알람 제목(뒤에 "||상세" 가 붙음)
+     * @return INSERT된 row 수
+     */
+    private int insertCombination(List<HashMap<String, Object>> target,
+                                  java.util.function.BiPredicate<Integer, String> shouldRun,
+                                  String alarmTitle) {
         // INSERT 순서 강제: PUMP_IDX DESC (9가 먼저, 1이 마지막). SQL ORDER BY 결과에 의존하지 않음.
-        latest = new java.util.ArrayList<>(latest);
+        List<HashMap<String, Object>> latest = new java.util.ArrayList<>(target);
         latest.sort((a, b) -> {
             int ai = (a == null || a.get("PUMP_IDX") == null) ? Integer.MIN_VALUE
                     : Integer.parseInt(a.get("PUMP_IDX").toString());
@@ -2897,37 +3043,37 @@ public class PumpService {
         for (HashMap<String, Object> row : latest) {
             if (row == null || row.get("PUMP_IDX") == null) continue;
             if (row.get("OPT_IDX") == null) {
-                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: missing OPT_IDX for PUMP_IDX=" + row.get("PUMP_IDX"));
+                System.out.println("[DEV] insertCombination: missing OPT_IDX for PUMP_IDX=" + row.get("PUMP_IDX"));
                 continue;
             }
             String optIdx = row.get("OPT_IDX").toString();
             lastOptIdx = optIdx;
             int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
             String pumpYn = String.valueOf(row.get("PUMP_YN"));
-            String anlyCd = "1".equals(pumpYn) ? "RUN" : "STOP";
+            String anlyCd = shouldRun.test(pumpIdx, pumpYn) ? "RUN" : "STOP";
 
             HashMap<String, Object> pumpInf = pumpInfMap.get(pumpIdx);
             if (pumpInf == null) {
-                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: no pump master for PUMP_IDX=" + pumpIdx);
+                System.out.println("[DEV] insertCombination: no pump master for PUMP_IDX=" + pumpIdx);
                 continue;
             }
             Object pumpNmObj = pumpInf.get("PUMP_NM");
             Object tagObj = "RUN".equals(anlyCd) ? pumpInf.get("CTR_AUTO_TAG") : pumpInf.get("CTR_AUTO_STOP_TAG");
             if (pumpNmObj == null || tagObj == null) {
-                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: missing PUMP_NM or TAG for PUMP_IDX=" + pumpIdx + ", anlyCd=" + anlyCd);
+                System.out.println("[DEV] insertCombination: missing PUMP_NM or TAG for PUMP_IDX=" + pumpIdx + ", anlyCd=" + anlyCd);
                 continue;
             }
             String ctrNm = pumpNmObj.toString();
             String tag = tagObj.toString();
             if (tag.isEmpty()) {
-                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: empty TAG for PUMP_IDX=" + pumpIdx + ", anlyCd=" + anlyCd);
+                System.out.println("[DEV] insertCombination: empty TAG for PUMP_IDX=" + pumpIdx + ", anlyCd=" + anlyCd);
                 continue;
             }
             insertPumpControlData(optIdx, ctrNm, tag, anlyCd, 1);
             alarmDetail.add(ctrNm + ": " + ("RUN".equals(anlyCd) ? "가동" : "정지"));
             inserted++;
         }
-        System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn inserted " + inserted + " rows (OPT_IDX=" + lastOptIdx + ")");
+        System.out.println("[DEV] insertCombination inserted " + inserted + " rows (OPT_IDX=" + lastOptIdx + ")");
 
         // [seoul/dev] 제어 명령 발생 알람 적재.
         // seoul/dev 는 SCADA/Kafka 우회(devInsert 직접 INSERT)로 인해 pumpCommand 계열의
@@ -2937,7 +3083,7 @@ public class PumpService {
             HashMap<String, Object> alarm = new HashMap<>();
             alarm.put("alr_typ", "PUMP");
             alarm.put("nowDate", nowStringDate());
-            alarm.put("msg", "[AI운전] 펌프 제어 명령을 적용했습니다.||" + alarmDetail.toString());
+            alarm.put("msg", alarmTitle + "||" + alarmDetail.toString());
             alarm.put("link", "");
             emsPumpAlarmInsert(alarm);
         }

@@ -128,6 +128,17 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 관압 A/B/C 알람 판정. 실측 관압(TB_RAWDATA 최신)이 기준값 초과 시 알람 item 반환.
+	 * 프론트가 주기적으로 폴링하여 초과분이 있으면 알람 팝업을 띄운다.
+	 * @return { items: [{name, tag, value, threshold, ts}] } (초과분만, 없으면 빈 리스트)
+	 */
+	@Operation(summary = "관압 알람 판정", description = "pressureAlarm")
+	@GetMapping("/pressureAlarm")
+	public ResponseObject<HashMap<String, Object>> getPressureAlarm(){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.pressureAlarm());
+	}
+
+	/**
 	 * [GET] 제어 설정 변경이력 조회. (TB_CTR_CFG_HIST, 최신순)
 	 * @param cfgType (optional) 'CONFIG'(제어기준) | 'CYCLE'(제어주기). 없으면 전체.
 	 * @return 변경 이력 목록
