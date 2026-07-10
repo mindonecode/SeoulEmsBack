@@ -178,23 +178,77 @@ public class DrvnService {
 	private static final String CFG_BA_LOWER = "seoul.step.ba.mh.threshold";
 	private static final String CFG_GN_UPPER = "seoul.step.gn.target";
 	private static final String CFG_GN_LOWER = "seoul.step.gn.mh.threshold";
+	// 관압 A/B/C 알람 기준값 키 (제어 설정 팝업 "관압 알람기준" 연동)
+	private static final String CFG_PRS_A = "seoul.pressure.a.threshold";
+	private static final String CFG_PRS_B = "seoul.pressure.b.threshold";
+	private static final String CFG_PRS_C = "seoul.pressure.c.threshold";
 
 	// selectMultiTagPrdctRange(TB_CTR_TNK_RST) 서브쿼리 RGSTR_TIME 하한.
 	// 예측은 10분 주기 적재라 최신 RGSTR 은 보통 수분 내 → 누적 이력 풀스캔 방지용 하한.
 	private static final int RGSTR_LOOKBACK_DAYS = 2;
 
 	/**
-	 * 제어기준(배수지 상/하한 수위) 현재값 조회.
+	 * 제어기준(배수지 상/하한 수위 + 관압 기준값) 현재값 조회.
 	 * AppConfigStore 캐시(TB_CONFIG 우선, 없으면 @Value 폴백)를 읽는 DrvnConfig getter 재사용.
-	 * @return {baUpper, baLower, gnUpper, gnLower} (단위: m)
+	 * 설정 팝업이 항상 최신 DB 값을 보이도록, 조회 직전 캐시를 재로딩한다.
+	 * (AppConfigStore 는 주기 폴링이 없어 DB 직접 수정분이 캐시에 자동 반영되지 않으므로 필요)
+	 * @return {baUpper, baLower, gnUpper, gnLower, prsA, prsB, prsC}
 	 */
 	public HashMap<String, Object> selectControlConfig() {
+		appConfigStore.reload();
 		HashMap<String, Object> result = new HashMap<>();
 		result.put("baUpper", drvnConfig.getSeoulBaTarget());
 		result.put("baLower", drvnConfig.getSeoulBaMhThreshold());
 		result.put("gnUpper", drvnConfig.getSeoulGnTarget());
 		result.put("gnLower", drvnConfig.getSeoulGnMhThreshold());
+		// 관압 A/B/C 알람 기준값 (Kg/cm²)
+		result.put("prsA", drvnConfig.getSeoulPressureAThreshold());
+		result.put("prsB", drvnConfig.getSeoulPressureBThreshold());
+		result.put("prsC", drvnConfig.getSeoulPressureCThreshold());
 		return result;
+	}
+
+	/**
+	 * 관압 A/B/C 실측값(TB_RAWDATA 최신) 이 기준값을 초과하면 알람 item 을 생성한다.
+	 * 태그는 분단위로 적재되며, 각 태그의 (now-10min, now] 윈도우 최신 1건을 기준값과 비교.
+	 * @return { items: [{ name, tag, value, threshold, ts }] } — 초과분만 포함 (없으면 빈 리스트)
+	 */
+	public HashMap<String, Object> pressureAlarm() {
+		// 기준값을 DB(TB_CONFIG) 직접 수정분까지 즉시 반영하도록 판정 직전 캐시 재로딩.
+		appConfigStore.reload();
+		String nowTs = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+		java.util.List<HashMap<String, Object>> items = new java.util.ArrayList<>();
+		addPressureAlarmItem(items, "관압 A", drvnConfig.getSeoulPressureATag(), drvnConfig.getSeoulPressureAThreshold(), nowTs);
+		addPressureAlarmItem(items, "관압 B", drvnConfig.getSeoulPressureBTag(), drvnConfig.getSeoulPressureBThreshold(), nowTs);
+		addPressureAlarmItem(items, "관압 C", drvnConfig.getSeoulPressureCTag(), drvnConfig.getSeoulPressureCThreshold(), nowTs);
+		HashMap<String, Object> result = new HashMap<>();
+		result.put("items", items);
+		return result;
+	}
+
+	/** 관압 단건 실측값을 조회해 기준값 초과 시 items 에 알람 항목을 추가한다. (selectLatestActualPressure 재사용) */
+	private void addPressureAlarmItem(java.util.List<HashMap<String, Object>> items, String name, String tag, double threshold, String nowTs) {
+		if (tag == null || tag.trim().isEmpty()) return;
+		HashMap<String, Object> p = new HashMap<>();
+		p.put("tag", tag.trim());
+		p.put("actl_ref_ts", nowTs);
+		HashMap<String, Object> r = drvnMapper.selectLatestActualPressure(p);
+		if (r == null || r.get("value") == null) return;
+		double value;
+		try {
+			value = Double.parseDouble(String.valueOf(r.get("value")).trim());
+		} catch (NumberFormatException e) {
+			return; // 값 파싱 실패는 알람 대상 아님
+		}
+		if (value > threshold) {
+			HashMap<String, Object> item = new HashMap<>();
+			item.put("name", name);
+			item.put("tag", tag.trim());
+			item.put("value", value);
+			item.put("threshold", threshold);
+			item.put("ts", r.get("ts"));
+			items.add(item);
+		}
 	}
 
 	/**
@@ -236,10 +290,17 @@ public class DrvnService {
 		double befBaLower = drvnConfig.getSeoulBaMhThreshold();
 		double befGnUpper = drvnConfig.getSeoulGnTarget();
 		double befGnLower = drvnConfig.getSeoulGnMhThreshold();
+		double befPrsA = drvnConfig.getSeoulPressureAThreshold();
+		double befPrsB = drvnConfig.getSeoulPressureBThreshold();
+		double befPrsC = drvnConfig.getSeoulPressureCThreshold();
 		upsertCfg(CFG_BA_UPPER, befBaUpper, param.get("baUpper"));
 		upsertCfg(CFG_BA_LOWER, befBaLower, param.get("baLower"));
 		upsertCfg(CFG_GN_UPPER, befGnUpper, param.get("gnUpper"));
 		upsertCfg(CFG_GN_LOWER, befGnLower, param.get("gnLower"));
+		// 관압 A/B/C 알람 기준값 (제어 설정 팝업 "관압 알람기준")
+		upsertCfg(CFG_PRS_A, befPrsA, param.get("prsA"));
+		upsertCfg(CFG_PRS_B, befPrsB, param.get("prsB"));
+		upsertCfg(CFG_PRS_C, befPrsC, param.get("prsC"));
 		appConfigStore.reload();
 	}
 
