@@ -115,6 +115,9 @@ public class DrvnConfig {
 	@Value("${seoul.step.load-adjust.enabled:true}")
 	private boolean seoulLoadAdjustEnabled; // 부하(L/M/H) 기반 ±1단계 조정 on/off. false 시 유클리드 거리 결과(closestPointIndex) 그대로 사용
 
+	@Value("${pump.predict.mode:euclidean}")
+	private String pumpPredictMode; // 조합 선택 방식: "euclidean"(유클리드 최근접) | "flowrange"(유량 범위 매칭, 미매칭/중복 시 euclidean 폴백)
+
 	// === [Seoul] 관압 알람 (A/B/C) : TB_RAWDATA 실측 관압이 기준값 초과 시 알람 =====
 	// 태그는 고정(분단위 적재), 임계값(Kg/cm²)은 TB_CONFIG(DB) 우선, @Value 는 폴백.
 	@Value("${seoul.pressure.a.tag:PK00KD_P_WTPYPL001_IPR}")
@@ -614,6 +617,73 @@ public class DrvnConfig {
 	 * @param ts       계산할 시간
 	 * @return 수동 생성시 확인을 위한 로그값 반환을 위한 objeect
 	 */
+	/**
+	 * 조합 선택 인덱스 결정 (실운전/미래예측 공용).
+	 * mode="flowrange": 유량이 [minFlow,maxFlow]에 유일하게 드는 조합 선택. 0개(공백/범위밖)/2개 이상(겹침)이면 euclidean 폴백.
+	 * mode 그 외: z-score 표준화 후 유클리드 최근접.
+	 * 두 방식을 항상 계산해 비교 로그([PUMP-PREDICT])를 남긴다 → 어느 경로로 골랐는지·두 방식이 갈리는지 확인용.
+	 * @return collectData 인덱스, 없으면 -1
+	 */
+	private int selectCombIndex(List<HashMap<String, Object>> collectData,
+								double flow, double pressure,
+								double flowAvg, double flowStd,
+								double pressAvg, double pressStd,
+								String mode, int pump_grp, String path) {
+		// (1) 유량 범위 매칭 후보 산출
+		List<Integer> matches = new ArrayList<>();
+		for (int i = 0; i < collectData.size(); i++) {
+			Object mnO = collectData.get(i).get("minFlow");
+			Object mxO = collectData.get(i).get("maxFlow");
+			if (mnO == null || mxO == null) continue;
+			double mn = (double) mnO, mx = (double) mxO;
+			if (flow >= mn && flow <= mx) matches.add(i);
+		}
+
+		// (2) 유클리드 최근접 (기존 로직 그대로) — 폴백/비교용으로 항상 계산
+		int euclideanIdx = -1;
+		double minDistance = Double.MAX_VALUE;
+		for (int i = 0; i < collectData.size(); i++) {
+			@SuppressWarnings("unchecked")
+			List<HashMap<String, Double>> calList = (List<HashMap<String, Double>>) collectData.get(i).get("calList");
+			for (HashMap<String, Double> calMap : calList) {
+				double sCurP = (pressure - pressAvg) / pressStd;
+				double sCurQ = (flow - flowAvg) / flowStd;
+				double sPreP = (calMap.get("calPressure") - pressAvg) / pressStd;
+				double sPreQ = (calMap.get("calFlow") - flowAvg) / flowStd;
+				double dx = Math.abs(sCurP - sPreP);
+				double dy = Math.abs(sCurQ - sPreQ);
+				double distance = Math.sqrt(dx * dx + dy * dy);
+				if (distance < minDistance) { minDistance = distance; euclideanIdx = i; }
+			}
+		}
+
+		// (3) 모드에 따라 채택 인덱스 + 사유 결정
+		int chosen;
+		String reason;
+		if ("flowrange".equalsIgnoreCase(mode)) {
+			if (matches.size() == 1) {
+				chosen = matches.get(0);          reason = "FLOWRANGE_UNIQUE";
+			} else if (matches.isEmpty()) {
+				chosen = euclideanIdx;            reason = "FALLBACK_NO_MATCH";      // 범위 밖/공백
+			} else {
+				chosen = euclideanIdx;            reason = "FALLBACK_OVERLAP(" + matches.size() + ")"; // 겹침
+			}
+		} else {
+			chosen = euclideanIdx;                reason = "EUCLIDEAN";
+		}
+
+		// (4) 비교 로그 — grep "[PUMP-PREDICT]" 로 추적. diff=true 면 두 방식이 서로 다른 조합을 골랐다는 뜻.
+		Object chosenComb    = chosen >= 0        ? collectData.get(chosen).get("pumpComb")       : null;
+		Object euclideanComb = euclideanIdx >= 0  ? collectData.get(euclideanIdx).get("pumpComb") : null;
+		List<Object> flowrangeCombs = new ArrayList<>();
+		for (int m : matches) flowrangeCombs.add(collectData.get(m).get("pumpComb"));
+		logger.info("[PUMP-PREDICT] path={} grp={} mode={} flow={} pressure={} reason={} chosenIdx={} chosenComb={} | euclideanIdx={} euclideanComb={} | flowrangeMatches={} flowrangeCombs={} | diff={}",
+				path, pump_grp, mode, flow, pressure, reason, chosen, chosenComb,
+				euclideanIdx, euclideanComb, matches, flowrangeCombs, (chosen != euclideanIdx));
+
+		return chosen;
+	}
+
 	public Object insertPumpComb(double flow, double pressure, int pump_grp, String ts) {
 		loadCheckLog.append("  - **데이터 확인!** flow: " + flow + ", pressure: " + pressure + ", pump_grp: " + pump_grp + ", ts: " + ts + "#");
 
@@ -891,6 +961,8 @@ public class DrvnConfig {
 				targetpressList.add(calPressure);
 			}
 			collectMap.put("calList", flowPriList);
+			collectMap.put("minFlow", min_flow);
+			collectMap.put("maxFlow", max_flow);
 			collectData.add(collectMap);
 		}
 
@@ -901,44 +973,13 @@ public class DrvnConfig {
 		double pressStd = calculateStdDev(targetpressList, pressAvg);
 		double flowStd = calculateStdDev(targetflowList, flowAvg);
 
+		// 조합 선택: 프로퍼티(pump.predict.mode)에 따라 유클리드 최근접 또는 유량 범위 매칭(폴백 포함)
 		int closestPointIndex = -1;
-		double minDistance = Double.MAX_VALUE;
 		if (!collectData.isEmpty()) {
-			double distance;
-			for (int i = 0; i < collectData.size(); i++) {
-				HashMap<String, Object> targetMap = collectData.get(i);
-				List<HashMap<String, Double>> flowPriList = (List<HashMap<String, Double>>) targetMap.get("calList");
-				for (HashMap<String, Double> calMap : flowPriList) {
-					double targetPre = calMap.get("calPressure");
-					double targetFlow = calMap.get("calFlow");
-
-
-					// curP, curQ 표준화
-					double standardizedCurP = (pressure - pressAvg) / pressStd;
-					double standardizedCurQ = (flow - flowAvg) / flowStd;
-					// preP, preQ 표준화
-					double standardizedPreP = (targetPre - pressAvg) / pressStd;
-					double standardizedPreQ = (targetFlow - flowAvg) / flowStd;
-					// 거리 계산
-					double deltaX = Math.abs(standardizedCurP - standardizedPreP);
-					double deltaY = Math.abs(standardizedCurQ - standardizedPreQ);
-					// 계산된 좌표의 값에 유클리드 거리방정식을 적용해 거리 계산
-					distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-					// 각 데이터 포인트별 거리 로그
-//					loadCheckLog.append("  - Data Point (Pre, Flow): (" + targetPre + ", " + targetFlow + ") -> Distance: " + distance + "#");
-
-					// 거리 값이 기존 거리값보다 작으면 최소거리 변수에 값 저장 및 조합 idx 값 저장
-					if (distance < minDistance) {
-						minDistance = distance;
-						closestPointIndex = i;
-//						loadCheckLog.append("  - **New Min Distance Found!** distance: " + minDistance + ", closestPointIndex: " + closestPointIndex + "#");
-					}
-
-				}
-
-
-			}
+			closestPointIndex = selectCombIndex(collectData, flow, pressure,
+					flowAvg, flowStd, pressAvg, pressStd, pumpPredictMode, pump_grp, "LIVE");
 		}
+		loadCheckLog.append("Predict mode: " + pumpPredictMode + "#");
 
 		// 최종 결과 로그
 		loadCheckLog.append("--- Final Result ---#");
@@ -6450,6 +6491,8 @@ public class DrvnConfig {
 				collectMap.put("pumpLevel", pumpLevel);
 				collectMap.put("combIdx", cidx);
 				collectMap.put("calList", flowPriList);
+				collectMap.put("minFlow", min_flow);
+				collectMap.put("maxFlow", max_flow);
 				collectData.add(collectMap);
 			}
 
@@ -6461,25 +6504,9 @@ public class DrvnConfig {
 			double flowStd = calculateStdDev(targetflowList, flowAvg);
 			if (pressStd == 0 || flowStd == 0) return;
 
-			int closestPointIndex = -1;
-			double minDistance = Double.MAX_VALUE;
-			for (int i = 0; i < collectData.size(); i++) {
-				@SuppressWarnings("unchecked")
-				List<HashMap<String, Double>> flowPriList = (List<HashMap<String, Double>>) collectData.get(i).get("calList");
-				for (HashMap<String, Double> calMap : flowPriList) {
-					double sCurP = (pressure - pressAvg) / pressStd;
-					double sCurQ = (flow - flowAvg) / flowStd;
-					double sPreP = (calMap.get("calPressure") - pressAvg) / pressStd;
-					double sPreQ = (calMap.get("calFlow") - flowAvg) / flowStd;
-					double dx = Math.abs(sCurP - sPreP);
-					double dy = Math.abs(sCurQ - sPreQ);
-					double distance = Math.sqrt(dx * dx + dy * dy);
-					if (distance < minDistance) {
-						minDistance = distance;
-						closestPointIndex = i;
-					}
-				}
-			}
+			// 조합 선택: 프로퍼티(pump.predict.mode)에 따라 유클리드 최근접 또는 유량 범위 매칭(폴백 포함)
+			int closestPointIndex = selectCombIndex(collectData, flow, pressure,
+					flowAvg, flowStd, pressAvg, pressStd, pumpPredictMode, pump_grp, "HORIZON" + horizonMin);
 			if (closestPointIndex < 0) return;
 
 			@SuppressWarnings("unchecked")
