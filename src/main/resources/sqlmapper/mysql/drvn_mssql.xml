@@ -411,7 +411,7 @@
 			tctr.PRDCT_VALUE as value,
 			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts
 		from
-			TB_CTR_TNK_RST tctr
+			${dstrb.prdct.sourceTable} tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
 			and tctr.MODEL_NAME = 'XGBoost'
@@ -450,12 +450,12 @@
 			tctr.PRDCT_VALUE as value,
 			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts
 		from
-			TB_CTR_TNK_RST tctr
+			${dstrb.prdct.sourceTable} tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
 			and tctr.MODEL_NAME = 'XGBoost'
 			and tctr.RGSTR_TIME = (
-				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
+				SELECT MAX(RGSTR_TIME) FROM ${dstrb.prdct.sourceTable}
 				 WHERE UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
 				   AND RGSTR_TIME &lt;= #{nowDateTime}
 				   AND MODEL_NAME = 'XGBoost'
@@ -471,7 +471,7 @@
 		  호출부에서 이 개수가 대상 DSTRB_ID 수와 같으면 '도착 완료'로 간주.
 		-->
 		SELECT COUNT(DISTINCT UPPER(DSTRB_ID))
-		FROM TB_CTR_TNK_RST
+		FROM ${dstrb.prdct.sourceTable}
 		WHERE UPPER(DSTRB_ID) IN
 		<foreach item="id" collection="dstrbIds" open="(" separator="," close=")">
 			UPPER(#{id})
@@ -507,12 +507,12 @@
 			tctr.PRDCT_VALUE as value,
 			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts
 		from
-			TB_CTR_TNK_RST tctr
+			${dstrb.prdct.sourceTable} tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
 			and tctr.MODEL_NAME = 'XGBoost'
 			and tctr.RGSTR_TIME = (
-				SELECT MAX(RGSTR_TIME) FROM TB_CTR_TNK_RST
+				SELECT MAX(RGSTR_TIME) FROM ${dstrb.prdct.sourceTable}
 				 WHERE UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
 				   AND RGSTR_TIME &lt;= #{nowDateTime}
 				   AND MODEL_NAME = 'XGBoost'
@@ -542,7 +542,7 @@
 			CAST(PRDCT_VALUE as CHAR) as value,
 			DATE_FORMAT(RGSTR_TIME, '%Y-%m-%d %H:%i') as ts
 		FROM
-			TB_CTR_TNK_RST
+			${dstrb.prdct.sourceTable}
 		WHERE
 				UPPER(DSTRB_ID) = UPPER(#{DSTRB_ID})
 			AND
@@ -569,7 +569,7 @@
 			from
 				TB_CTR_TNK_INF tnt
 			join
-				TB_CTR_TNK_RST tctr on tnt.DSTRB_Q_ID = tctr.DSTRB_ID
+				${dstrb.prdct.sourceTable} tctr on tnt.DSTRB_Q_ID = tctr.DSTRB_ID
 			WHERE
 				UPPER(tnt.DSTRB_Q_ID) in
 					<foreach item="id" collection="dstrb_id" open="(" separator="," close=")">
@@ -582,7 +582,7 @@
 			from
 				TB_CTR_TNK_INF tnt
 			join
-				TB_CTR_TNK_RST tctr on tnt.DSTRB_P_ID = tctr.DSTRB_ID
+				${dstrb.prdct.sourceTable} tctr on tnt.DSTRB_P_ID = tctr.DSTRB_ID
 			WHERE
 				UPPER(tnt.DSTRB_P_ID) in
 					<foreach item="id" collection="dstrb_id" open="(" separator="," close=")">
@@ -723,7 +723,7 @@
 			tnt.FRI_TAG as tag,
 			tnt.DSTRB_Q_ID as dstrb_id
 		from
-			TB_CTR_TNK_RST tctr
+			${dstrb.prdct.sourceTable} tctr
 			LEFT JOIN
 				TB_CTR_TNK_INF tnt on tnt.DSTRB_Q_ID = tctr.DSTRB_ID
 		WHERE
@@ -758,7 +758,7 @@
 			tnt.PRI_TAG as tag,
 			tnt.DSTRB_P_ID as dstrb_id
 		from
-			TB_CTR_TNK_RST tctr
+			${dstrb.prdct.sourceTable} tctr
 			LEFT JOIN
 				TB_CTR_TNK_INF tnt on tnt.DSTRB_P_ID = tctr.DSTRB_ID
 		WHERE
@@ -826,7 +826,7 @@
 			tctr.DSTRB_ID as junction_id,
 			tctr.PRDCT_VALUE as value
 		from
-			TB_CTR_TNK_RST tctr
+			${dstrb.prdct.sourceTable} tctr
 		WHERE
 			UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
 			AND tctr.MODEL_NAME = 'XGBoost'
@@ -884,7 +884,7 @@
 		SELECT AVG(PRDCT_VALUE)
 		FROM (
 			SELECT PRDCT_VALUE
-			FROM TB_CTR_TNK_RST
+			FROM ${dstrb.prdct.sourceTable}
 			WHERE DSTRB_ID = #{DSTRB_ID}
 			  AND MODEL_NAME = 'XGBoost'
 			  AND PRDCT_VALUE IS NOT NULL
@@ -954,10 +954,10 @@
 			TB_CTR_TNK_INF tcti
 		join
 			<if test="find == 'flow'">
-				TB_CTR_TNK_RST tctr on UPPER(tcti.DSTRB_Q_ID) = UPPER(tctr.DSTRB_ID)
+				${dstrb.prdct.sourceTable} tctr on UPPER(tcti.DSTRB_Q_ID) = UPPER(tctr.DSTRB_ID)
 			</if>
 			<if test="find == 'press'">
-				TB_CTR_TNK_RST tctr on UPPER(tcti.DSTRB_P_ID) = UPPER(tctr.DSTRB_ID)
+				${dstrb.prdct.sourceTable} tctr on UPPER(tcti.DSTRB_P_ID) = UPPER(tctr.DSTRB_ID)
 			</if>
 		WHERE
 			tcti.TYPE = #{type}
@@ -981,10 +981,10 @@
 		TB_CTR_TNK_INF tcti
 		join
 		<if test="find == 'flow'">
-			TB_CTR_TNK_RST tctr on UPPER(tcti.DSTRB_Q_ID) = UPPER(tctr.DSTRB_ID)
+			${dstrb.prdct.sourceTable} tctr on UPPER(tcti.DSTRB_Q_ID) = UPPER(tctr.DSTRB_ID)
 		</if>
 		<if test="find == 'press'">
-			TB_CTR_TNK_RST tctr on UPPER(tcti.DSTRB_P_ID) = UPPER(tctr.DSTRB_ID)
+			${dstrb.prdct.sourceTable} tctr on UPPER(tcti.DSTRB_P_ID) = UPPER(tctr.DSTRB_ID)
 		</if>
 		WHERE
 		tcti.TYPE = 0
@@ -1207,7 +1207,7 @@
 		from
 		TB_CTR_TNK_INF tcti
 		join
-			TB_CTR_TNK_RST tctr on tcti.DSTRB_Q_ID = tctr.DSTRB_ID
+			${dstrb.prdct.sourceTable} tctr on tcti.DSTRB_Q_ID = tctr.DSTRB_ID
 		WHERE
 		tctr.MODEL_NAME = 'XGBoost'
 		AND UPPER(tcti.DSTRB_Q_ID) in
@@ -1411,7 +1411,7 @@
 		tctr.PRDCT_VALUE as value,
 		DATE_FORMAT(tctr.RGSTR_TIME, '%Y-%m-%d %H:%i') as ts
 		from
-		TB_CTR_TNK_RST tctr
+		${dstrb.prdct.sourceTable} tctr
 		WHERE
 				UPPER(tctr.DSTRB_ID) = UPPER(#{DSTRB_ID})
 			and
@@ -1431,7 +1431,7 @@
 		MAX(CASE WHEN UPPER(tctr.DSTRB_ID) = UPPER('Q_GS_NEW_Predict') THEN tctr.PRDCT_VALUE END) as flow2,
 		MAX(CASE WHEN UPPER(tctr.DSTRB_ID) = UPPER('P_GS_NEW_Predict') THEN tctr.PRDCT_VALUE END) as pressure2
 		FROM
-		TB_CTR_TNK_RST tctr
+		${dstrb.prdct.sourceTable} tctr
 		WHERE
 		UPPER(tctr.DSTRB_ID) IN (
 		'Q_GS_OLD_Predict', 'P_GS_OLD_Predict',
@@ -2944,7 +2944,7 @@
 	</select>
 
 	<!--
-	  10분 단위 IWH/UFR 예측 조회 (TB_CTR_TNK_RST).
+	  10분 단위 IWH/UFR 예측 조회 (${dstrb.prdct.sourceTable}).
 	  - tagList: DSTRB_ID 리스트
 	  - prdctTimeList: 미래 PRDCT_TIME 리스트 (예: ["2026-05-06 13:50","2026-05-06 14:00",...])
 	  - nowDateTime: 현재 시각. 이 시각 이하의 RGSTR_TIME 중 가장 최근 행을 사용.
@@ -2955,10 +2955,10 @@
 			t.DSTRB_ID as tag,
 			DATE_FORMAT(t.PRDCT_TIME, '%Y-%m-%d %H:%i') as ts,
 			t.PRDCT_VALUE as value
-		FROM TB_CTR_TNK_RST t
+		FROM ${dstrb.prdct.sourceTable} t
 		JOIN (
 			SELECT DSTRB_ID, PRDCT_TIME, MAX(RGSTR_TIME) as MAX_RGSTR
-			FROM TB_CTR_TNK_RST
+			FROM ${dstrb.prdct.sourceTable}
 			WHERE DSTRB_ID IN
 				<foreach item="tag" collection="tagList" open="(" separator="," close=")">
 					#{tag}
@@ -2982,7 +2982,7 @@
 	</select>
 
 	<!--
-	  과거 10분 horizon 예측 조회 (TB_CTR_TNK_RST).
+	  과거 10분 horizon 예측 조회 (${dstrb.prdct.sourceTable}).
 	  각 PRDCT_TIME 에 대해 PRDCT_TIME = RGSTR_TIME + 10분 인 예측 행만 반환 → 실측과의 정확도 비교용.
 	  - tagList: DSTRB_ID 리스트
 	  - prdctTimeList: 과거 PRDCT_TIME 10분 경계 리스트
@@ -2992,7 +2992,7 @@
 			DSTRB_ID as tag,
 			DATE_FORMAT(PRDCT_TIME, '%Y-%m-%d %H:%i') as ts,
 			PRDCT_VALUE as value
-		FROM TB_CTR_TNK_RST
+		FROM ${dstrb.prdct.sourceTable}
 		WHERE DSTRB_ID IN
 			<foreach item="tag" collection="tagList" open="(" separator="," close=")">
 				#{tag}
@@ -3014,7 +3014,7 @@
 	  ===========================================================
 	-->
 	<!--
-	  예측 유량: TB_CTR_TNK_RST 에서 RGSTR_TIME / PRDCT_TIME 모두 snapshot 과 정확 동치인 행의 PRDCT_VALUE.
+	  예측 유량: ${dstrb.prdct.sourceTable} 에서 RGSTR_TIME / PRDCT_TIME 모두 snapshot 과 정확 동치인 행의 PRDCT_VALUE.
 	  대시보드 성능점/예측점 유량과 동일 행 보장. 해당 행이 아직 없으면 null 반환 → snapshot 에 null 적재.
 	-->
 	<select id="selectLatestPredictedFlowTnk" parameterType="hashmap" resultType="hashmap">
@@ -3022,7 +3022,7 @@
 			ROUND(tctr.PRDCT_VALUE, 1) AS prdct_flow,
 			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time,
 			tctr.MODEL_NAME AS model_name
-		FROM TB_CTR_TNK_RST tctr
+		FROM ${dstrb.prdct.sourceTable} tctr
 		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
 			AND tctr.RGSTR_TIME = #{rgstr_time}
 			AND tctr.PRDCT_TIME = #{prdct_time}
@@ -3222,14 +3222,14 @@
 	</select>
 
 	<!--
-	  예측 압력: TB_CTR_TNK_RST 에서 압력 DSTRB_ID(pumpDstrbIdMap[grp].pressure) 의
+	  예측 압력: ${dstrb.prdct.sourceTable} 에서 압력 DSTRB_ID(pumpDstrbIdMap[grp].pressure) 의
 	  RGSTR_TIME / PRDCT_TIME 정확 동치 행 PRDCT_VALUE. 예측 유량과 동일 패턴.
 	-->
 	<select id="selectLatestPredictedPressureTnk" parameterType="hashmap" resultType="hashmap">
 		SELECT
 			ROUND(CAST(tctr.PRDCT_VALUE AS DOUBLE), 2) AS prdct_prsr,
 			DATE_FORMAT(tctr.PRDCT_TIME, '%Y-%m-%d %H:%i') AS prdct_time
-		FROM TB_CTR_TNK_RST tctr
+		FROM ${dstrb.prdct.sourceTable} tctr
 		WHERE UPPER(tctr.DSTRB_ID) = UPPER(#{dstrb_id})
 			AND tctr.RGSTR_TIME = #{rgstr_time}
 			AND tctr.PRDCT_TIME = #{prdct_time}
@@ -3252,13 +3252,13 @@
 	</select>
 
 	<!--
-	  예측 배수지 수위 평균: TB_CTR_TNK_RST 에서 배수지의 수조 태그(tagList) 중
+	  예측 배수지 수위 평균: ${dstrb.prdct.sourceTable} 에서 배수지의 수조 태그(tagList) 중
 	  PRDCT_VALUE >= threshold 인 active 수조만 골라 평균 (frontend _AVG 와 동일 규칙).
 	  threshold: 구리 1.5m, 나머지 3.0m (drvnConfig.getSeoulReservoirThreshold).
 	-->
 	<select id="selectLatestPredictedReservoirAvg" parameterType="hashmap" resultType="hashmap">
 		SELECT AVG(tctr.PRDCT_VALUE) AS avg_value, COUNT(*) AS tank_count
-		FROM TB_CTR_TNK_RST tctr
+		FROM ${dstrb.prdct.sourceTable} tctr
 		WHERE tctr.DSTRB_ID IN
 			<foreach collection="tagList" item="tag" open="(" separator="," close=")">
 				#{tag}

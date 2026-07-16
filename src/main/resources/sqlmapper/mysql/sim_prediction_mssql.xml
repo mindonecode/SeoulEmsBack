@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="kr.co.mindone.ems.drvn.SimPredictionMapper">
+
+	<!--
+	  적재 대상 테이블을 없으면 생성(첫 배치 실행 시 1회). 원본 TB_CTR_TNK_RST 와 동일 구조:
+	  PK (DSTRB_ID, RGSTR_TIME, PRDCT_TIME), MODEL_VERSION 은 nullable(사용 안 함 → NULL). 포인트당 1행.
+	-->
+	<update id="createImprovedTableIfNotExists">
+		CREATE TABLE IF NOT EXISTS TB_CTR_TNK_RST_IMPROVED (
+			`DSTRB_ID`      varchar(100) NOT NULL COMMENT '예측ID',
+			`PRDCT_VALUE`   float DEFAULT 0 COMMENT '예측값',
+			`RGSTR_TIME`    datetime NOT NULL COMMENT '수행 시점',
+			`PRDCT_TIME`    datetime NOT NULL COMMENT '예측 시점',
+			`model_name`    varchar(100) DEFAULT NULL COMMENT '예측 모델 명',
+			`MODEL_VERSION` varchar(100) DEFAULT NULL COMMENT '예측 모델 버전',
+			`n_pumps`       double DEFAULT NULL COMMENT '펌프 대수',
+			PRIMARY KEY (`DSTRB_ID`,`RGSTR_TIME`,`PRDCT_TIME`),
+			KEY `TB_CTR_TNK_RST_IMPROVED_REGSTR_TIME_IDX` (`RGSTR_TIME`,`DSTRB_ID`,`PRDCT_TIME`) USING BTREE,
+			KEY `IX_TNK_RST_IMPROVED_DSTRB_PRDCT_RGSTR` (`DSTRB_ID`,`PRDCT_TIME`,`RGSTR_TIME`)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='배수지및분기결과(시뮬레이터)'
+	</update>
+
+	<!--
+	  태그별 기준시각(ref_ts) 이하 최신 실측값 1건씩 조회.
+	  drvn_mssql.xml 의 selectLatestActualReservoirAvg 내부 서브쿼리(태그별 MAX(TS) 자기조인)를
+	  본뜨되, 바깥 AVG/COUNT 집계를 걷어내고 태그별 값을 그대로 다건 반환하도록 변경.
+	-->
+	<select id="selectLatestRawByTags" parameterType="hashmap" resultType="hashmap">
+		SELECT tr.TAGNAME AS tag, tr.VALUE AS value
+		FROM TB_RAWDATA tr
+		JOIN (
+			SELECT TAGNAME, MAX(TS) AS last_ts
+			FROM TB_RAWDATA
+			WHERE TAGNAME IN
+				<foreach collection="tagList" item="tag" open="(" separator="," close=")">
+					#{tag}
+				</foreach>
+				AND TS &lt;= #{ref_ts}
+				AND TS &gt; DATE_SUB(#{ref_ts}, INTERVAL 15 MINUTE)
+				AND VALUE IS NOT NULL
+			GROUP BY TAGNAME
+		) m ON m.TAGNAME = tr.TAGNAME AND m.last_ts = tr.TS
+	</select>
+
+	<!--
+	  [원본 예측 조회] 블렌드용 — 시뮬 대상 태그의 원본 TB_CTR_TNK_RST XGBoost 예측을 (RGSTR_TIME,PRDCT_TIME)별로 반환.
+	  같은 키에 다모델이면 MAX 로 1건. 유량예측 = w·실측 + (1-w)·원본예측 계산에 사용.
+	-->
+	<select id="selectOriginalPredRange" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DSTRB_ID AS tag,
+			DATE_FORMAT(RGSTR_TIME, '%Y-%m-%d %H:%i:%s') AS rgstr_time,
+			DATE_FORMAT(PRDCT_TIME, '%Y-%m-%d %H:%i:%s') AS prdct_time,
+			MAX(PRDCT_VALUE) AS value
+		FROM TB_CTR_TNK_RST
+		WHERE RGSTR_TIME &gt;= #{fromTs} AND RGSTR_TIME &lt;= #{toTs}
+			AND UPPER(model_name) = 'XGBOOST'
+			AND DSTRB_ID IN
+			<foreach collection="tagList" item="tg" open="(" separator="," close=")">
+				#{tg}
+			</foreach>
+		GROUP BY DSTRB_ID, RGSTR_TIME, PRDCT_TIME
+	</select>
+
+	<!--
+	  [원본 복사] 시뮬레이션 대상(excludeTags) 이 아닌 DSTRB_ID 는 원본 TB_CTR_TNK_RST 의 XGBoost 예측을 IMPROVED 로 복사.
+	  윈도우 함수 없이(호환성) (DSTRB_ID,RGSTR_TIME,PRDCT_TIME) 당 1행으로 GROUP BY → PK 충돌 없음.
+	  소비 SQL 은 model_name='XGBoost' + LIMIT1/AVG 이므로 1행이면 충분. MODEL_VERSION 은 'orig' 고정. 재실행 멱등(UPSERT).
+	-->
+	<insert id="copyOriginalPredictions" parameterType="hashmap">
+		INSERT INTO TB_CTR_TNK_RST_IMPROVED
+			(DSTRB_ID, PRDCT_VALUE, RGSTR_TIME, PRDCT_TIME, model_name, n_pumps)
+		SELECT
+			DSTRB_ID,
+			MAX(PRDCT_VALUE)        AS PRDCT_VALUE,
+			RGSTR_TIME,
+			PRDCT_TIME,
+			'XGBoost'               AS model_name,
+			MAX(n_pumps)            AS n_pumps
+		FROM TB_CTR_TNK_RST
+		WHERE RGSTR_TIME &gt;= #{fromTs} AND RGSTR_TIME &lt;= #{toTs}
+			AND UPPER(model_name) = 'XGBOOST'
+		<if test="excludeTags != null and excludeTags.size() > 0">
+			AND DSTRB_ID NOT IN
+			<foreach collection="excludeTags" item="tg" open="(" separator="," close=")">
+				#{tg}
+			</foreach>
+		</if>
+		GROUP BY DSTRB_ID, RGSTR_TIME, PRDCT_TIME
+		ON DUPLICATE KEY UPDATE
+			PRDCT_VALUE   = VALUES(PRDCT_VALUE),
+			n_pumps       = VALUES(n_pumps),
+			MODEL_VERSION = NULL
+	</insert>
+
+	<!--
+	  시뮬레이션 예측 행 배치 upsert. PK(DSTRB_ID, RGSTR_TIME, PRDCT_TIME) 충돌 시 PRDCT_VALUE 갱신 → 멱등.
+	  MODEL_VERSION 은 넣지 않음(NULL). model_name 은 modelName(기본 XGBoost).
+	-->
+	<insert id="insertSimPrediction" parameterType="java.util.List">
+		INSERT INTO TB_CTR_TNK_RST_IMPROVED
+			(DSTRB_ID, model_name, RGSTR_TIME, PRDCT_TIME, PRDCT_VALUE)
+		VALUES
+		<foreach collection="list" item="r" separator=",">
+			(#{r.DSTRB_ID}, #{r.MODEL_NAME}, #{r.RGSTR_TIME}, #{r.PRDCT_TIME}, #{r.PRDCT_VALUE})
+		</foreach>
+		ON DUPLICATE KEY UPDATE
+			PRDCT_VALUE   = VALUES(PRDCT_VALUE),
+			MODEL_VERSION = NULL
+	</insert>
+
+</mapper>

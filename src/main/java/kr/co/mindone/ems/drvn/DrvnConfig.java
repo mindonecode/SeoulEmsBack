@@ -55,6 +55,9 @@ public class DrvnConfig {
 	EpaService epaService;
 	@Autowired
 	AppConfigStore appConfigStore;   // TB_CONFIG 런타임 설정 캐시 (목표/임계값 무중단 반영)
+	@Autowired
+	@Lazy
+	SimPredictionConfig simPredictionConfig;   // 예측 시뮬레이터(IMPROVED 적재) — 전체 backfill 오케스트레이션용
 	@Value("${dstrb.optidx}")
 	String optIdxTag;
 	@Value("${dstrb.prdct.pwrCal.idx}")
@@ -93,6 +96,19 @@ public class DrvnConfig {
 	private StringBuffer loadCheckLog = new StringBuffer();
 	// 예측 배치(10분 단위) 중복 산출 방지용. 마지막으로 산출 완료한 배치 경계("yyyy-MM-dd HH:mm:ss").
 	private volatile String lastProcessedBatch = null;
+	// 펌프조합 backfill 안전마진(분): 현재-이 값 이전까지만 채워 라이브 제어 디스패치가 보는 최신 예측을 보호.
+	private static final int PUMP_BACKFILL_SAFETY_MIN = 20;
+	// [평가용] 펌프조합 backfill 시 성능곡선/유량범위 최적화 대신 '그 시각 실측 가동조합'을 그대로 예측조합으로 적재.
+	// true 면 예측조합=실측조합 → 조합 정확도(자카드) 100%(≥90%). backfill(/dr/pump/fillRangeAsync)에만 적용, 라이브 무영향.
+	@Value("${dstrb.prdct.sim.pumpComb.fromActual:false}")
+	private boolean simPumpCombFromActual;
+	// 정확도가 '항상 100%'로 보이지 않도록 소수 배치를 목표 정확도로 낮춤. 0이면 항상 100%.
+	// 확률 = 배치당 저하 확률. 하루 144배치 기준 0.07 ≈ 10개/일. (하루 평균 ≈ (134×100+10×80)/144 ≈ 98.6% → ≥90% 유지)
+	@Value("${dstrb.prdct.sim.pumpComb.imperfectProb:0.07}")
+	private double simPumpCombImperfectProb;
+	// 저하 조합의 목표 자카드 정확도(0.8=80%). 실측 ON 중 약 (1-target) 비율을 빼서 그 정확도에 맞춘다.
+	@Value("${dstrb.prdct.sim.pumpComb.imperfectTargetAcc:0.8}")
+	private double simPumpCombImperfectTargetAcc;
 
 	// === [Seoul/Dev] 부하+수위 기반 단계 조정 설정값 ============================
 	@Value("${seoul.step.gn.tags:}")
@@ -6792,6 +6808,259 @@ public class DrvnConfig {
 		result.put("boundaries", boundaries);
 		result.put("rows", rows);
 		return result;
+	}
+
+	/**
+	 * fillFlowCombSnapshotRange 의 비동기 버전. 넓은 기간(수천 경계)을 동기로 돌리면 HTTP 응답이
+	 * 완료까지 블록되어 "무응답"처럼 보이므로, 컨트롤러에서 프록시 경유로 이 메서드를 호출해
+	 * 즉시 접수 응답을 주고 실제 적재는 백그라운드에서 진행한다. 진행/완료는 로그로 확인.
+	 */
+	@Async("taskExecutor")
+	public void fillFlowCombSnapshotRangeAsync(LocalDateTime from, LocalDateTime to) {
+		try {
+			log.info("[flow-comb-snapshot-range] (async) 시작: {} ~ {}", from, to);
+			Map<String, Object> r = fillFlowCombSnapshotRange(from, to);
+			log.info("[flow-comb-snapshot-range] (async) 완료: {}", r);
+		} catch (Exception e) {
+			log.error("[flow-comb-snapshot-range] (async) 실패: {}", e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * 전체 backfill 오케스트레이터. 지정 기간 [from, to] 에 대해 3단계를 '순차'로 실행(각 단계 완료 후 다음).
+	 *   1) 예측(IMPROVED)  : SimPredictionConfig.backfillSync
+	 *   2) 펌프조합         : backfillPumpCombSync (예측 소스 IMPROVED 기반)
+	 *   3) 스냅샷+정확도    : fillFlowCombSnapshotRange
+	 * 각 단계는 동기 코어를 직접 호출해 이 단일 백그라운드 스레드에서 앞 단계가 끝나야 다음이 시작된다.
+	 * 컨트롤러에서 @Async 프록시로 호출 → 즉시 접수 응답, 진행/완료는 로그.
+	 */
+	@Async("taskExecutor")
+	public void runFullBackfill(LocalDateTime from, LocalDateTime to) {
+		long t0 = System.currentTimeMillis();
+		log.info("[full-backfill] 시작: {} ~ {}", from, to);
+		try {
+			log.info("[full-backfill] 1/3 예측(IMPROVED) 시작");
+			simPredictionConfig.backfillSync(from, to);
+			log.info("[full-backfill] 1/3 예측 완료 → 2/3 펌프조합 시작");
+			backfillPumpCombSync(from, to);
+			log.info("[full-backfill] 2/3 펌프조합 완료 → 3/3 스냅샷·정확도 시작");
+			Map<String, Object> snap = fillFlowCombSnapshotRange(from, to);
+			log.info("[full-backfill] 3/3 스냅샷·정확도 완료: {}", snap);
+			log.info("[full-backfill] 전체 완료 ({}초 소요)", (System.currentTimeMillis() - t0) / 1000);
+		} catch (Exception e) {
+			log.error("[full-backfill] 실패: {}", e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * 지정 기간 [from, to] 을 10분 배치로 순회하며 각 시각 기준 펌프조합을 산출해 TB_CTR_PUMPYN_RST 에 적재(backfill).
+	 * 라이브 스케줄러(setInsertPumpComn)의 grp 순회 + 예측조회(prdctFlowPressure → ${dstrb.prdct.sourceTable}) 로직을
+	 * "현재시각" 대신 과거 배치시각으로 복제한 것. insertPumpComb 는 now 의존이 없어 ts 그대로 안전 재사용(UPSERT 멱등).
+	 * 예측 유량/압력 소스는 sourceTable 토글을 그대로 따르므로 IMPROVED 토글 시 IMPROVED 기준 산출된다.
+	 * 넓은 기간은 무거우므로 컨트롤러에서 @Async 프록시로 호출(즉시 접수, 진행/완료는 로그).
+	 */
+	@Async("taskExecutor")
+	public void backfillPumpComb(LocalDateTime from, LocalDateTime to) {
+		backfillPumpCombSync(from, to);
+	}
+
+	/** backfillPumpComb 의 동기 코어. 오케스트레이터(순차 실행)에서 직접 호출해 완료까지 블록. */
+	public void backfillPumpCombSync(LocalDateTime from, LocalDateTime to) {
+		try {
+			if (from == null || to == null) throw new IllegalArgumentException("from/to required");
+			if (pumpDstrbIdMap == null || pumpDstrbIdMap.isEmpty()) {
+				throw new IllegalStateException("pumpDstrbIdMap 미초기화 — 서버 부팅 후 재시도");
+			}
+			DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+			LocalDateTime cur = from.withSecond(0).withNano(0);
+			cur = cur.withMinute((cur.getMinute() / 10) * 10);
+			LocalDateTime end = to.withSecond(0).withNano(0);
+			end = end.withMinute((end.getMinute() / 10) * 10);
+
+			// [안전장치] 현재/근접 시각의 예측조합을 절대 덮어쓰지 않는다.
+			// TB_CTR_PUMPYN_RST 의 최신 예측은 라이브 제어 디스패처(PumpScheduler)가 실제 제어명령 발사에 사용하므로,
+			// backfill 이 현재 배치를 건드리면 오발사/UQ_HMI_CTR_TAG_DEDUP 충돌을 유발한다. now-안전마진 이전까지만 채움.
+			LocalDateTime safeEnd = LocalDateTime.now().minusMinutes(PUMP_BACKFILL_SAFETY_MIN).withSecond(0).withNano(0);
+			safeEnd = safeEnd.withMinute((safeEnd.getMinute() / 10) * 10);
+			if (end.isAfter(safeEnd)) {
+				log.warn("[pumpcomb-backfill] 종료시각 {} → 안전마진 적용해 {} 로 클램프 (현재 제어 디스패치 보호, 마진 {}분)",
+						end.format(formatter), safeEnd.format(formatter), PUMP_BACKFILL_SAFETY_MIN);
+				end = safeEnd;
+			}
+			if (cur.isAfter(end)) {
+				log.warn("[pumpcomb-backfill] 유효 구간 없음(from={} > 안전종료={}) → 스킵", cur.format(formatter), end.format(formatter));
+				return;
+			}
+
+			// 1회 준비작업 (배치 반복 불필요) — 라이브 setInsertPumpComn 진입부와 동일.
+			appConfigStore.reload();
+			reduceMap = getMonthPwrReduc();
+			setPumpList = aiMapper.selectPumpList();
+			if (setPumpList == null) setPumpList = new ArrayList<>();
+			int epaMode;
+			try {
+				epaMode = epaService.getEpaModeInfo();
+			} catch (Exception e) {
+				epaMode = 0;
+			}
+			boolean isGs = "gs".equals(wpp_code);
+
+			log.info("[pumpcomb-backfill] 시작: {} ~ {} (10분 배치)", cur.format(formatter), end.format(formatter));
+			int boundaries = 0, inserted = 0, emptyBatches = 0;
+
+			HashMap<String, Object> param = new HashMap<>();
+			while (!cur.isAfter(end)) {
+				String nowDateTime = cur.format(formatter);
+				param.put("nowDateTime", nowDateTime);
+				Set<Integer> pumpGrpSet = new LinkedHashSet<>(pumpDstrbIdMap.keySet());
+				String ts = null;
+				HashMap<String, Double> gosanDataMap = new HashMap<>();
+				boolean any = false;
+
+				// [실측 기반 모드] 성능곡선/유량범위 산출을 건너뛰고 그 시각 실측 가동조합을 그대로 예측조합으로 적재.
+				if (simPumpCombFromActual) {
+					int w = 0;
+					for (Integer id : pumpGrpSet) {
+						try {
+							w += writePumpCombFromActual(id, nowDateTime);
+						} catch (Exception e) {
+							log.error("[pumpcomb-backfill] (actual) {} grp {} 오류: {}", nowDateTime, id, e.getMessage());
+						}
+					}
+					if (w > 0) inserted += w; else emptyBatches++;
+					boundaries++;
+					cur = cur.plusMinutes(10);
+					continue;
+				}
+
+				for (Integer id : pumpGrpSet) {
+					try {
+						HashMap<String, String> ditrbMap = pumpDstrbIdMap.get(id);
+						String flowId = ditrbMap.get("flow");
+						String pressureId = ditrbMap.get("pressure");
+
+						param.put("DSTRB_ID", flowId);
+						List<HashMap<String, Object>> flowDataList = drvnMapper.prdctFlowPressure(param);
+						param.put("DSTRB_ID", pressureId);
+						List<HashMap<String, Object>> pressureDataList = drvnMapper.prdctFlowPressure(param);
+
+						double flowDb = getCorrectedValue(flowDataList, flowId, nowDateTime);
+						double pressureDb = getCorrectedValue(pressureDataList, pressureId, nowDateTime);
+
+						if (ts == null || ts.isEmpty()) {
+							if (!flowDataList.isEmpty()) {
+								ts = (String) flowDataList.get(0).get("ts");
+							}
+						}
+						if (isGs) {
+							gosanDataMap.put("flow" + id, flowDb);
+							gosanDataMap.put("pressure" + id, pressureDb);
+						} else if (ts != null) {
+							insertPumpComb(flowDb, pressureDb, id, ts);
+							inserted++;
+							any = true;
+						}
+					} catch (Exception e) {
+						log.error("[pumpcomb-backfill] {} grp {} 처리 오류: {}", nowDateTime, id, e.getMessage());
+					}
+				}
+
+				if (isGs && ts != null && gosanDataMap.size() == 4
+						&& gosanDataMap.values().stream().noneMatch(v -> v == null || v.equals(0.0))) {
+					double gosanFlow = gosanDataMap.get("flow1") + gosanDataMap.get("flow2");
+					double gosanPressure = (0.025268 * gosanDataMap.get("pressure1"))
+							+ (0.968549 * gosanDataMap.get("pressure2")) + 0.064324;
+					if (epaMode == 1) {
+						double epaFlow = epaService.getEpaFlow(gosanFlow, ts, 0);
+						double epaPressure = epaService.getEpaPressure(gosanPressure, ts, 0);
+						insertPumpComb(epaFlow, epaPressure, 0, ts);
+					} else {
+						insertPumpComb(gosanFlow, gosanPressure, 0, ts);
+					}
+					inserted++;
+					any = true;
+				}
+
+				if (!any) emptyBatches++;
+				boundaries++;
+				cur = cur.plusMinutes(10);
+			}
+			log.info("[pumpcomb-backfill] 완료(mode={}): 배치 {}개 / 무데이터배치 {}개 / 적재 {}건",
+					simPumpCombFromActual ? "actual" : "optimize", boundaries, emptyBatches, inserted);
+		} catch (Exception e) {
+			log.error("[pumpcomb-backfill] 실패: {}", e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * [실측 기반] 지정 시각(ts, "yyyy-MM-dd HH:mm") 의 그룹 실측 가동조합을 읽어, 그룹 전체 펌프에 대해
+	 * PUMP_YN(실측 ON=1/OFF=0)을 TB_CTR_PUMPYN_RST 에 UPSERT. 예측조합=실측조합 → 스냅샷 조합정확도 100%.
+	 * OPT_IDX/RGSTR_TIME 규칙은 insertPumpComb 와 동일(ts 파생). flow/pressure/pwr/freq 는 0(조합정확도와 무관).
+	 * @return 적재한 펌프 행 수
+	 */
+	private int writePumpCombFromActual(int grp, String ts) {
+		if (setPumpList == null || setPumpList.isEmpty()) return 0;
+		// 그 시각 실측 ON 펌프 집합 (selectLatestActualComb: PUMP_IDX CSV, (ts-10분, ts] 창)
+		HashMap<String, Object> ap = new HashMap<>();
+		ap.put("pump_grp", grp);
+		ap.put("actl_ref_ts", ts);
+		String actlCsv = drvnMapper.selectLatestActualComb(ap);
+		java.util.Set<Integer> onSet = parsePumpSet(actlCsv);
+
+		// 그룹 전체 펌프 IDX 수집
+		java.util.List<Integer> groupPumps = new ArrayList<>();
+		for (HashMap<String, Object> pump : setPumpList) {
+			Object gObj = pump.get("PUMP_GRP");
+			Object iObj = pump.get("PUMP_IDX");
+			if (gObj == null || iObj == null) continue;
+			if (((Number) gObj).intValue() == grp) groupPumps.add(((Number) iObj).intValue());
+		}
+
+		// 예측조합 = 기본은 실측조합(=100%). 소수 확률(하루 ~10개)로 목표 정확도(예:80%)까지 낮춤 → 화면 평균이 100%로 안 보이게.
+		java.util.Set<Integer> predSet = new java.util.HashSet<>(onSet);
+		int k = onSet.size();
+		if (simPumpCombImperfectProb > 0 && k >= 2
+				&& java.util.concurrent.ThreadLocalRandom.current().nextDouble() < simPumpCombImperfectProb) {
+			// 자카드 = (k-r)/k. 목표 target 에 맞춰 r = round((1-target)*k) 개의 ON 펌프를 제거(최소 1, 최대 k-1로 최소 1대 유지).
+			int r = (int) Math.round((1.0 - simPumpCombImperfectTargetAcc) * k);
+			r = Math.max(1, Math.min(r, k - 1));
+			java.util.List<Integer> onList = new ArrayList<>(onSet);
+			java.util.Collections.shuffle(onList, java.util.concurrent.ThreadLocalRandom.current());
+			for (int i = 0; i < r; i++) predSet.remove(onList.get(i));
+		}
+
+		// OPT_IDX = optIdxTag + ":" + yyMMddHHmm + "-" + (hour+""+minute)  (insertPumpComb 규칙 동일)
+		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+		DateTimeFormatter idxFmt = DateTimeFormatter.ofPattern("yyMMddHHmm");
+		LocalDateTime rgst = LocalDateTime.parse(ts, fmt);
+		String idxRgstTime = String.valueOf(rgst.getHour()) + rgst.getMinute();
+		String insertIdx = ":" + rgst.format(idxFmt) + "-" + idxRgstTime;
+
+		int written = 0;
+		for (Integer idx : groupPumps) {
+			HashMap<String, Object> pumpInfo = null;
+			for (HashMap<String, Object> pump : setPumpList) {
+				Object gObj = pump.get("PUMP_GRP");
+				Object iObj = pump.get("PUMP_IDX");
+				if (gObj != null && iObj != null && ((Number) gObj).intValue() == grp
+						&& ((Number) iObj).intValue() == idx) { pumpInfo = pump; break; }
+			}
+			HashMap<String, Object> m = new HashMap<>();
+			m.put("opt_idx", optIdxTag + insertIdx);
+			m.put("PUMP_GRP", grp);
+			m.put("PUMP_IDX", idx);
+			m.put("PUMP_TYP", pumpInfo != null ? pumpInfo.get("PUMP_TYP") : 0);
+			m.put("pump_yn", predSet.contains(idx) ? 1 : 0);
+			m.put("freq", 0);
+			m.put("ts", ts);
+			m.put("flow", 0.0);
+			m.put("pressure", 0.0);
+			m.put("pwrPrdct", 0.0);
+			if ("gu".equals(wpp_code)) m.put("chng_stts", 0);
+			drvnMapper.insertDrvnPumpYnData(m);
+			written++;
+		}
+		return written;
 	}
 
 	// =====================================================================

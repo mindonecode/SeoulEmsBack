@@ -58,6 +58,8 @@ public class DrvnController extends BaseController {
 	private PumpService pumpService;
 	@Autowired
 	private DrvnConfig drvnConfig;
+	@Autowired
+	private SimPredictionConfig simPredictionConfig;
 	@Value("${spring.profiles.active}")
 	private String wpp_code;
 
@@ -655,6 +657,85 @@ public class DrvnController extends BaseController {
 		drvnService.setInsertPumpComn(); // 비동기이므로 바로 리턴됨
 		return ResponseEntity.ok("Pump schedule task triggered.");
 	}
+	// [테스트] 계측값 기반 예측 시뮬레이터 1배치 즉시 생성 → TB_CTR_TNK_RST_IMPROVED 적재 (비동기, 테이블 없으면 자동 생성).
+	// 브라우저에서 바로 호출 가능하도록 GET/POST 모두 허용(테스트/관리용 트리거).
+	@RequestMapping(value = "/sim/trigger", method = {RequestMethod.GET, RequestMethod.POST})
+	public ResponseEntity<String> triggerSimPrediction() {
+		simPredictionConfig.triggerNow(); // 비동기이므로 바로 리턴됨
+		return ResponseEntity.ok("Sim prediction task triggered.");
+	}
+
+	// [테스트] 지정 기간 [from, to] 을 10분 배치로 일괄 생성 → TB_CTR_TNK_RST_IMPROVED backfill (비동기, 진행상황은 로그).
+	// from/to 형식: "yyyy-MM-dd HH:mm:ss" | "yyyy-MM-dd HH:mm" | "yyyy-MM-dd". 브라우저 호출 위해 GET/POST 모두 허용.
+	@RequestMapping(value = "/sim/backfill", method = {RequestMethod.GET, RequestMethod.POST})
+	public ResponseEntity<String> triggerSimBackfill(
+			@RequestParam String from,
+			@RequestParam String to) {
+		LocalDateTime fromDt;
+		LocalDateTime toDt;
+		try {
+			fromDt = parseFlexibleDateTime(from);
+			toDt = parseFlexibleDateTime(to);
+		} catch (Exception e) {
+			return ResponseEntity.badRequest().body("잘못된 날짜 형식 (예: 2026-07-01 00:00:00)");
+		}
+		if (fromDt.isAfter(toDt)) {
+			return ResponseEntity.badRequest().body("from 이 to 보다 이후일 수 없습니다.");
+		}
+		simPredictionConfig.backfill(fromDt, toDt); // 비동기이므로 바로 리턴됨
+		return ResponseEntity.ok("Sim prediction backfill triggered: " + from + " ~ " + to);
+	}
+
+	// [비동기·순차] 지정 기간에 대해 예측(IMPROVED)→펌프조합→스냅샷/정확도를 한 번에 순서대로 backfill.
+	// 각 단계는 앞 단계 완료 후 시작(단일 백그라운드 스레드). 즉시 접수 응답, 진행/완료는 서버 로그 [full-backfill].
+	// 브라우저 호출 위해 GET/POST 허용. 형식: "yyyy-MM-dd HH:mm[:ss]" | "yyyy-MM-ddTHH:mm[:ss]"
+	@RequestMapping(value = "/sim/fullBackfill", method = {RequestMethod.GET, RequestMethod.POST})
+	public ResponseObject<Map<String, Object>> runFullBackfill(
+			@RequestParam("from") String from,
+			@RequestParam("to") String to){
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		if (fromDt.isAfter(toDt)) {
+			throw new IllegalArgumentException("from must be <= to");
+		}
+		drvnConfig.runFullBackfill(fromDt, toDt); // 즉시 리턴
+		Map<String, Object> result = new java.util.LinkedHashMap<>();
+		result.put("status", "triggered");
+		result.put("from", from);
+		result.put("to", to);
+		result.put("steps", "1)예측(IMPROVED) → 2)펌프조합 → 3)스냅샷·정확도 (순차)");
+		result.put("note", "백그라운드 순차 처리. 진행/완료는 서버 로그 [full-backfill] 확인");
+		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
+	}
+
+	// [비동기] 지정 기간 펌프조합(TB_CTR_PUMPYN_RST) 일괄 산출. 예측 소스는 ${dstrb.prdct.sourceTable} 토글을 따름(IMPROVED 반영).
+	// 라이브 스케줄러와 동일 로직을 과거 배치시각으로 재생성. 즉시 접수 응답, 진행/완료는 서버 로그 [pumpcomb-backfill].
+	// 브라우저 호출 위해 GET/POST 모두 허용. 형식: "yyyy-MM-dd HH:mm[:ss]" | "yyyy-MM-ddTHH:mm[:ss]"
+	@RequestMapping(value = "/pump/fillRangeAsync", method = {RequestMethod.GET, RequestMethod.POST})
+	public ResponseObject<Map<String, Object>> backfillPumpComb(
+			@RequestParam("from") String from,
+			@RequestParam("to") String to){
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		if (fromDt.isAfter(toDt)) {
+			throw new IllegalArgumentException("from must be <= to");
+		}
+		drvnConfig.backfillPumpComb(fromDt, toDt); // 즉시 리턴
+		Map<String, Object> result = new java.util.LinkedHashMap<>();
+		result.put("status", "triggered");
+		result.put("from", from);
+		result.put("to", to);
+		result.put("note", "백그라운드 처리. 진행/완료는 서버 로그 [pumpcomb-backfill] 확인");
+		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
+	}
+
+	// "yyyy-MM-dd[ HH:mm[:ss]]" (T 구분자 허용) 를 LocalDateTime 으로. 시각 생략 시 00:00:00.
+	private LocalDateTime parseFlexibleDateTime(String raw) {
+		String s = raw.trim().replace('T', ' ');
+		if (s.length() == 10) s += " 00:00:00";
+		else if (s.length() == 16) s += ":00";
+		return LocalDateTime.parse(s, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+	}
 	@GetMapping("/selectWaterLevel")
 	public ResponseObject<Map<String, List<Map<String,Object>>>> selectWaterLevel(
 			@RequestParam(required = false) String nowDateTime){
@@ -702,6 +783,27 @@ public class DrvnController extends BaseController {
 		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
 		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
 		Map<String, Object> result = drvnConfig.fillFlowCombSnapshotRange(fromDt, toDt);
+		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
+	}
+
+	// [비동기] snapshot+accuracy 기간 채우기. 넓은 기간은 동기 fillRange 가 응답까지 블록되어 무응답처럼 보이므로,
+	// 이 엔드포인트는 즉시 접수 응답을 주고 백그라운드로 적재(진행/완료는 서버 로그 [flow-comb-snapshot-range] (async)).
+	// 브라우저 호출 위해 GET/POST 모두 허용. 형식: "yyyy-MM-dd HH:mm[:ss]" | "yyyy-MM-ddTHH:mm[:ss]"
+	@RequestMapping(value = "/snapshot/fillRangeAsync", method = {RequestMethod.GET, RequestMethod.POST})
+	public ResponseObject<Map<String, Object>> fillFlowCombSnapshotRangeAsync(
+			@RequestParam("from") String from,
+			@RequestParam("to") String to){
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		if (fromDt.isAfter(toDt)) {
+			throw new IllegalArgumentException("from must be <= to");
+		}
+		drvnConfig.fillFlowCombSnapshotRangeAsync(fromDt, toDt); // 즉시 리턴
+		Map<String, Object> result = new java.util.LinkedHashMap<>();
+		result.put("status", "triggered");
+		result.put("from", from);
+		result.put("to", to);
+		result.put("note", "백그라운드 처리. 진행/완료는 서버 로그 [flow-comb-snapshot-range] (async) 확인");
 		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
 	}
 
