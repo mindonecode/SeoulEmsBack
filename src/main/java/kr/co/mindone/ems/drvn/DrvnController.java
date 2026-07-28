@@ -703,7 +703,7 @@ public class DrvnController extends BaseController {
 		result.put("status", "triggered");
 		result.put("from", from);
 		result.put("to", to);
-		result.put("steps", "1)예측(IMPROVED) → 2)펌프조합 → 3)스냅샷·정확도 (순차)");
+		result.put("steps", "1)예측(IMPROVED) → 2)펌프조합 → 3)스냅샷·정확도 → 4)제어명령(HMI) (순차)");
 		result.put("note", "백그라운드 순차 처리. 진행/완료는 서버 로그 [full-backfill] 확인");
 		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
 	}
@@ -862,7 +862,9 @@ public class DrvnController extends BaseController {
 		if (s == null || s.trim().isEmpty()) {
 			throw new IllegalArgumentException(field + " required (yyyy-MM-ddTHH:mm[:ss])");
 		}
-		String t = s.trim().replace('T', ' ');
+		// 붙여넣기 시 딸려오는 보이지 않는 문자(예: U+FFFC ￼ = %EF%BF%BC) 방어:
+		// 날짜에 쓰이는 문자(숫자·'-'·':'·'T'·공백)만 남기고 제거한 뒤 파싱한다.
+		String t = s.trim().replaceAll("[^0-9\\-:T ]", "").replace('T', ' ').trim();
 		try {
 			if (t.length() <= 16) {
 				return LocalDateTime.parse(t, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));

@@ -1089,5 +1089,37 @@
 		ORDER BY PUMP_IDX DESC
 	</select>
 
+	<select id="selectPumpYnByGrpAt" parameterType="map" resultType="hashMap">
+		<!-- [백필] 지정 시각(TS) 이하 최신 배치(MAX RGSTR_TIME ≤ TS) 의 그룹 예측 조합.
+		     selectLatestPredictedComb(drvn) 과 동일한 배치 선택식을 사용해 스냅샷 단계와 일관.
+		     ORDER BY PUMP_IDX DESC: 9 → 1 순으로 적재(9가 먼저 INSERT, 1이 마지막). -->
+		SELECT OPT_IDX, PUMP_IDX, PUMP_YN
+		FROM TB_CTR_PUMPYN_RST
+		WHERE PUMP_GRP = #{PUMP_GRP}
+			AND RGSTR_TIME = (
+				SELECT MAX(RGSTR_TIME) FROM TB_CTR_PUMPYN_RST
+				WHERE PUMP_GRP = #{PUMP_GRP}
+					AND RGSTR_TIME &lt;= #{TS}
+			)
+		ORDER BY PUMP_IDX DESC
+	</select>
+
+	<insert id="insertHmiTagUpsert" parameterType="hashMap">
+		<!-- [백필] UQ_HMI_CTR_TAG_DEDUP 충돌 시 예외 없이 갱신 → 재실행 멱등.
+		     라이브 insertHmiTag(순수 INSERT)는 변경하지 않는다.
+		     RGSTR_TIME 도 제어시각(TIME)과 동일하게 명시 적재 — DB 기본값(현재시각) 대신
+		     과거 제어시각으로 기록해, 이력 정렬/락 판정(MAX(RGSTR_TIME))이 실제 제어시점을 따르게 한다. -->
+		INSERT INTO
+			TB_HMI_CTR_TAG(CTR_NM, OPT_IDX, TAG, TIME, VALUE, ANLY_CD, AI_STATUS, FLAG, RGSTR_TIME)
+		VALUES
+			(#{CTR_NM}, #{OPT_IDX}, #{TAG}, #{TIME}, #{VALUE}, #{ANLY_CD}, #{AI_STATUS}, #{FLAG}, #{TIME})
+		ON DUPLICATE KEY UPDATE
+			VALUE = VALUES(VALUE),
+			ANLY_CD = VALUES(ANLY_CD),
+			AI_STATUS = VALUES(AI_STATUS),
+			FLAG = VALUES(FLAG),
+			RGSTR_TIME = VALUES(RGSTR_TIME)
+	</insert>
+
 
 </mapper>

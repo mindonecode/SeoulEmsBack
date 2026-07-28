@@ -3078,8 +3078,8 @@
             TB_CTR_PRF_PUMPMST_INF cppi,
             TB_WPP_TAG_CODE wtc
         WHERE
-            hct.TAG in (cppi.CTR_AUTO_TAG, cppi.CTR_AUTO_STOP_TAG)
-            AND hct.ANLY_CD in ('RUN','STOP')
+            hct.TAG in (cppi.CTR_AUTO_TAG, cppi.CTR_AUTO_STOP_TAG, cppi.CTR_AUTO_FREQ_TAG)
+            AND hct.ANLY_CD in ('RUN','STOP','FREQ','0','1','2')
             AND wtc.DISPLAY_ID='EMSPumpControl'
             AND wtc.FUNC_TYP ='PumpStatus'
             AND wtc.TAG_GRP = cppi.PUMP_GRP

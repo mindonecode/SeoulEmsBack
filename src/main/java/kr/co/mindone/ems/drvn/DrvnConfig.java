@@ -58,6 +58,9 @@ public class DrvnConfig {
 	@Autowired
 	@Lazy
 	SimPredictionConfig simPredictionConfig;   // 예측 시뮬레이터(IMPROVED 적재) — 전체 backfill 오케스트레이션용
+	@Autowired
+	@Lazy
+	kr.co.mindone.ems.pump.PumpService pumpService;   // 제어명령(TB_HMI_CTR_TAG) 백필 4단계용
 	@Value("${dstrb.optidx}")
 	String optIdxTag;
 	@Value("${dstrb.prdct.pwrCal.idx}")
@@ -6839,13 +6842,21 @@ public class DrvnConfig {
 		long t0 = System.currentTimeMillis();
 		log.info("[full-backfill] 시작: {} ~ {}", from, to);
 		try {
-			log.info("[full-backfill] 1/3 예측(IMPROVED) 시작");
+			log.info("[full-backfill] 1/4 예측(IMPROVED) 시작");
 			simPredictionConfig.backfillSync(from, to);
-			log.info("[full-backfill] 1/3 예측 완료 → 2/3 펌프조합 시작");
+			log.info("[full-backfill] 1/4 예측 완료 → 2/4 펌프조합 시작");
 			backfillPumpCombSync(from, to);
-			log.info("[full-backfill] 2/3 펌프조합 완료 → 3/3 스냅샷·정확도 시작");
+			log.info("[full-backfill] 2/4 펌프조합 완료 → 3/4 스냅샷·정확도 시작");
 			Map<String, Object> snap = fillFlowCombSnapshotRange(from, to);
-			log.info("[full-backfill] 3/3 스냅샷·정확도 완료: {}", snap);
+			log.info("[full-backfill] 3/4 스냅샷·정확도 완료: {} → 4/4 제어명령(HMI) 시작", snap);
+			// 4단계는 2단계(TB_CTR_PUMPYN_RST)를 목표 조합으로 읽으므로 반드시 그 이후에 실행.
+			// 그룹셋은 펌프조합 백필과 동일하게 pumpDstrbIdMap.keySet() 사용.
+			if (pumpDstrbIdMap != null && !pumpDstrbIdMap.isEmpty()) {
+				pumpService.backfillHmiCtrTagSync(from, to, new java.util.LinkedHashSet<>(pumpDstrbIdMap.keySet()));
+			} else {
+				log.warn("[full-backfill] 4/4 제어명령 스킵: pumpDstrbIdMap 미초기화");
+			}
+			log.info("[full-backfill] 4/4 제어명령(HMI) 완료");
 			log.info("[full-backfill] 전체 완료 ({}초 소요)", (System.currentTimeMillis() - t0) / 1000);
 		} catch (Exception e) {
 			log.error("[full-backfill] 실패: {}", e.getMessage(), e);

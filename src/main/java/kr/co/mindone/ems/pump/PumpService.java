@@ -2844,6 +2844,20 @@ public class PumpService {
      * @param value 정수형 제어 값
      */
     private void insertPumpControlData(String opx_idx, String ctr_nm, String tag, String anlyCd, int value) {
+        // 라이브 경로: 현재 시각(nowStringDate) · FLAG=0(대기) · 순수 INSERT.
+        insertPumpControlData(opx_idx, ctr_nm, tag, anlyCd, value, nowStringDate(), 0, false);
+    }
+
+    /**
+     * [백필/공통] TIME·FLAG·멱등여부를 파라미터화한 HMI 제어명령 적재 코어.
+     * 라이브 경로는 위 3+2 arg 래퍼(nowStringDate, FLAG=0, 순수 INSERT)로 진입하므로 무영향.
+     * 백필은 과거 배치시각 timeStr, FLAG=2(완료, 소비자 미발행), useUpsert=true(멱등)로 호출한다.
+     * @param timeStr   TB_HMI_CTR_TAG.TIME 에 적재할 시각 문자열("yyyy-MM-dd HH:mm:ss")
+     * @param flag      FLAG 값(라이브=0 대기, 백필=2 완료)
+     * @param useUpsert true 면 insertHmiTagUpsert(ON DUPLICATE KEY UPDATE)로 재실행 멱등 보장
+     */
+    private void insertPumpControlData(String opx_idx, String ctr_nm, String tag, String anlyCd, int value,
+                                       String timeStr, int flag, boolean useUpsert) {
         // [dev/seoul 환경 단순화] WAIT / RUN_STATUS / STOP_STATUS 는 SCADA 통신용 보조 명령.
         // SCADA 가 없는 dev/seoul 에서는 RUN/STOP 만 적재해도 충분 — 보조 명령은 INSERT 스킵.
         if (("dev".equals(wpp_code) || "seoul".equals(wpp_code))
@@ -2864,12 +2878,16 @@ public class PumpService {
         tempCtrItem.put("OPT_IDX", opx_idx);
         tempCtrItem.put("CTR_NM", ctr_nm);
         tempCtrItem.put("TAG", tag);
-        tempCtrItem.put("TIME", nowStringDate());
+        tempCtrItem.put("TIME", timeStr);
         tempCtrItem.put("VALUE", value);
         tempCtrItem.put("ANLY_CD", anlyCd);
-        tempCtrItem.put("FLAG", 0);
+        tempCtrItem.put("FLAG", flag);
         tempCtrItem.put("AI_STATUS", getAiControlStatus());
-        pumpMapper.insertHmiTag(tempCtrItem);
+        if (useUpsert) {
+            pumpMapper.insertHmiTagUpsert(tempCtrItem);
+        } else {
+            pumpMapper.insertHmiTag(tempCtrItem);
+        }
     }
 
     /**
@@ -3017,6 +3035,22 @@ public class PumpService {
     private int insertCombination(List<HashMap<String, Object>> target,
                                   java.util.function.BiPredicate<Integer, String> shouldRun,
                                   String alarmTitle) {
+        // 라이브 경로: 현재 시각 · FLAG=0(대기) · 순수 INSERT.
+        return insertCombination(target, shouldRun, alarmTitle, nowStringDate(), 0, false);
+    }
+
+    /**
+     * [백필/공통] insertCombination 코어. TIME·FLAG·멱등여부를 파라미터화.
+     * 라이브 3-arg 래퍼는 (nowStringDate, FLAG=0, 순수 INSERT)로 진입 → 기존 동작 무영향.
+     * 백필은 과거 배치시각 timeStr, FLAG=2, useUpsert=true 로 호출한다(알람 nowDate 도 timeStr 사용).
+     * @param timeStr   각 행 TB_HMI_CTR_TAG.TIME 및 알람 nowDate 에 적재할 시각 문자열
+     * @param flag      FLAG 값(라이브=0, 백필=2)
+     * @param useUpsert true 면 멱등 upsert 경로 사용
+     */
+    private int insertCombination(List<HashMap<String, Object>> target,
+                                  java.util.function.BiPredicate<Integer, String> shouldRun,
+                                  String alarmTitle,
+                                  String timeStr, int flag, boolean useUpsert) {
         // INSERT 순서 강제: PUMP_IDX DESC (9가 먼저, 1이 마지막). SQL ORDER BY 결과에 의존하지 않음.
         List<HashMap<String, Object>> latest = new java.util.ArrayList<>(target);
         latest.sort((a, b) -> {
@@ -3069,7 +3103,7 @@ public class PumpService {
                 System.out.println("[DEV] insertCombination: empty TAG for PUMP_IDX=" + pumpIdx + ", anlyCd=" + anlyCd);
                 continue;
             }
-            insertPumpControlData(optIdx, ctrNm, tag, anlyCd, 1);
+            insertPumpControlData(optIdx, ctrNm, tag, anlyCd, 1, timeStr, flag, useUpsert);
             alarmDetail.add(ctrNm + ": " + ("RUN".equals(anlyCd) ? "가동" : "정지"));
             inserted++;
         }
@@ -3079,15 +3113,137 @@ public class PumpService {
         // seoul/dev 는 SCADA/Kafka 우회(devInsert 직접 INSERT)로 인해 pumpCommand 계열의
         // emsPumpAlarmInsert 호출부에 도달하지 못해 제어 알람이 누락되었음. 명령이 실제
         // 적재된 경우(inserted > 0)에만 TB_EMS_ALR 에 알람 1건을 직접 적재해 복구한다.
-        if (inserted > 0) {
+        // 단, 백필(useUpsert=true)은 과거 이벤트를 대량 재구성하므로 라이브 알람 피드를
+        // 오염시키지 않도록 알람을 남기지 않는다.
+        if (inserted > 0 && !useUpsert) {
             HashMap<String, Object> alarm = new HashMap<>();
             alarm.put("alr_typ", "PUMP");
-            alarm.put("nowDate", nowStringDate());
+            alarm.put("nowDate", timeStr);
             alarm.put("msg", alarmTitle + "||" + alarmDetail.toString());
             alarm.put("link", "");
             emsPumpAlarmInsert(alarm);
         }
         return inserted;
+    }
+
+    /**
+     * [백필] 지정 기간의 TB_HMI_CTR_TAG 를 라이브 dev/seoul 2단계 제어로직과 동일한 방식으로 재구성한다.
+     * fullBackfill 4단계에서 호출되며, 라이브 devInsertHmiTagFromLatestPumpYn 의 시각-파라미터 버전이다.
+     *
+     * [항상 2단계 강제(force 2-phase)] 각 경계의 '현재 가동'은 실측 재구성(selectLatestActualComb)으로 잡되,
+     * 변화가 조금이라도 있으면 정지 단계(@T)와 목표 조합 단계(@T+preOffDelayMinutes)를 '무조건 둘 다' 적재해
+     * 5분 지연을 항상 남긴다. 라이브(devInsert)는 기동 대상이 있을 때만 2단계를 냈지만, 여기서는 정지-only
+     * 경계에서도 2단계를 강제한다(그 경우 두 단계 조합 내용이 동일하게 중복될 수 있음).
+     *
+     * 제어 주기(controlLockMinutes())마다 각 배치시각 T 에 대해:
+     *  - 목표 조합  = selectPumpYnByGrpAt(grp, T)   (그 시점까지의 최신 예측 배치, TB_CTR_PUMPYN_RST)
+     *  - 현재 가동  = drvnMapper.selectLatestActualComb(T) (그 시점 PMB_TAG ON 펌프 실측 재구성, TB_RAWDATA)
+     *  - 변화(정지 또는 기동 대상) 존재 시:
+     *      · 1단계(TIME=T)          : 유지 조합(현재 ∧ 목표) 적재  ← "끄는 명령"
+     *      · 2단계(TIME=T+delay)    : 목표 조합 전체 적재         ← "실제 조합" (항상 발사)
+     *  - 변화가 전혀 없으면 아무 것도 적재하지 않음.
+     * 라이브의 인메모리 5분 예약(taskScheduler)은 백필에서 2단계 행의 TIME 을 T+5분으로 찍는 것으로 재현한다.
+     *
+     * 안전: 모든 백필 행은 FLAG=2(완료)로 적재해 PumpScheduler.pumpTask(FLAG=0 소비자)가 Kafka 로
+     * 재발행하지 않게 하고, insertHmiTagUpsert(ON DUPLICATE KEY UPDATE)로 재실행 멱등을 보장한다.
+     *
+     * @param from       시작 시각(포함)
+     * @param to         종료 시각(포함)
+     * @param pumpGrpSet 대상 펌프 그룹 집합(오케스트레이터가 pumpDstrbIdMap.keySet() 전달)
+     */
+    public void backfillHmiCtrTagSync(java.time.LocalDateTime from, java.time.LocalDateTime to,
+                                      java.util.Set<Integer> pumpGrpSet) {
+        try {
+            if (from == null || to == null) throw new IllegalArgumentException("from/to required");
+            if (pumpGrpSet == null || pumpGrpSet.isEmpty()) {
+                System.out.println("[hmi-backfill] 대상 펌프 그룹 없음 → 스킵");
+                return;
+            }
+            int step = controlLockMinutes();          // "제어 주기" — 기존 로직 재사용
+            if (step <= 0) step = 10;                  // 방어적 fallback
+            int delay = preOffDelayMinutes;           // 2단계 지연(분, 기본 5)
+            java.time.format.DateTimeFormatter tsFmt =
+                    java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+            java.time.LocalDateTime cur = from.withSecond(0).withNano(0);
+            java.time.LocalDateTime end = to.withSecond(0).withNano(0);
+
+            System.out.println("[hmi-backfill] 시작: " + cur.format(tsFmt) + " ~ " + end.format(tsFmt)
+                    + " (제어주기 " + step + "분, 2단계 지연 " + delay + "분, 항상2단계, 그룹 " + pumpGrpSet + ")");
+            int boundaries = 0, phase1 = 0, phase2 = 0;
+
+            while (!cur.isAfter(end)) {
+                String tStr = cur.format(tsFmt);
+                for (Integer grp : pumpGrpSet) {
+                    try {
+                        // 목표 조합@T (per-pump: OPT_IDX/PUMP_IDX/PUMP_YN)
+                        HashMap<String, Object> targetParam = new HashMap<>();
+                        targetParam.put("PUMP_GRP", grp);
+                        targetParam.put("TS", tStr);
+                        List<HashMap<String, Object>> target = pumpMapper.selectPumpYnByGrpAt(targetParam);
+                        if (target == null || target.isEmpty()) continue;
+
+                        // 현재 가동@T (실측 재구성): PMB_TAG ON 펌프 IDX CSV
+                        HashMap<String, Object> actlParam = new HashMap<>();
+                        actlParam.put("pump_grp", grp);
+                        actlParam.put("actl_ref_ts", tStr);
+                        final java.util.Set<Integer> running = parseIdxCsv(drvnMapper.selectLatestActualComb(actlParam));
+
+                        // diff: 정지 대상(현재 ON & 목표 OFF), 기동 대상(현재 OFF & 목표 ON)
+                        boolean hasStop = false, hasStart = false;
+                        for (HashMap<String, Object> row : target) {
+                            if (row == null || row.get("PUMP_IDX") == null) continue;
+                            int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
+                            boolean targetOn = "1".equals(String.valueOf(row.get("PUMP_YN")));
+                            boolean nowOn = running.contains(pumpIdx);
+                            if (nowOn && !targetOn) hasStop = true;
+                            if (!nowOn && targetOn) hasStart = true;
+                        }
+                        if (!hasStop && !hasStart) continue;   // 변화 없음 → 미적재
+
+                        // [항상 2단계] 변화가 있으면 정지 단계와 조합 단계를 둘 다 발사한다.
+                        // 1단계(TIME=T): 유지 조합(현재 ∧ 목표) — 끄는 명령
+                        phase1 += insertCombination(target,
+                                (idx, yn) -> "1".equals(yn) && running.contains(idx),
+                                "[AI운전] 정지 대상 펌프를 정지했습니다.",
+                                tStr, 2, true);
+                        // 2단계(TIME=T+delay): 목표 조합 전체 — 실제 조합 (항상 발사)
+                        String t2 = (delay > 0 ? cur.plusMinutes(delay) : cur).format(tsFmt);
+                        phase2 += insertCombination(target,
+                                (idx, yn) -> "1".equals(yn),
+                                "[AI운전] 펌프 제어 명령을 적용했습니다.",
+                                t2, 2, true);
+                    } catch (Exception e) {
+                        System.out.println("[hmi-backfill] " + tStr + " grp " + grp + " 처리 오류: " + e.getMessage());
+                    }
+                }
+                boundaries++;
+                cur = cur.plusMinutes(step);
+            }
+            System.out.println("[hmi-backfill] 완료: 경계 " + boundaries + "개 / 1단계 " + phase1
+                    + "행 / 2단계 " + phase2 + "행");
+        } catch (Exception e) {
+            System.out.println("[hmi-backfill] 실패: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * "3,5,7" 형태의 PUMP_IDX CSV 를 정수 집합으로 파싱. null/빈문자열이면 빈 집합.
+     * selectLatestActualComb(실측 가동 CSV) 결과 파싱에 사용(체이닝 초기값).
+     */
+    private java.util.Set<Integer> parseIdxCsv(String csv) {
+        java.util.Set<Integer> set = new java.util.HashSet<>();
+        if (csv == null || csv.trim().isEmpty()) return set;
+        for (String p : csv.split(",")) {
+            String s = p.trim();
+            if (s.isEmpty()) continue;
+            try {
+                set.add(Integer.parseInt(s));
+            } catch (NumberFormatException ignore) {
+            }
+        }
+        return set;
     }
 
     /**

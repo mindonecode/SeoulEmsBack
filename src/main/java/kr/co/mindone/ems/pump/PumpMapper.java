@@ -32,6 +32,13 @@ interface PumpMapper {
     List < HashMap < String, Object >> selectLatestPumpYnByGrp(java.util.Map < String, Object > param);
 
     /**
+     * [백필] 지정 배치시각(TS) 이하의 최신 배치(MAX RGSTR_TIME ≤ TS) 기준 PUMP_GRP 의
+     * OPT_IDX/PUMP_IDX/PUMP_YN 조회. selectLatestPumpYnByGrp 의 시각 파라미터 버전으로,
+     * 과거 특정 시점의 예측 조합을 재현하기 위해 사용. (param: PUMP_GRP, TS)
+     */
+    List < HashMap < String, Object >> selectPumpYnByGrpAt(java.util.Map < String, Object > param);
+
+    /**
      * 현재 작동 중인 주요 펌프 리스트 조회
      * @return 현재 작동 중인 주요 펌프의 정보를 담은 리스트
      */
@@ -197,6 +204,14 @@ interface PumpMapper {
      * @param map 삽입할 데이터
      */
     void insertHmiTag(HashMap < String, Object > map);
+
+    /**
+     * [백필] HMI 태그 멱등 삽입. UQ_HMI_CTR_TAG_DEDUP 유니크 제약과 충돌 시 예외 없이
+     * VALUE/ANLY_CD/FLAG/AI_STATUS 를 갱신(ON DUPLICATE KEY UPDATE)해 재실행에 안전.
+     * 라이브 경로(insertHmiTag)는 그대로 두고 백필 경로에서만 사용한다.
+     * @param map 삽입할 데이터
+     */
+    void insertHmiTagUpsert(HashMap < String, Object > map);
 
     /**
      * 펌프 알람 정보 삽입
