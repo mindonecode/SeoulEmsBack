@@ -846,7 +846,18 @@ public class AiController extends BaseController {
 			}
 		}
 
-		aiService.pumpCommand(map);
+		// 발사 건수 규약: >0 실제 발사 / 0 발사 없음 / -1 판정 불가(dev·seoul 외 레거시 경로).
+		int dispatched = aiService.pumpCommand(map);
+
+		// 발사가 0건이면 lock 을 기록하지 않는다.
+		// 기존에는 무조건 기록해서, 확인을 눌렀지만 아무 명령도 안 나간 경우(실측이 목표와 이미 동일,
+		// AI 추천 모드 불일치 등)에도 제어주기가 통째로 소진되고 화면에는 성공으로 표시되었다.
+		if (dispatched == 0) {
+			String msg = "제어할 내용이 없어 명령을 전송하지 않았습니다.\n"
+					+ "현재 펌프 상태가 목표 조합과 같거나, 대상 그룹이 AI 추천 모드가 아닙니다.";
+			ResponseObject<String> none = makeSuccessObj(400, msg, msg);
+			return new ResponseEntity<>(none, HttpStatus.BAD_REQUEST);
+		}
 
 		// 다음 throttle 카운트 기준이 되도록 TB_MNL_CHN_LOG 적재 (PumpService 통합 헬퍼).
 		for (int grpInt : grpInts) {

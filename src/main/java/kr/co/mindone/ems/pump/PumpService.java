@@ -1646,9 +1646,15 @@ public class PumpService {
     /**
      * 펌프 제어 명령을 생성
      *
+     * 반환값 규약 (호출부가 "실제로 명령이 나갔는지" 판별해 제어주기 lock 기록 여부를 결정하기 위함):
+     *   &gt; 0 : 발사된 제어 액션 수
+     *   = 0 : 발사 대상이 없어 아무 명령도 적재하지 않음 (lock 을 기록하면 안 되는 경우)
+     *   = -1: 판정 불가 (dev/seoul 외 정수장 레거시 경로 — 건수 집계 미구현, 기존 동작 유지)
+     *
      * @param pumpGrpStr 펌프 그룹 리스트
+     * @return 위 규약에 따른 발사 건수
      */
-    public void pumpCommand(List < String > pumpGrpStr) {
+    public int pumpCommand(List < String > pumpGrpStr) {
         // [DEV/SEOUL] 추천모드 사용자 확인 흐름도 운영 SCADA/Kafka 의존을 우회.
         // 변경된 펌프만 적재하지 않고, 그룹별 PUMP_IDX 1~N 전체의 최신 PUMP_YN 을
         // PUMP_IDX DESC 순으로 TB_HMI_CTR_TAG 에 직접 적재 (0번 모드와 동일 동작).
@@ -1659,9 +1665,10 @@ public class PumpService {
             // seoul.control.dispatch.enabled=false (dev 기본) 면 전체 dispatch skip.
             if (!controlDispatchEnabled) {
                 System.out.println("[PumpService.pumpCommand] DISPATCH DISABLED (seoul.control.dispatch.enabled=false) → skip for groups=" + pumpGrpStr);
-                return;
+                return 0;
             }
             System.out.println("[PumpService.pumpCommand] DEV/SEOUL bypass → devInsertHmiTagFromLatestPumpYn for groups=" + pumpGrpStr);
+            int dispatched = 0;
             for (String grp : pumpGrpStr) {
                 int pumpGrpInt;
                 try {
@@ -1682,8 +1689,10 @@ public class PumpService {
                 if (inserted > 0) {
                     recordControlCommand(pumpGrpInt, "ai_command");
                 }
+                dispatched += inserted;
             }
-            return;
+            System.out.println("[PumpService.pumpCommand] DEV/SEOUL dispatched=" + dispatched + " for groups=" + pumpGrpStr);
+            return dispatched;
         }
         // 이전 명령 초기화 기능
         initCtrTag();
@@ -1749,7 +1758,8 @@ public class PumpService {
                 }
                 if(gr_2_on_count >= 4)
                 {
-                    return;
+                    // 안전 가드로 전체 중단 — 아무 명령도 적재되지 않으므로 0(발사 없음).
+                    return 0;
                 }
                 int gr_2_off_count = 0;
                 for (HashMap<String, Object> onCountItem : offList) {
@@ -1760,7 +1770,8 @@ public class PumpService {
                 }
                 if(gr_2_off_count >= 4)
                 {
-                    return;
+                    // 안전 가드로 전체 중단 — 아무 명령도 적재되지 않으므로 0(발사 없음).
+                    return 0;
                 }
             }
             // 켜짐/꺼짐 방지 종료
@@ -2029,6 +2040,9 @@ public class PumpService {
                 emsPumpAlarmInsert(alarm);
             }
         }
+        // dev/seoul 외 레거시 경로는 적재 건수를 집계하지 않는다 → -1(판정 불가).
+        // 호출부는 -1 을 기존 동작(lock 기록 + 성공 응답)으로 취급해 정수장별 동작을 바꾸지 않는다.
+        return -1;
     }
     public boolean isNightTime() {
         // 예시: 22:00 ~ 06:00 을 야간으로 처리
@@ -2045,8 +2059,9 @@ public class PumpService {
     /**
      * 금강남부 고산정수장의 펌프 제어명령을 생성 (제외)
      * @param pumpGrpStr 펌프 그룹 리스트
+     * @return 발사 건수 규약은 {@link #pumpCommand(List)} 와 동일. 이 경로는 집계 미구현이라 -1(판정 불가)
      */
-    public void pumpCommandGS(List < String > pumpGrpStr) {
+    public int pumpCommandGS(List < String > pumpGrpStr) {
         // 이전 명령 초기화 기능
         initCtrTag();
         System.out.println("pumpCommand Start:" + pumpGrpStr);
@@ -2092,7 +2107,8 @@ public class PumpService {
                 }
 
                 // 즉시 함수를 종료하여 이후 제어 로직을 모두 중단시킴
-                return;
+                // 안전 가드로 전체 취소 — 아무 명령도 적재되지 않으므로 0(발사 없음).
+                return 0;
             }
             // 끄는 리스트와 켜는 리스트를 분리
             List<HashMap<String, Object>> offList = new ArrayList<>();
@@ -2288,6 +2304,9 @@ public class PumpService {
                 emsPumpAlarmInsert(alarm);
             }
         }
+        // dev/seoul 외 레거시 경로는 적재 건수를 집계하지 않는다 → -1(판정 불가).
+        // 호출부는 -1 을 기존 동작(lock 기록 + 성공 응답)으로 취급한다.
+        return -1;
     }
 
     /**
@@ -2325,8 +2344,9 @@ public class PumpService {
     /**
      * 낙동강 북부 운문정수장의 펌프 제어명령을 생성 (제외)
      * @param pumpGrpStr 펌프 그룹 리스트
+     * @return 발사 건수 규약은 {@link #pumpCommand(List)} 와 동일. 이 경로는 집계 미구현이라 -1(판정 불가)
      */
-    public void pumpCommandWM(List < String > pumpGrpStr) {
+    public int pumpCommandWM(List < String > pumpGrpStr) {
         // 이전 명령 초기화 기능
         initCtrTag();
         System.out.println("pumpCommand WM Start:" + pumpGrpStr);
@@ -2431,7 +2451,9 @@ public class PumpService {
                                 alarm.put("msg", "[AI운전] 현재 펌프 상태를 확인하지 못하였습니다. - PUMP_IDX: " + pumpIdx);
                                 alarm.put("link", "");
                                 emsPumpAlarmInsert(alarm);
-                                return; // 함수 종료, 제어 데이터 생성하지 않음
+                                // 함수 종료, 이후 제어 데이터 생성하지 않음.
+                                // 이전 반복에서 이미 적재된 명령이 있을 수 있어 0 이 아닌 -1(판정 불가).
+                                return -1;
                             }
                             String sync_check_tag = ""; //인버터 동기화 상태 태그
 
@@ -2648,6 +2670,9 @@ public class PumpService {
                 }
             }
         }
+        // dev/seoul 외 레거시 경로는 적재 건수를 집계하지 않는다 → -1(판정 불가).
+        // 호출부는 -1 을 기존 동작(lock 기록 + 성공 응답)으로 취급한다.
+        return -1;
     }
 
     /**
@@ -2881,6 +2906,8 @@ public class PumpService {
      *    예) 현재 1,2,3,4 / 목표 2,3,4,5 → 1단계 = 0,1,1,1,0,0,0,0,0 (1만 정지, 5는 아직).
      * 2) preOffDelayMinutes(기본 5분) 뒤: 기동 대상(현재 OFF & 목표 ON)이 있으면 목표조합 전체를
      *    지연 예약 발사(insertPredictionCommands)해 신규 펌프를 기동한다. 예) 2단계 = 0,1,1,1,1,0,0,0,0.
+     *    이때 목표 조합은 1단계 시점(T)에 조회한 target 스냅샷을 그대로 사용하며 재조회하지 않는다.
+     *    (재조회하면 1단계가 바꿔놓은 실측이 반영된 예측을 받아 2단계가 1단계와 같아지고 기동이 누락됨)
      *    (preOffDelayMinutes <= 0 이면 지연 없이 즉시 목표조합 발사 — 지연 기능 off)
      *
      * 반환값은 "제어 시퀀스가 개시되었는지"를 나타내는 양수. 호출부는 이 값이 0보다 크면
@@ -2931,23 +2958,28 @@ public class PumpService {
             actions += n;
         }
 
-        // 2단계(5분 뒤): 기동 대상이 있으면 목표조합 전체를 지연 예약
+        // 2단계(5분 뒤): 기동 대상이 있으면 목표조합 전체를 지연 예약.
+        // 목표 조합은 '지금(T)' 계산된 target 스냅샷을 그대로 들고 간다 — 발사 시점 재조회 금지.
+        // 1단계로 펌프를 끄면 실측이 바뀌고 그 실측이 다음 예측의 입력이 되므로, T+delay 에 재조회하면
+        // 자기 행동의 결과가 반영된 목표(= 유지 조합)를 받아 2단계가 1단계와 같아지고 기동이 누락된다.
+        // 백필 경로(insertHmiCtrTagBackfill)도 @T 스냅샷 하나로 두 단계를 렌더링하므로 이제 동일한 방식.
         if (hasStart) {
+            final List<HashMap<String, Object>> targetSnapshot = target;
             if (preOffDelayMinutes > 0) {
                 java.time.Instant fireAt = java.time.Instant.now().plus(java.time.Duration.ofMinutes(preOffDelayMinutes));
                 System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase2(target) 예약 "
-                        + preOffDelayMinutes + "분 뒤(PUMP_GRP=" + pumpGrp + ")");
+                        + preOffDelayMinutes + "분 뒤(PUMP_GRP=" + pumpGrp + "), snapshot=" + combToString(targetSnapshot));
                 taskScheduler.schedule(() -> {
                     try {
-                        insertPredictionCommands(pumpGrp);
+                        insertPredictionCommands(pumpGrp, targetSnapshot);
                     } catch (Exception e) {
                         System.out.println("[DEV] 지연 예측명령 발사 실패 PUMP_GRP=" + pumpGrp + " err=" + e.getMessage());
                     }
                 }, fireAt);
                 actions += 1; // 시퀀스 개시 표시 → 호출부 lock 기록 유도
             } else {
-                // 지연 비활성화(preOffDelayMinutes <= 0): 즉시 목표조합 발사
-                actions += insertPredictionCommands(pumpGrp);
+                // 지연 비활성화(preOffDelayMinutes <= 0): 즉시 목표조합 발사 (동일 스냅샷)
+                actions += insertPredictionCommands(pumpGrp, targetSnapshot);
             }
         }
         return actions;
@@ -2982,25 +3014,74 @@ public class PumpService {
     }
 
     /**
-     * [DEV] 목표 예측조합(TB_CTR_PUMPYN_RST 최신 PUMP_YN) 전체를 RUN/STOP 명령으로 발사.
+     * [DEV] 목표 예측조합 전체를 RUN/STOP 명령으로 발사.
      * 2단계 제어의 실제 예측명령 발사부 — devInsertHmiTagFromLatestPumpYn 에서 지연 예약 실행됨.
-     * 발사 시점에 최신 PUMP_YN 을 재조회하므로 항상 최신 예측 조합을 적용한다.
+     *
+     * 목표 조합은 1단계(OFF 명령) 시점에 계산된 스냅샷을 인자로 받아 그대로 사용한다.
+     * 발사 시점 재조회를 하지 않는 이유: 1단계가 펌프를 끄면 실측(PMB_TAG)이 바뀌고 그 실측이
+     * 다음 예측의 입력이 되므로, T+delay 에 재조회하면 자기 행동의 결과가 반영된 목표(= 유지 조합)를
+     * 받아 2단계가 1단계와 동일해지고 원래 기동하려던 펌프가 누락된다.
+     * 1단계와 2단계는 한 묶음의 시퀀스이므로 목표는 시퀀스 개시 시점으로 고정한다.
+     *
      * 운영 흐름(SCADA/Kafka 의존) 우회용.
-     * @param pumpGrp 대상 펌프 그룹
+     * @param pumpGrp        대상 펌프 그룹
+     * @param targetSnapshot 시퀀스 개시(T) 시점의 목표 행 목록(OPT_IDX, PUMP_IDX, PUMP_YN)
      * @return INSERT된 row 수
      */
-    private int insertPredictionCommands(int pumpGrp) {
-        java.util.HashMap<String, Object> param = new java.util.HashMap<>();
-        param.put("PUMP_GRP", pumpGrp);
-        List<HashMap<String, Object>> latest = pumpMapper.selectLatestPumpYnByGrp(param);
-        if (latest == null || latest.isEmpty()) {
-            System.out.println("[DEV] insertPredictionCommands: no PUMP_YN row for PUMP_GRP=" + pumpGrp);
+    private int insertPredictionCommands(int pumpGrp, List<HashMap<String, Object>> targetSnapshot) {
+        if (targetSnapshot == null || targetSnapshot.isEmpty()) {
+            System.out.println("[DEV] insertPredictionCommands: empty target snapshot for PUMP_GRP=" + pumpGrp);
             return 0;
         }
+
+        // 진단용 로그 (발사 대상은 바꾸지 않음): 스냅샷과 현재 최신 예측이 갈렸는지 가시화.
+        // 두 값이 다르면 지연 5분 사이 예측이 변경된 것 — 스냅샷대로 발사하되 사후 추적이 가능하도록 남긴다.
+        try {
+            java.util.HashMap<String, Object> param = new java.util.HashMap<>();
+            param.put("PUMP_GRP", pumpGrp);
+            List<HashMap<String, Object>> nowLatest = pumpMapper.selectLatestPumpYnByGrp(param);
+            String snapStr = combToString(targetSnapshot);
+            String nowStr = combToString(nowLatest);
+            if (!snapStr.equals(nowStr)) {
+                System.out.println("[DEV] insertPredictionCommands: PREDICTION DRIFT PUMP_GRP=" + pumpGrp
+                        + " snapshot=" + snapStr + " nowLatest=" + nowStr + " → 스냅샷대로 발사");
+            }
+        } catch (Exception e) {
+            System.out.println("[DEV] insertPredictionCommands: drift 확인 실패(무시) PUMP_GRP=" + pumpGrp
+                    + " err=" + e.getMessage());
+        }
+
         // 목표조합 전체: PUMP_YN=1 → RUN, 그 외 → STOP
-        return insertCombination(latest,
+        return insertCombination(targetSnapshot,
                 (idx, yn) -> "1".equals(yn),
                 "[AI운전] 펌프 제어 명령을 적용했습니다.");
+    }
+
+    /**
+     * [DEV/SEOUL] 목표 행 목록을 "PUMP_IDX:PUMP_YN" CSV 문자열로 렌더링 (로그/비교용).
+     * PUMP_IDX 오름차순으로 정렬해 조합 비교가 순서에 흔들리지 않게 한다.
+     * @param target 목표 행 목록(각 행: PUMP_IDX, PUMP_YN)
+     * @return 예) "1:1,2:1,3:0" / null·빈 목록이면 "-"
+     */
+    private String combToString(List<HashMap<String, Object>> target) {
+        if (target == null || target.isEmpty()) return "-";
+        java.util.TreeMap<Integer, String> sorted = new java.util.TreeMap<>();
+        for (HashMap<String, Object> row : target) {
+            if (row == null || row.get("PUMP_IDX") == null) continue;
+            try {
+                sorted.put(Integer.parseInt(row.get("PUMP_IDX").toString()),
+                        String.valueOf(row.get("PUMP_YN")));
+            } catch (NumberFormatException ignore) {
+                // PUMP_IDX 파싱 불가 행은 로그 문자열에서 제외 (발사 로직과 무관).
+            }
+        }
+        if (sorted.isEmpty()) return "-";
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<Integer, String> e : sorted.entrySet()) {
+            if (sb.length() > 0) sb.append(',');
+            sb.append(e.getKey()).append(':').append(e.getValue());
+        }
+        return sb.toString();
     }
 
     /**
