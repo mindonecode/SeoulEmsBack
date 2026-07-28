@@ -2007,10 +2007,18 @@ public class AiService {
 
     /**
      * 펌프 명령을 실행하는 메서드
-     * 
+     *
+     * 반환값 규약은 {@link PumpService#pumpCommand(List)} 와 동일.
+     *   &gt; 0 : 발사된 제어 액션 수
+     *   = 0 : 아무 명령도 적재되지 않음 (AI 추천 모드 불일치 / 대상 그룹 없음 / 발사 대상 없음)
+     *   = -1: 판정 불가 (dev/seoul 외 레거시 경로)
+     * 호출부(AiController)는 0 일 때 제어주기 lock 을 기록하지 않는다 —
+     * 명령이 안 나갔는데 lock 을 찍어 제어주기를 통째로 소진하던 문제 방지.
+     *
      * @param map 실행에 필요한 파라미터
+     * @return 위 규약에 따른 발사 건수
      */
-    public void pumpCommand(HashMap<String, Object> map) {
+    public int pumpCommand(HashMap<String, Object> map) {
         List<String> pumpGrpValue = Arrays.asList(map.get("pump_grp").toString().split(","));
         List<String> pumpGrpList;
         boolean checkAiModeStr = false;
@@ -2029,13 +2037,20 @@ public class AiService {
         if (!pumpGrpList.isEmpty() && checkAiModeStr) {
             if (wpp_code.equals("gr") || wpp_code.equals("gu") || wpp_code.equals("ba") || wpp_code.equals("dev")
                     || wpp_code.equals("seoul")) {
-                pumpService.pumpCommand(pumpGrpList);
+                return pumpService.pumpCommand(pumpGrpList);
             } else if (wpp_code.equals("wm")) {
-                pumpService.pumpCommandWM(pumpGrpList);
+                return pumpService.pumpCommandWM(pumpGrpList);
             } else if (wpp_code.equals("gs")) {
-                pumpService.pumpCommandGS(pumpGrpList);
+                return pumpService.pumpCommandGS(pumpGrpList);
             }
+            // 알 수 없는 wpp_code — 어떤 발사 경로도 타지 않았으므로 발사 없음.
+            System.out.println("[AiService.pumpCommand] 지원되지 않는 wpp_code=" + wpp_code + " → 발사 경로 없음");
+            return 0;
         }
+        // AI 추천 모드 불일치(checkAiModeStr=false) 또는 대상 그룹 없음 → 아무 명령도 적재하지 않음.
+        System.out.println("[AiService.pumpCommand] 발사 스킵 pumpGrpList=" + pumpGrpList
+                + ", checkAiModeStr=" + checkAiModeStr);
+        return 0;
     }
 
     public void pumpCommandAI(HashMap<String, Object> map) {
