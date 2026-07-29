@@ -6511,6 +6511,8 @@ public class DrvnService {
 			"prdct_flow", "actl_flow", "acc_flow", "err_flow",
 			// 압력
 			"prdct_prsr", "actl_prsr", "acc_prsr", "err_prsr",
+			// 전력 (시스템 전체값 — PUMP_GRP 별로 동일)
+			"prdct_pwr", "actl_pwr", "acc_pwr", "err_pwr",
 			// 수위 5종 (공릉/북악/구리/월계/월곡)
 			"prdct_wl_gn",   "actl_wl_gn",   "acc_wl_gn",   "err_wl_gn",
 			"prdct_wl_ba",   "actl_wl_ba",   "acc_wl_ba",   "err_wl_ba",
@@ -6525,6 +6527,7 @@ public class DrvnService {
 			"조합 예측", "조합 실측", "조합 정확도(%)", "조합 오차율(%)",
 			"유량 예측", "유량 실측", "유량 정확도(%)", "유량 오차율(%)",
 			"압력 예측", "압력 실측", "압력 정확도(%)", "압력 오차율(%)",
+			"전력 예측", "전력 실측", "전력 정확도(%)", "전력 오차율(%)",
 			"공릉 예측수위", "공릉 실측수위", "공릉 정확도(%)", "공릉 오차율(%)",
 			"북악 예측수위", "북악 실측수위", "북악 정확도(%)", "북악 오차율(%)",
 			"구리 예측수위", "구리 실측수위", "구리 정확도(%)", "구리 오차율(%)",
@@ -6539,6 +6542,7 @@ public class DrvnService {
 	 *   - 조합:   PALE_BLUE          (펌프계통 직후, 가장 핵심)
 	 *   - 유량:   LIGHT_TURQUOISE
 	 *   - 압력:   LIGHT_GREEN
+	 *   - 전력:   LIGHT_ORANGE
 	 *   - 수위 5종: LIGHT_YELLOW
 	 *   - 메타(계산시각): GREY_25_PERCENT
 	 */
@@ -6547,6 +6551,7 @@ public class DrvnService {
 			IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(), IndexedColors.PALE_BLUE.getIndex(),
 			IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(), IndexedColors.LIGHT_TURQUOISE.getIndex(),
 			IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(), IndexedColors.LIGHT_GREEN.getIndex(),
+			IndexedColors.LIGHT_ORANGE.getIndex(), IndexedColors.LIGHT_ORANGE.getIndex(), IndexedColors.LIGHT_ORANGE.getIndex(), IndexedColors.LIGHT_ORANGE.getIndex(),
 			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
 			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
 			IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(), IndexedColors.LIGHT_YELLOW.getIndex(),
