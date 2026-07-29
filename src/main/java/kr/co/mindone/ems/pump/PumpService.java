@@ -2908,7 +2908,10 @@ public class PumpService {
      *    지연 예약 발사(insertPredictionCommands)해 신규 펌프를 기동한다. 예) 2단계 = 0,1,1,1,1,0,0,0,0.
      *    이때 목표 조합은 1단계 시점(T)에 조회한 target 스냅샷을 그대로 사용하며 재조회하지 않는다.
      *    (재조회하면 1단계가 바꿔놓은 실측이 반영된 예측을 받아 2단계가 1단계와 같아지고 기동이 누락됨)
-     *    (preOffDelayMinutes <= 0 이면 지연 없이 즉시 목표조합 발사 — 지연 기능 off)
+     *    단, 지연은 1단계에서 실제로 펌프를 끈 경우에만 적용한다. 정지 대상이 없어 1단계가 발사되지
+     *    않았다면(기동만 있는 순수 증대: 예) 현재 3,6,9 / 목표 1,3,6,9) 기다릴 이유가 없으므로
+     *    즉시 목표조합을 발사한다.
+     *    (preOffDelayMinutes <= 0 이면 지연 기능 off — 정지 유무와 무관하게 즉시 발사)
      *
      * 반환값은 "제어 시퀀스가 개시되었는지"를 나타내는 양수. 호출부는 이 값이 0보다 크면
      * recordControlCommand 로 lock 을 기록해 지연 대기 중 1분 주기 스케줄러의 중복 재발사를 막는다.
@@ -2958,14 +2961,15 @@ public class PumpService {
             actions += n;
         }
 
-        // 2단계(5분 뒤): 기동 대상이 있으면 목표조합 전체를 지연 예약.
+        // 2단계: 기동 대상이 있으면 목표조합 전체를 발사.
+        // 지연(preOffDelayMinutes)은 1단계에서 실제로 펌프를 끈 경우에만 의미가 있다 — 정지가 현장에
+        // 반영될 시간을 벌어주는 것이 목적이므로, 끌 펌프가 없어 1단계가 발사되지 않았다면 즉시 발사한다.
         // 목표 조합은 '지금(T)' 계산된 target 스냅샷을 그대로 들고 간다 — 발사 시점 재조회 금지.
         // 1단계로 펌프를 끄면 실측이 바뀌고 그 실측이 다음 예측의 입력이 되므로, T+delay 에 재조회하면
         // 자기 행동의 결과가 반영된 목표(= 유지 조합)를 받아 2단계가 1단계와 같아지고 기동이 누락된다.
-        // 백필 경로(insertHmiCtrTagBackfill)도 @T 스냅샷 하나로 두 단계를 렌더링하므로 이제 동일한 방식.
         if (hasStart) {
             final List<HashMap<String, Object>> targetSnapshot = target;
-            if (preOffDelayMinutes > 0) {
+            if (preOffDelayMinutes > 0 && hasStop) {
                 java.time.Instant fireAt = java.time.Instant.now().plus(java.time.Duration.ofMinutes(preOffDelayMinutes));
                 System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase2(target) 예약 "
                         + preOffDelayMinutes + "분 뒤(PUMP_GRP=" + pumpGrp + "), snapshot=" + combToString(targetSnapshot));
@@ -2978,7 +2982,10 @@ public class PumpService {
                 }, fireAt);
                 actions += 1; // 시퀀스 개시 표시 → 호출부 lock 기록 유도
             } else {
-                // 지연 비활성화(preOffDelayMinutes <= 0): 즉시 목표조합 발사 (동일 스냅샷)
+                // 즉시 발사: 정지 대상 없음(기동만 있는 순수 증대) 또는 지연 기능 off(preOffDelayMinutes <= 0)
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase2(target) 즉시 발사"
+                        + " (hasStop=" + hasStop + ", preOffDelayMinutes=" + preOffDelayMinutes
+                        + ") PUMP_GRP=" + pumpGrp + ", snapshot=" + combToString(targetSnapshot));
                 actions += insertPredictionCommands(pumpGrp, targetSnapshot);
             }
         }

@@ -1506,10 +1506,16 @@
 				rst.PUMP_GRP = #{pump_grp}
 				AND
 			</if>
+				<!-- TB_CTR_PUMPYN_RST.RGSTR_TIME 은 이미 '예측 대상 시각' 이다.
+				     insertPumpComb(flow, pressure, grp, ts) 의 ts 가 TB_CTR_TNK_RST.PRDCT_TIME
+				     (= 그 행의 RGSTR_TIME + 10분) 이므로 여기서 10분을 더하면 중복 가산이 되어
+				     한 슬롯 과거의 조합을 집어온다. 그러면 성능곡선의 예측점(PRDCT_TIME >= startDate 최소,
+				     selectPrdctFlowPressure)과 기준 시각이 10분 어긋나, 예측 유량이 조합 구간 경계를
+				     넘는 순간 하이라이트 곡선·추천 펌프 목록이 예측점과 다른 조합을 가리킨다. -->
 				rst.RGSTR_TIME = (
 					select min(RGSTR_TIME)
 					from TB_CTR_PUMPYN_RST
-					where DATE_ADD(RGSTR_TIME, interval 10 minute) &gt;= #{startDate}
+					where RGSTR_TIME &gt;= #{startDate}
 				)
 			GROUP BY rst.PUMP_IDX
 		ORDER BY
