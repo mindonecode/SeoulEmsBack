@@ -753,6 +753,15 @@ public interface DrvnMapper {
 	java.util.List<HashMap<String, Object>> selectRecentSnapshotsWithNulls(HashMap<String, Object> param);
 
 	/**
+	 * (정확도 재계산) 기간 [from, to] 의 snapshot 원본 행 조회.
+	 * selectRecentSnapshotsWithNulls 와 같은 컬럼 프래그먼트(snapshotRawCols) 를 쓰므로
+	 * 반환 키가 computeAndStoreAccuracy 입력과 그대로 맞는다. ROUND 미적용(저장 원본).
+	 * @param param from(String "yyyy-MM-dd HH:mm:ss"), to(String)
+	 * @return RGSTR_TIME / PUMP_GRP 오름차순. 계산 불가(전부 결측) 행도 포함되므로 호출측에서 skip.
+	 */
+	java.util.List<HashMap<String, Object>> selectSnapshotsForAccuracyByRange(HashMap<String, Object> param);
+
+	/**
 	 * (정확도) 항목별 오차율/정확도 UPSERT (TB_PUMP_FLOW_COMB_ACCURACY). 스냅샷과 동일 PK.
 	 * @param param rgstr_time, prdct_time, pump_grp, err_ / acc_ 항목값.
 	 */

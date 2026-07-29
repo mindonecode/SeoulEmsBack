@@ -706,6 +706,31 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 현재 적재된 스냅샷 기준으로 <b>정확도만</b> 재계산 (TB_PUMP_FLOW_COMB_ACCURACY UPSERT).
+	 * - /snapshot/fillRange 와의 차이:
+	 *     · 이 API      : TB_PUMP_FLOW_COMB_SNAPSHOT 읽기 전용. 소스 재질의 없음 → 빠르고 스냅샷 값이 안 바뀐다.
+	 *     · fillRange   : 소스(TNK_RST/RAWDATA/PEAK_PWR) 재질의 + 스냅샷 UPSERT + 정확도.
+	 * - 정확도 산식/컬럼이 바뀌었거나 컬럼을 새로 추가해 과거 구간이 null 인 경우 이 API 를 쓴다.
+	 * - 스냅샷의 ACTL_* 자체가 비어 있는 구간은 여기서도 계산 불가(skipped) → fillRange 를 먼저 실행할 것.
+	 * - 재실행 안전(멱등). 입력 포맷은 /snapshot/fillRange 와 동일.
+	 * @param from 시작 시각 (inclusive)
+	 * @param to   종료 시각 (inclusive)
+	 * @return { from, to, scanned, stored, skipped, failed }
+	 */
+	@GetMapping("/accuracy/fillRange")
+	public ResponseObject<Map<String, Object>> refillAccuracyRange(
+			@RequestParam("from") String from,
+			@RequestParam("to") String to){
+		LocalDateTime fromDt = parseSnapshotRangeDateTime(from, "from");
+		LocalDateTime toDt   = parseSnapshotRangeDateTime(to,   "to");
+		if (fromDt.isAfter(toDt)) {
+			throw new IllegalArgumentException("from must be <= to");
+		}
+		Map<String, Object> result = drvnConfig.refillAccuracyRange(fromDt, toDt);
+		return makeSuccessObj(ResponseMessage.INSERT_SUCCESS, result);
+	}
+
+	/**
 	 * [GET] 스냅샷 + 정확도 기간별 엑셀 다운로드.
 	 * - 1개 xlsx 안에 2개 시트("snapshot", "accuracy") 로 구간 [from, to] 의 모든 행을 내보낸다.
 	 * - 입력 포맷: fillRange 와 동일 ("yyyy-MM-ddTHH:mm[:ss]" 또는 "yyyy-MM-dd HH:mm[:ss]").

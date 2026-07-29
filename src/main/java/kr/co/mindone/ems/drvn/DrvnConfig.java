@@ -6794,6 +6794,80 @@ public class DrvnConfig {
 		return result;
 	}
 
+	/**
+	 * 지정 범위 [from, to] 의 정확도만 재계산 (TB_PUMP_FLOW_COMB_ACCURACY UPSERT).
+	 * - <b>이미 적재된 TB_PUMP_FLOW_COMB_SNAPSHOT 행만 읽는다.</b> 소스 테이블(TB_CTR_TNK_RST /
+	 *   TB_RAWDATA / TB_PEAK_PWR_PRDCT_RST) 재질의 없음, 스냅샷 쓰기 없음.
+	 * - 따라서 스냅샷의 ACTL_* 가 비어 있는 구간은 여기서도 계산 불가(skip) 다.
+	 *   그 구간은 fillFlowCombSnapshotRange 로 스냅샷을 먼저 채워야 한다.
+	 * - 계산부는 cron 경로와 동일한 computeAndStoreAccuracy 를 그대로 사용 → 같은 입력이면 같은 값.
+	 * - insertFlowCombAccuracy 가 ON DUPLICATE KEY UPDATE 이므로 재실행 안전(멱등).
+	 * - 긴 구간에서 결과셋이 커지지 않도록 1일 단위로 나눠 조회한다.
+	 * @param from 시작 (inclusive, 10분 floor)
+	 * @param to   종료 (inclusive, 10분 floor)
+	 * @return { from, to, scanned, stored, skipped, failed }
+	 */
+	public Map<String, Object> refillAccuracyRange(LocalDateTime from, LocalDateTime to) {
+		if (from == null || to == null) throw new IllegalArgumentException("from/to required");
+
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		LocalDateTime fromAligned = from.withSecond(0).withNano(0);
+		fromAligned = fromAligned.withMinute((fromAligned.getMinute() / 10) * 10);
+		LocalDateTime toAligned = to.withSecond(0).withNano(0);
+		toAligned = toAligned.withMinute((toAligned.getMinute() / 10) * 10);
+		if (fromAligned.isAfter(toAligned)) {
+			throw new IllegalArgumentException("from(" + fromAligned + ") must be <= to(" + toAligned + ")");
+		}
+
+		int scanned = 0, stored = 0, skipped = 0, failed = 0;
+
+		// 1일 청크 순회. chunkTo 는 구간 끝을 넘지 않도록 clamp.
+		LocalDateTime chunkFrom = fromAligned;
+		while (!chunkFrom.isAfter(toAligned)) {
+			LocalDateTime chunkTo = chunkFrom.plusDays(1).minusMinutes(10);
+			if (chunkTo.isAfter(toAligned)) chunkTo = toAligned;
+
+			HashMap<String, Object> qp = new HashMap<>();
+			qp.put("from", chunkFrom.format(formatter));
+			qp.put("to",   chunkTo.format(formatter));
+			java.util.List<HashMap<String, Object>> rows = drvnMapper.selectSnapshotsForAccuracyByRange(qp);
+
+			if (rows != null && !rows.isEmpty()) {
+				for (HashMap<String, Object> row : rows) {
+					scanned++;
+					// 한 행 실패가 나머지를 막지 않도록 격리 (snapshot 경로의 per-grp 격리와 동일 방침).
+					try {
+						if (computeAndStoreAccuracy(row)) stored++;
+						else skipped++;   // 예측·실측 전부 결측 → 빈 정확도 행을 만들지 않음
+					} catch (Exception e) {
+						failed++;
+						log.error("[flow-comb-accuracy-refill] 실패 rgstr={} grp={}: {}",
+								row.get("rgstr_time"), row.get("pump_grp"), e.getMessage(), e);
+					}
+				}
+			}
+
+			log.debug("[flow-comb-accuracy-refill] chunk {} ~ {} rows={}",
+					chunkFrom.format(formatter), chunkTo.format(formatter), (rows == null ? 0 : rows.size()));
+
+			chunkFrom = chunkTo.plusMinutes(10);
+		}
+
+		String fromStr = fromAligned.format(formatter);
+		String toStr   = toAligned.format(formatter);
+		log.info("[flow-comb-accuracy-refill] from={} to={} scanned={} stored={} skipped={} failed={}",
+				fromStr, toStr, scanned, stored, skipped, failed);
+
+		Map<String, Object> result = new java.util.LinkedHashMap<>();
+		result.put("from", fromStr);
+		result.put("to", toStr);
+		result.put("scanned", scanned);
+		result.put("stored", stored);
+		result.put("skipped", skipped);
+		result.put("failed", failed);
+		return result;
+	}
+
 	// =====================================================================
 	// [Seoul/Dev] 예측 정확도 계산·저장 (TB_PUMP_FLOW_COMB_ACCURACY)
 	//   - 입력: TB_PUMP_FLOW_COMB_SNAPSHOT 의 같은 row 내 PRDCT_* vs ACTL_*.
@@ -6816,6 +6890,9 @@ public class DrvnConfig {
 		boolean any = false;
 		any |= putErrAcc(p, "flow",    numericErrAcc(toDouble(row.get("prdct_flow")),    toDouble(row.get("actl_flow"))));
 		any |= putErrAcc(p, "prsr",    numericErrAcc(toDouble(row.get("prdct_prsr")),    toDouble(row.get("actl_prsr"))));
+		// 전력: 스냅샷의 PRDCT_PWR(TB_PEAK_PWR_PRDCT_RST) vs ACTL_PWR(전력태그 가중합). 시스템 전체값이라
+		// 모든 PUMP_GRP 행에 동일 값이 적재되어 있고, 정확도도 grp 별로 같은 값이 나온다(수위와 동일).
+		any |= putErrAcc(p, "pwr",     numericErrAcc(toDouble(row.get("prdct_pwr")),     toDouble(row.get("actl_pwr"))));
 		any |= putErrAcc(p, "wl_gn",   numericErrAcc(toDouble(row.get("prdct_wl_gn")),   toDouble(row.get("actl_wl_gn"))));
 		any |= putErrAcc(p, "wl_ba",   numericErrAcc(toDouble(row.get("prdct_wl_ba")),   toDouble(row.get("actl_wl_ba"))));
 		any |= putErrAcc(p, "wl_gr",   numericErrAcc(toDouble(row.get("prdct_wl_gr")),   toDouble(row.get("actl_wl_gr"))));

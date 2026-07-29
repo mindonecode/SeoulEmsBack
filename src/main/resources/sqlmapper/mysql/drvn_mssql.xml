@@ -3143,13 +3143,13 @@
 	<insert id="insertFlowCombAccuracy" parameterType="hashmap">
 		INSERT INTO TB_PUMP_FLOW_COMB_ACCURACY
 			(RGSTR_TIME, PRDCT_TIME, PUMP_GRP,
-			 ERR_FLOW, ACC_FLOW, ERR_PRSR, ACC_PRSR,
+			 ERR_FLOW, ACC_FLOW, ERR_PRSR, ACC_PRSR, ERR_PWR, ACC_PWR,
 			 ERR_WL_GN, ACC_WL_GN, ERR_WL_BA, ACC_WL_BA, ERR_WL_GR, ACC_WL_GR,
 			 ERR_WL_WG, ACC_WL_WG, ERR_WL_WGOK, ACC_WL_WGOK,
 			 ERR_COMB, ACC_COMB, CALC_TIME)
 		VALUES
 			(#{rgstr_time}, #{prdct_time}, #{pump_grp},
-			 #{err_flow}, #{acc_flow}, #{err_prsr}, #{acc_prsr},
+			 #{err_flow}, #{acc_flow}, #{err_prsr}, #{acc_prsr}, #{err_pwr}, #{acc_pwr},
 			 #{err_wl_gn}, #{acc_wl_gn}, #{err_wl_ba}, #{acc_wl_ba}, #{err_wl_gr}, #{acc_wl_gr},
 			 #{err_wl_wg}, #{acc_wl_wg}, #{err_wl_wgok}, #{acc_wl_wgok},
 			 #{err_comb}, #{acc_comb}, NOW())
@@ -3157,6 +3157,7 @@
 			PRDCT_TIME  = #{prdct_time},
 			ERR_FLOW    = #{err_flow},    ACC_FLOW    = #{acc_flow},
 			ERR_PRSR    = #{err_prsr},    ACC_PRSR    = #{acc_prsr},
+			ERR_PWR     = #{err_pwr},     ACC_PWR     = #{acc_pwr},
 			ERR_WL_GN   = #{err_wl_gn},   ACC_WL_GN   = #{acc_wl_gn},
 			ERR_WL_BA   = #{err_wl_ba},   ACC_WL_BA   = #{acc_wl_ba},
 			ERR_WL_GR   = #{err_wl_gr},   ACC_WL_GR   = #{acc_wl_gr},
@@ -3169,8 +3170,9 @@
 	<!--
 	  (엑셀 다운로드) 기간 [from, to] 스냅샷 + 정확도 결합 행.
 	  - SNAPSHOT 을 기준으로 LEFT JOIN ACCURACY (PK: RGSTR_TIME, PUMP_GRP 동일).
-	  - 수위(WL_*) 는 SQL 단계에서 소수 둘째 자리 ROUND.
+	  - 수위(WL_*) 와 전력(PWR) 은 SQL 단계에서 소수 둘째 자리 ROUND.
 	  - 다른 숫자(유량/압력) 는 DB 원본 유지. 정확도/오차율은 저장 시 이미 round2.
+	  - 전력(PRDCT_PWR/ACTL_PWR) 은 시스템 전체값이라 모든 PUMP_GRP 행에 동일 값이 실린다.
 	-->
 	<select id="selectSnapshotsWithAccuracyByRange" parameterType="hashmap" resultType="hashmap">
 		SELECT
@@ -3187,6 +3189,11 @@
 			s.ACTL_PRSR                 AS actl_prsr,
 			a.ACC_PRSR                  AS acc_prsr,
 			a.ERR_PRSR                  AS err_prsr,
+
+			ROUND(s.PRDCT_PWR, 2)       AS prdct_pwr,
+			ROUND(s.ACTL_PWR, 2)        AS actl_pwr,
+			a.ACC_PWR                   AS acc_pwr,
+			a.ERR_PWR                   AS err_pwr,
 
 			ROUND(s.PRDCT_WL_GN, 2)     AS prdct_wl_gn,
 			ROUND(s.ACTL_WL_GN, 2)      AS actl_wl_gn,
@@ -3303,6 +3310,37 @@
 	</select>
 
 	<!--
+	  snapshot 원본 컬럼 목록 (반올림 없음).
+	  computeAndStoreAccuracy / backfillNullSnapshotFields 의 입력 키와 1:1 대응하므로
+	  두 용도(null backfill, 정확도 재계산)가 같은 프래그먼트를 공유한다.
+	  주의: 화면·엑셀용 selectSnapshotsWithAccuracyByRange 와 달리 ROUND 를 걸지 않는다.
+	        정확도 계산 입력은 실시간 경로와 동일한 저장 원본이어야 한다.
+	-->
+	<sql id="snapshotRawCols">
+		DATE_FORMAT(RGSTR_TIME, '%Y-%m-%d %H:%i:%s') AS rgstr_time,
+		DATE_FORMAT(PRDCT_TIME, '%Y-%m-%d %H:%i:%s') AS prdct_time,
+		PUMP_GRP      AS pump_grp,
+		PRDCT_FLOW    AS prdct_flow,
+		ACTL_FLOW     AS actl_flow,
+		PRDCT_COMB    AS prdct_comb,
+		ACTL_COMB     AS actl_comb,
+		PRDCT_PRSR    AS prdct_prsr,
+		ACTL_PRSR     AS actl_prsr,
+		PRDCT_PWR     AS prdct_pwr,
+		ACTL_PWR      AS actl_pwr,
+		PRDCT_WL_GN   AS prdct_wl_gn,
+		PRDCT_WL_BA   AS prdct_wl_ba,
+		PRDCT_WL_GR   AS prdct_wl_gr,
+		PRDCT_WL_WG   AS prdct_wl_wg,
+		PRDCT_WL_WGOK AS prdct_wl_wgok,
+		ACTL_WL_GN    AS actl_wl_gn,
+		ACTL_WL_BA    AS actl_wl_ba,
+		ACTL_WL_GR    AS actl_wl_gr,
+		ACTL_WL_WG    AS actl_wl_wg,
+		ACTL_WL_WGOK  AS actl_wl_wgok
+	</sql>
+
+	<!--
 	  [snapshot backfill] 최근 N 시간 내 한 컬럼이라도 null 인 snapshot 행 조회.
 	  retry 대상: PRDCT_FLOW, ACTL_FLOW, PRDCT_PRSR, ACTL_PRSR,
 	             PRDCT_WL_{GN,BA,GR,WG,WGOK}, ACTL_WL_{GN,BA,GR,WG,WGOK}.
@@ -3312,27 +3350,7 @@
 	-->
 	<select id="selectRecentSnapshotsWithNulls" parameterType="hashmap" resultType="hashmap">
 		SELECT
-			DATE_FORMAT(RGSTR_TIME, '%Y-%m-%d %H:%i:%s') AS rgstr_time,
-			DATE_FORMAT(PRDCT_TIME, '%Y-%m-%d %H:%i:%s') AS prdct_time,
-			PUMP_GRP      AS pump_grp,
-			PRDCT_FLOW    AS prdct_flow,
-			ACTL_FLOW     AS actl_flow,
-			PRDCT_COMB    AS prdct_comb,
-			ACTL_COMB     AS actl_comb,
-			PRDCT_PRSR    AS prdct_prsr,
-			ACTL_PRSR     AS actl_prsr,
-			PRDCT_PWR     AS prdct_pwr,
-			ACTL_PWR      AS actl_pwr,
-			PRDCT_WL_GN   AS prdct_wl_gn,
-			PRDCT_WL_BA   AS prdct_wl_ba,
-			PRDCT_WL_GR   AS prdct_wl_gr,
-			PRDCT_WL_WG   AS prdct_wl_wg,
-			PRDCT_WL_WGOK AS prdct_wl_wgok,
-			ACTL_WL_GN    AS actl_wl_gn,
-			ACTL_WL_BA    AS actl_wl_ba,
-			ACTL_WL_GR    AS actl_wl_gr,
-			ACTL_WL_WG    AS actl_wl_wg,
-			ACTL_WL_WGOK  AS actl_wl_wgok
+			<include refid="snapshotRawCols"/>
 		FROM TB_PUMP_FLOW_COMB_SNAPSHOT
 		WHERE RGSTR_TIME &gt;= DATE_SUB(#{nowDateTime}, INTERVAL #{hoursBack} HOUR)
 			AND RGSTR_TIME &lt; #{nowDateTime}
@@ -3346,6 +3364,21 @@
 				ACTL_WL_WG    IS NULL OR ACTL_WL_WGOK IS NULL
 			)
 		ORDER BY RGSTR_TIME ASC
+	</select>
+
+	<!--
+	  [accuracy refill] 기간 [from, to] 의 snapshot 원본 행 조회 (정확도 재계산 입력 전용).
+	  - 정확도 테이블은 조회하지 않는다. 계산 결과는 insertFlowCombAccuracy 가 UPSERT 로 덮어쓴다.
+	  - null 필터 없음: 전 구간 재계산이 목적이므로 계산 불가 행은 애플리케이션이 skip 한다.
+	  - PK (RGSTR_TIME, PUMP_GRP) 선두 컬럼 range scan.
+	-->
+	<select id="selectSnapshotsForAccuracyByRange" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			<include refid="snapshotRawCols"/>
+		FROM TB_PUMP_FLOW_COMB_SNAPSHOT
+		WHERE RGSTR_TIME &gt;= #{from}
+			AND RGSTR_TIME &lt;= #{to}
+		ORDER BY RGSTR_TIME ASC, PUMP_GRP ASC
 	</select>
 
 	<!--
