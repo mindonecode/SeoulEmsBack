@@ -113,6 +113,19 @@ public class DrvnConfig {
 	 */
 	private static final int SEOUL_LOW_LOAD_DEADLINE_HOUR = 7;
 
+	/**
+	 * [Seoul/Dev] 예측 대상 시각과 실제 산출 시점의 차(분).
+	 *
+	 * insertPumpComb 의 ts 는 예측 대상 시각(TB_CTR_TNK_RST.PRDCT_TIME)이고,
+	 * prdctFlowPressure 주석대로 PRDCT_TIME = RGSTR_TIME(수행 시점) + 10분 이다.
+	 * 즉 ts 는 산출 시점보다 10분 미래다.
+	 *
+	 * 예측 입력(유량·압력·목표수위 시간대)은 ts 기준이 맞지만,
+	 * **현재 수위·현재 조합 같은 실측은 ts − 이 값** 으로 조회해야 한다.
+	 * ts 로 조회하면 조회 창이 미래로 밀려 데이터가 없어 판정 불가로 빠진다.
+	 */
+	private static final int PRDCT_OFFSET_MIN = 10;
+
 	// 목표/임계값은 런타임에 TB_CONFIG(DB) 우선. 아래 @Value 는 DB 미적용/조회실패 시 폴백 기본값.
 	@Value("${seoul.step.gn.target:6.0}")
 	private double seoulGnTarget;           // 공릉 07시 목표 수위 (m) - 폴백
@@ -129,7 +142,7 @@ public class DrvnConfig {
 	 *
 	 * TB_TARGET_LEVEL 의 배수지별·시간대별 목표수위 상/하한과 현재 수위를 직접 비교한다:
 	 *   공릉 or 북악 현재수위 ≤ 하한          → +1단계
-	 *   공릉 and 북악 현재수위 ≥ 상한         → −1단계
+	 *   공릉 or 북악 현재수위 ≥ 상한          → −1단계
 	 *   그 외(하한~상한 사이)                 → 유지(0)
 	 *
 	 * true 이면 부하조정(seoul.step.load-adjust.enabled)보다 우선한다.
@@ -3423,12 +3436,19 @@ public class DrvnConfig {
 			// 부하(L/M/H) 분기·추세 예측·4m 고정 안전선을 모두 대체하는 신규 정책.
 			// TB_TARGET_LEVEL 의 배수지별·시간대별 목표수위 상/하한(USER 설정값 우선)과 현재 수위를 직접 비교:
 			//   ① 공릉 현재수위 ≤ 공릉 하한  OR  북악 현재수위 ≤ 북악 하한   → +1단계
-			//   ② 공릉 현재수위 ≥ 공릉 상한  AND 북악 현재수위 ≥ 북악 상한   → −1단계
+			//   ② 공릉 현재수위 ≥ 공릉 상한  OR  북악 현재수위 ≥ 북악 상한   → −1단계
 			//   ③ 그 외(하한~상한 사이)                                    → 유지(0)
-			// 비대칭(증량 OR / 감량 AND)은 공급 안정 우선 — 기존 L/M 분기와 같은 기조.
+			// 증량·감량 모두 OR 이며 ① 을 먼저 평가한다. 따라서 한쪽이 하한 이하이고
+			// 다른 쪽이 상한 이상인 상충 상황에서는 증량(공급 안정)이 우선한다.
 			// 하한~상한 사이가 데드밴드로 작동해 경계 채터링을 억제한다(기존 로직에는 유지(0)가 없었다).
-			// 판정 불가(활성 수조 0개 또는 그 시간대 목표수위 미설정)면 보수적으로 +1단계.
-			if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
+			// 판정 불가(활성 수조 0개 또는 그 시간대 목표수위 미설정)면 유지(0) — 데이터 결손으로
+			// 펌프를 조작하지 않는다.
+			// 진입 조건에 closestPointIndex(예측 유량·압력 매칭 결과)를 걸지 않는다.
+			// 걸어두면 예측이 없거나 유량범위 매칭 실패로 −1 일 때 수위조건이 통째로 스킵되고,
+			// 위(1030~1037)에서 선점된 예측 조합이 그대로 TB_CTR_PUMPYN_RST·스냅샷까지 흘러간다.
+			// 수위조건은 예측 유량·압력과 무관하게 판단해야 하므로 collectData 만 있으면 실행한다.
+			// (closestPointIndex 는 로그 predIdx 로만 남겨 예측 대비 비교에 쓴다)
+			if (("seoul".equals(wpp_code) || "dev".equals(wpp_code))
 					&& collectData != null && !collectData.isEmpty() && isSeoulLevelConditionEnabled()) {
 				double[] gnLv = stationLevelWithTarget(seoulGnTags, dateTime);
 				double[] baLv = stationLevelWithTarget(seoulBaTags, dateTime);
@@ -3438,18 +3458,22 @@ public class DrvnConfig {
 				int levelDelta;
 				String levelReason;
 				if (gnCnt == 0 || baCnt == 0) {
-					// 수위 또는 목표수위를 확인할 수 없음 → 공급 안정 우선으로 증량
-					levelDelta  = +1;
-					levelReason = "판정불가(gnCnt=" + gnCnt + ", baCnt=" + baCnt + ") → +1";
+					// 수위 또는 목표수위를 확인할 수 없음 → 판단 근거가 없으므로 현재 조합 유지.
+					// (종전에는 공급안정 우선으로 +1 이었으나, 데이터 결손만으로 펌프가 올라가는
+					//  부작용이 실제 발생했다: 2026-07-30 15:30 슬롯 tanks=0 → 엉뚱한 0.5대 증량.
+					//  수위조건은 '수위로 판단' 하는 정책이므로 못 읽으면 조작하지 않는 쪽이 맞다)
+					levelDelta  = 0;
+					levelReason = "판정불가(gnCnt=" + gnCnt + ", baCnt=" + baCnt + ") → 유지";
 				} else if (gnLv[0] <= gnLv[1] || baLv[0] <= baLv[1]) {
 					levelDelta  = +1;
 					levelReason = "하한 이하 (gn " + String.format("%.3f", gnLv[0]) + "<=" + String.format("%.3f", gnLv[1])
 							+ " ? " + (gnLv[0] <= gnLv[1]) + ", ba " + String.format("%.3f", baLv[0]) + "<=" + String.format("%.3f", baLv[1])
 							+ " ? " + (baLv[0] <= baLv[1]) + ") → +1";
-				} else if (gnLv[0] >= gnLv[2] && baLv[0] >= baLv[2]) {
+				} else if (gnLv[0] >= gnLv[2] || baLv[0] >= baLv[2]) {
 					levelDelta  = -1;
-					levelReason = "둘다 상한 이상 (gn " + String.format("%.3f", gnLv[0]) + ">=" + String.format("%.3f", gnLv[2])
-							+ ", ba " + String.format("%.3f", baLv[0]) + ">=" + String.format("%.3f", baLv[2]) + ") → −1";
+					levelReason = "상한 이상 (gn " + String.format("%.3f", gnLv[0]) + ">=" + String.format("%.3f", gnLv[2])
+							+ " ? " + (gnLv[0] >= gnLv[2]) + ", ba " + String.format("%.3f", baLv[0]) + ">=" + String.format("%.3f", baLv[2])
+							+ " ? " + (baLv[0] >= baLv[2]) + ") → −1";
 				} else {
 					levelDelta  = 0;
 					levelReason = "하한~상한 사이 → 유지";
@@ -3458,18 +3482,12 @@ public class DrvnConfig {
 				// 기준점은 '현재 실측 조합' 이다(유량·압력 예측으로 고른 closestPointIndex 를 쓰지 않는다).
 				// 유지(0)도 예측 조합이 아니라 실측 조합을 그대로 유지한다.
 				// → 유량·압력 예측은 조합 선택에 관여하지 않고, 수위(목표수위 대비)만 판단 근거가 된다.
-				// 실측 조합을 못 구하면(피드 결측·전 펌프 정지) 실측 기준을 세울 수 없어
-				// 부득이 예측 기준(closestPointIndex)으로 폴백하고 WARN 을 남긴다.
+				// 실측 조합을 못 구하면 resolveBaseCombIndex 가
+				// 직전 추천 조합(= 조합 변경 없음) → 최소 대수 순으로 폴백한다.
+				// 예측 조합으로는 어떤 경로로도 폴백하지 않는다.
 				Double actLevel = actualCombLevel(ts, pump_grp, typeMap, pumpLevelInfoMap);
-				int levelBaseIdx;
-				if (actLevel == null) {
-					levelBaseIdx = closestPointIndex;
-					logger.warn("[SEOUL/LEVEL] 실측 조합 확인 불가 → 예측 기준(baseIdx={}) 폴백. ts={} pump_grp={}",
-							closestPointIndex, ts, pump_grp);
-				} else {
-					levelBaseIdx = findCombIndexByLevel(collectData, actLevel);
-					if (levelBaseIdx < 0) levelBaseIdx = closestPointIndex;
-				}
+				int levelBaseIdx = resolveBaseCombIndex(collectData, ts, pump_grp, typeMap,
+						pumpLevelInfoMap, "[SEOUL/LEVEL]");
 
 				int levelIdx = shiftCombIndexByLevel(collectData, levelBaseIdx, levelDelta);
 				Object levelPc = collectData.get(levelIdx).get("pumpComb");
@@ -3621,15 +3639,8 @@ public class DrvnConfig {
 				// 기준점은 '현재 실측 조합' 이다(유량·압력 예측으로 고른 closestPointIndex 를 쓰지 않는다).
 				// 실측 조합을 못 구하면 예측 기준으로 폴백 + WARN.
 				Double seoulActLevel = actualCombLevel(ts, pump_grp, typeMap, pumpLevelInfoMap);
-				int seoulBaseIndex;
-				if (seoulActLevel == null) {
-					seoulBaseIndex = closestPointIndex;
-					logger.warn("[SEOUL] 실측 조합 확인 불가 → 예측 기준(baseIdx={}) 폴백. ts={} pump_grp={}",
-							closestPointIndex, ts, pump_grp);
-				} else {
-					seoulBaseIndex = findCombIndexByLevel(collectData, seoulActLevel);
-					if (seoulBaseIndex < 0) seoulBaseIndex = closestPointIndex;
-				}
+				int seoulBaseIndex = resolveBaseCombIndex(collectData, ts, pump_grp, typeMap,
+						pumpLevelInfoMap, "[SEOUL]");
 
 				int seoulAdjustedIndex;
 				if (forceFirstComb) {
@@ -6450,29 +6461,110 @@ public class DrvnConfig {
 	private Double actualCombLevel(String ts, int pump_grp, LinkedHashMap<String, Integer> typeMap,
 	                               HashMap<Integer, Double> pumpLevelInfoMap) {
 		if (pumpLevelInfoMap == null) return null;
-		HashMap<String, Object> cur;
+		// 실측 조합도 '실제 산출 시점'(ts − PRDCT_OFFSET_MIN) 기준으로 조회한다.
+		// ts(예측 대상 시각)로 조회하면 창이 미래로 밀려 PMB 실측이 없어 조합을 잃는다.
+		String actualRefTs = ts;
 		try {
-			cur = curPumpCheck(ts, pump_grp, typeMap, false);
+			actualRefTs = LocalDateTime
+					.parse(ts, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+					.minusMinutes(PRDCT_OFFSET_MIN)
+					.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+		} catch (Exception e) {
+			logger.warn("[SEOUL] ts 파싱 실패 → 원본 사용 ts={}: {}", ts, e.getMessage());
+		}
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("pump_grp", pump_grp);
+		param.put("targetDate", actualRefTs);
+		HashMap<String, String> row;
+		try {
+			row = drvnMapper.selectActualPumpUseByGrp(param);
 		} catch (Exception e) {
 			logger.warn("[SEOUL] 실측 조합 조회 실패 ts={} pump_grp={}: {}", ts, pump_grp, e.getMessage());
 			return null;
 		}
-		if (cur == null || !cur.containsKey("comb")) return null;
-		Object combRaw = cur.get("comb");
-		if (!(combRaw instanceof List)) return null;
-		@SuppressWarnings("unchecked")
-		List<String> comb = (List<String>) combRaw;
-		if (comb.isEmpty()) return null;   // 전 펌프 정지 또는 실측 피드 결측
+		if (row == null) return null;
+		String combStr = row.get("PUMP_USE_RST");
+		if (combStr == null || combStr.trim().isEmpty()) {
+			// PMB 실측은 있으나 ON 펌프가 없음(전 펌프 정지) 또는 창 내 실측 없음
+			logger.warn("[SEOUL] 실측 ON 펌프 없음 ts={} actualRef={} pump_grp={} rawTs={}",
+					ts, actualRefTs, pump_grp, row.get("ts"));
+			return null;
+		}
 
 		double level = 0.0;
-		for (String s : comb) {
+		for (String s : combStr.split(",")) {
+			String v = s.trim();
+			if (v.isEmpty()) continue;
 			try {
-				level += pumpLevelInfoMap.getOrDefault(Integer.parseInt(s.trim()), 0.0);
+				level += pumpLevelInfoMap.getOrDefault(Integer.parseInt(v), 0.0);
 			} catch (NumberFormatException ignore) {
 				// 숫자 아닌 항목은 무시
 			}
 		}
+		logger.debug("[SEOUL] 실측 조합 ts={} actualRef={} pump_grp={} rawTs={} comb={} level={}",
+				ts, actualRefTs, pump_grp, row.get("ts"), combStr, level);
 		return level;
+	}
+
+	/**
+	 * [Seoul/Dev] 단계 조정의 기준 조합 인덱스.
+	 *
+	 * 성능곡선(예측 유량·압력)으로 고른 closestPointIndex 는 **쓰지 않는다**.
+	 * 판단 근거는 수위이고, 증감의 기준점은 현재 실제 운전 상태여야 한다.
+	 *
+	 * 우선순위:
+	 *   1) 실측 조합 (selectActualPumpUseByGrp, PMB_TAG 공통 최신시점)
+	 *   2) 직전 추천 조합 (curPumpCheck pre=true → TB_CTR_PUMPYN_RST 직전 슬롯)
+	 *      = 실측을 못 읽었을 때 '조합 변경 없음' 으로 동작시키기 위한 폴백
+	 *   3) 둘 다 실패하면 최소 대수 조합 + WARN (예측 조합으로 튀지 않게 한다)
+	 *
+	 * @return 기준 인덱스. collectData 가 비면 −1
+	 */
+	private int resolveBaseCombIndex(List<HashMap<String, Object>> collectData, String ts, int pump_grp,
+	                                 LinkedHashMap<String, Integer> typeMap,
+	                                 HashMap<Integer, Double> pumpLevelInfoMap, String logTag) {
+		if (collectData == null || collectData.isEmpty()) return -1;
+
+		Double actLevel = actualCombLevel(ts, pump_grp, typeMap, pumpLevelInfoMap);
+		if (actLevel != null) {
+			int idx = findCombIndexByLevel(collectData, actLevel);
+			if (idx >= 0) return idx;
+		}
+
+		// 폴백 ①: 직전 추천 조합 → 이번 슬롯도 같은 조합을 유지하게 된다.
+		Double preLevel = null;
+		try {
+			HashMap<String, Object> pre = curPumpCheck(ts, pump_grp, typeMap, true);
+			if (pre != null && pre.get("comb") instanceof List) {
+				@SuppressWarnings("unchecked")
+				List<String> comb = (List<String>) pre.get("comb");
+				if (!comb.isEmpty() && pumpLevelInfoMap != null) {
+					double lv = 0.0;
+					for (String s : comb) {
+						try {
+							lv += pumpLevelInfoMap.getOrDefault(Integer.parseInt(s.trim()), 0.0);
+						} catch (NumberFormatException ignore) { /* skip */ }
+					}
+					preLevel = lv;
+				}
+			}
+		} catch (Exception e) {
+			logger.warn("{} 직전 추천 조합 조회 실패 ts={} pump_grp={}: {}", logTag, ts, pump_grp, e.getMessage());
+		}
+		if (preLevel != null) {
+			int idx = findCombIndexByLevel(collectData, preLevel);
+			if (idx >= 0) {
+				logger.warn("{} 실측 조합 확인 불가 → 직전 추천 조합 유지(level={}, baseIdx={}). ts={} pump_grp={}",
+						logTag, preLevel, idx, ts, pump_grp);
+				return idx;
+			}
+		}
+
+		// 폴백 ②: 최소 대수. 예측 조합(closestPointIndex)으로는 절대 폴백하지 않는다.
+		int minIdx = minLevelCombIndex(collectData);
+		logger.warn("{} 실측·직전추천 모두 확인 불가 → 최소대수 조합(baseIdx={}) 사용. ts={} pump_grp={}",
+				logTag, minIdx, ts, pump_grp);
+		return (minIdx >= 0) ? minIdx : 0;
 	}
 
 	/**
@@ -6578,15 +6670,50 @@ public class DrvnConfig {
 			byTag.computeIfAbsent(tag, k -> new HashMap<>()).put(hours, r);
 		}
 
+		// 목표수위는 '예측 대상 시각(dateTime)' 의 시간대 값을 쓴다 — 그 시각에 지켜야 할 목표이므로.
 		int hours = dateTime.getHour();
-		String nowDateTime = dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
-		HashMap<String, Object> param = new HashMap<>();
-		param.put("nowDateTime", nowDateTime);
+
+		// 반면 현재 수위는 '실제 산출 시점' 기준으로 읽어야 한다 → actualRefTime(dateTime − 10분).
+		//   dateTime 은 예측 대상 시각(PRDCT_TIME = RGSTR_TIME + 10분)이라 산출 시점보다 10분 미래다.
+		//   그대로 실측을 조회하면 창이 [now, now+10분] 이 되어 과거가 하나도 안 들어가고,
+		//   그 순간 TB_RAWDATA 에 해당 분 데이터가 아직 없으면 전 태그 null → tanks=0 →
+		//   '판정 불가' 로 빠진다. 실제 사례: 2026-07-30 15:20 배치에서 ts=15:20 슬롯은 tanks=4 로
+		//   정상 판정(유지)이었는데 ts=15:30 슬롯만 tanks=0 이 되어 엉뚱한 증량이 나갔다.
+		LocalDateTime actualRefTime = dateTime.minusMinutes(PRDCT_OFFSET_MIN);
+		DateTimeFormatter tsFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+		HashMap<String, Object> rawParam = new HashMap<>();
+		rawParam.put("tags", Arrays.asList(tags));
+		rawParam.put("startDateTime", actualRefTime.format(tsFmt));
+		rawParam.put("endDateTime", actualRefTime.format(tsFmt));
+		List<HashMap<String, Object>> rawRows;
+		try {
+			rawRows = drvnMapper.selectRawDataRangeForTags(rawParam);
+		} catch (Exception e) {
+			logger.warn("[SEOUL] 실측 수위 조회 실패 ts={} actualRef={}: {}", dateTime, actualRefTime, e.getMessage());
+			rawRows = Collections.emptyList();
+		}
+		// 태그(대문자) → 최신 실측값. 쿼리가 TAGNAME, TS DESC 정렬이라 첫 행이 최신.
+		Map<String, Double> latestByTag = new HashMap<>();
+		if (rawRows != null) {
+			for (HashMap<String, Object> r : rawRows) {
+				if (r == null || r.get("tagname") == null || r.get("value") == null) continue;
+				String tn = String.valueOf(r.get("tagname")).toUpperCase();
+				if (latestByTag.containsKey(tn)) continue;   // 이미 최신값 확보
+				try {
+					latestByTag.put(tn, ((Number) r.get("value")).doubleValue());
+				} catch (ClassCastException ignore) {
+					try {
+						latestByTag.put(tn, Double.parseDouble(String.valueOf(r.get("value"))));
+					} catch (NumberFormatException ignore2) { /* skip */ }
+				}
+			}
+		}
 
 		double curSum = 0.0, lowSum = 0.0, upSum = 0.0;
 		int cnt = 0;
 		for (String tag : tags) {
-			Map<Integer, HashMap<String, Object>> hm = byTag.get(tag.toUpperCase());
+			String key = tag.toUpperCase();
+			Map<Integer, HashMap<String, Object>> hm = byTag.get(key);
 			if (hm == null) continue;
 			HashMap<String, Object> row = hm.get(hours);
 			if (row == null) continue;
@@ -6594,13 +6721,7 @@ public class DrvnConfig {
 			Double upper = pickTargetVal(row, true);
 			if (lower == null || upper == null) continue;   // 목표 미설정 태그는 제외
 
-			Double cur = null;
-			param.put("tagname", tag);
-			try {
-				cur = drvnMapper.selectRawData(param);
-			} catch (Exception e) {
-				// 단일 태그 조회 실패는 무시하고 계속
-			}
+			Double cur = latestByTag.get(key);
 			if (cur == null || cur < seoulActiveThreshold) continue;   // 비활성 수조 제외
 
 			curSum += cur;
@@ -7366,7 +7487,7 @@ public class DrvnConfig {
 	 *   실측=0 &amp; 예측=0 → {0,100} / 실측=0 &amp; 예측≠0 → {null,null}(정의불가) / 입력 결측 → {null,null}.
 	 * @return Double[2] {오차율, 정확도} (소수 2자리 반올림)
 	 */
-	private static Double[] numericErrAcc(Double pred, Double actl) {
+	private static Double[] (Double pred, Double actl) {
 		if (pred == null || actl == null) return new Double[]{null, null};
 		if (actl == 0.0) {
 			return (pred == 0.0) ? new Double[]{0.0, 100.0} : new Double[]{null, null};

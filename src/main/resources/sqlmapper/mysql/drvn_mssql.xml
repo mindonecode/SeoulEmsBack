@@ -1707,6 +1707,44 @@
 		ORDER BY rdh.TS
 	</select>
 	
+	<!--
+	  [Seoul/Dev] 실측 가동 펌프 조합 (PMB_TAG 기준 '공통 최신 단일시점').
+
+	  getCurUsePumpString 을 쓰지 않는 이유:
+	    그 쿼리의 서브쿼리가 `select max(TS) from TB_RAWDATA where TS <= targetDate ...` 로
+	    태그 필터 없이 TB_RAWDATA **전체**의 최신 TS 를 잡는다. 그 시각에 PMB_TAG 행이 없으면
+	    (다른 센서 태그가 더 최신 TS 로 끼어든 경우) 결과가 비어 실측 조합을 통째로 잃는다.
+	    → 수위조건/부하조건의 단계 조정 기준점(실측 조합)이 사라져 예측 조합으로 폴백되고,
+	      판정이 '유지' 여도 예측 조합이 추천되어 실측 대비 증/감량으로 표시된다.
+	    pumpDrvnMinute 의 raw 서브쿼리가 같은 문제를 이미 이 방식으로 해결해 두었다.
+
+	  MAX(TS) 를 PMB_TAG 로 JOIN 한 집합 안에서 구하므로 모든 펌프가 같은 시각 값을 쓴다
+	  (태그별 MAX 는 펌프마다 다른 시각이 섞여 실재하지 않은 조합이 될 수 있어 금지).
+	  ts 를 함께 반환해 호출부가 실측 신선도를 로그로 남길 수 있게 한다.
+
+	  targetDate 는 '실제 산출 시점' 을 넘겨야 한다(호출부가 예측 대상 시각 − 10분으로 변환).
+	  예측 대상 시각을 그대로 넘기면 창이 미래로 밀려 PMB 실측이 없어 결과가 빈다.
+	-->
+	<select id="selectActualPumpUseByGrp" parameterType="hashmap" resultType="hashmap">
+		SELECT
+			DATE_FORMAT(MAX(tr.TS), '%Y-%m-%d %H:%i:%s') AS ts,
+			GROUP_CONCAT(
+				CASE WHEN tr.VALUE = 1 THEN tc.PUMP_IDX END
+				ORDER BY tc.PUMP_IDX ASC SEPARATOR ','
+			) AS PUMP_USE_RST
+		FROM TB_RAWDATA tr
+			JOIN TB_CTR_PRF_PUMPMST_INF tc ON tr.TAGNAME = tc.PMB_TAG
+		WHERE tc.PUMP_GRP = #{pump_grp}
+			AND tr.TS = (
+				SELECT MAX(r2.TS)
+				FROM TB_RAWDATA r2
+					JOIN TB_CTR_PRF_PUMPMST_INF c2 ON r2.TAGNAME = c2.PMB_TAG
+				WHERE c2.PUMP_GRP = #{pump_grp}
+					AND r2.TS &lt;= #{targetDate}
+					AND r2.TS &gt; DATE_SUB(#{targetDate}, interval 10 minute)
+			)
+	</select>
+
 	<select id="getCurUsePumpString" parameterType="hashmap" resultType="hashmap">
 		SELECT
 			GROUP_CONCAT(

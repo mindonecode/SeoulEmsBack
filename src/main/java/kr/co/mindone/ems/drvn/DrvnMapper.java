@@ -281,6 +281,13 @@ public interface DrvnMapper {
 	HashMap<String, String> getCurUsePumpString(HashMap<String, Object> pumpUseParam);
 
 	/**
+	 * [Seoul/Dev] 실측 가동 펌프 조합 (PMB_TAG 기준 공통 최신 단일시점).
+	 * getCurUsePumpString 의 '전체 max(TS)' 결함을 피하기 위한 대체 쿼리 — XML 주석 참고.
+	 * @return { ts, PUMP_USE_RST("3,5,6,9") }. 해당 창에 PMB 실측이 없으면 값이 null
+	 */
+	HashMap<String, String> selectActualPumpUseByGrp(HashMap<String, Object> param);
+
+	/**
 	 * 실제 측정된 펌프 조합 데이터를 조회하는 메서드
 	 * @param nowMap 조회 조건을 담은 파라미터
 	 * @return 실제 측정된 펌프 조합 데이터를 반환
