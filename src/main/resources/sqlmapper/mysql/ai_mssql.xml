@@ -3217,7 +3217,27 @@
 						AND t1.RGSTR_TIME = t2.RGSTR_TIME
 				WHERE t1.PUMP_GRP = #{pump_grp}
 					AND t1.RGSTR_TIME = (
-						select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST where RGSTR_TIME &lt;= #{nowDate} and RGSTR_TIME &gt; DATE_SUB(#{nowDate}, interval 15 minute)
+						<!--
+						  슬롯 선택. TB_CTR_PUMPYN_RST.RGSTR_TIME 은 '예측 대상 시각' 이므로
+						  현재보다 앞선(미래) 슬롯이 이미 적재되어 있다.
+
+						  latestSlot 지정 시(조합 변경 알림 전용): 상한(&lt;= nowDate) 을 제거해
+						  전체 최신 슬롯을 고른다. 실제 발사 경로(selectLatestPumpYnByGrp,
+						  pump_mssql.xml:1081 — RGSTR_TIME DESC 최신)와 같은 슬롯이어야
+						  운전원이 승인한 조합과 발사되는 조합이 일치한다.
+						  (상한이 있으면 알림은 직전 슬롯, 발사는 최신 슬롯을 보게 되어 어긋난다)
+
+						  미지정 시(이력 적재 SchedulerService / 백필 AiController): 기존 동작 유지 —
+						  그 시각까지 확정된 슬롯만 본다.
+
+						  15분 하한은 양쪽 공통으로 유지 — 예측 적재가 끊기면 낡은 조합으로
+						  알림·판정이 나가지 않게 하는 안전장치다.
+						-->
+						select max(RGSTR_TIME) from TB_CTR_PUMPYN_RST
+						where RGSTR_TIME &gt; DATE_SUB(#{nowDate}, interval 15 minute)
+						<if test="latestSlot == null">
+							and RGSTR_TIME &lt;= #{nowDate}
+						</if>
 					)
 			) A
 			GROUP BY A.RGSTR_TIME

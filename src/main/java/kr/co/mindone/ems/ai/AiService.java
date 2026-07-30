@@ -2921,6 +2921,11 @@ public class AiService {
     /**
      * 특정 AI 모드(AI_RECOMMEND=1 / AI_CONTROL=0) 의 PUMP_GRP 들에 대해
      * pumpDrvnMinute 결과에서 변경된 조합만 items 에 누적.
+     *
+     * latestSlot 을 지정해 실제 발사 경로(PumpService.devInsertHmiTagFromLatestPumpYn →
+     * selectLatestPumpYnByGrp)와 동일한 최신 슬롯을 조회한다. 이 플래그가 없으면
+     * TB_CTR_PUMPYN_RST.RGSTR_TIME(예측 대상 시각) 상한 때문에 알림은 직전 슬롯,
+     * 발사는 최신 슬롯을 보게 되어 운전원이 승인한 조합과 발사 조합이 달라진다.
      */
     private void collectAlarmItems(List<HashMap<String, Object>> items, int aiMode, String modeLabel) {
         List<String> pumpGrpList = pumpService.selectAiPumpGrpListStr(aiMode);
@@ -2929,6 +2934,7 @@ public class AiService {
             HashMap<String, String> drvnParam = new HashMap<>();
             drvnParam.put("nowDate", nowDate);
             drvnParam.put("pump_grp", pumpGrp);
+            drvnParam.put("latestSlot", "1");   // 발사 슬롯과 동일 기준으로 조회
 
             HashMap<String, String> pumpDrvnMap = aiMapper.pumpDrvnMinute(drvnParam);
             if (pumpDrvnMap == null || pumpDrvnMap.isEmpty())
