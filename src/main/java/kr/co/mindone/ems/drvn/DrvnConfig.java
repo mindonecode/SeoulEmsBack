@@ -103,17 +103,40 @@ public class DrvnConfig {
 	private String seoulBaUpperTagsRaw;     // 북악 유출(1·2지) = 상한 수위 태그 CSV. L 목표수위 도달 판정용
 	@Value("${seoul.step.active.threshold:3.0}")
 	private double seoulActiveThreshold;    // 활성(가동중) 수조 임계 수위 (m)
+	/**
+	 * [Seoul/Dev · 경부하 L] 목표수위 도달 판정 데드라인 (시).
+	 *
+	 * 부하시간대 테이블(TB_RT_RATE_INF)상 경부하 종료는 08:00 이지만, 그 시각을 그대로 쓰면
+	 * 목표수위 확보가 빠듯해지므로 1시간 앞선 07:00 에 미리 확보하도록 정한 **정책값**이다.
+	 * 따라서 중간부하 M 의 최대부하 종료 시각(resolvePeakEndTime, 테이블에서 동적 산출)과 달리
+	 * 이 값은 테이블에서 유도하지 않는다. 화면 라벨 "07시 기준 목표수위 충족여부" 와 짝을 이룬다.
+	 */
+	private static final int SEOUL_LOW_LOAD_DEADLINE_HOUR = 7;
+
 	// 목표/임계값은 런타임에 TB_CONFIG(DB) 우선. 아래 @Value 는 DB 미적용/조회실패 시 폴백 기본값.
 	@Value("${seoul.step.gn.target:6.0}")
-	private double seoulGnTarget;           // 공릉 07:00 목표 수위 (m) - 폴백
+	private double seoulGnTarget;           // 공릉 07시 목표 수위 (m) - 폴백
 	@Value("${seoul.step.ba.target:7.6}")
-	private double seoulBaTarget;           // 북악 07:00 목표 수위 (m) - 폴백
+	private double seoulBaTarget;           // 북악 07시 목표 수위 (m) - 폴백
 	@Value("${seoul.step.gn.mh.threshold:4.0}")
 	private double seoulGnMhThreshold;      // 공릉 중간/최대부하 안전선 임계 (m) - 폴백
 	@Value("${seoul.step.ba.mh.threshold:4.0}")
 	private double seoulBaMhThreshold;      // 북악 중간/최대부하 안전선 임계 (m) - 폴백
 	@Value("${seoul.step.load-adjust.enabled:true}")
 	private boolean seoulLoadAdjustEnabled; // 부하(L/M/H) 기반 ±1단계 조정 on/off. false 시 유클리드 거리 결과(closestPointIndex) 그대로 사용
+	/**
+	 * [Seoul] 수위조건 판정 on/off. 부하(L/M/H) 조정을 대체하는 신규 정책.
+	 *
+	 * TB_TARGET_LEVEL 의 배수지별·시간대별 목표수위 상/하한과 현재 수위를 직접 비교한다:
+	 *   공릉 or 북악 현재수위 ≤ 하한          → +1단계
+	 *   공릉 and 북악 현재수위 ≥ 상한         → −1단계
+	 *   그 외(하한~상한 사이)                 → 유지(0)
+	 *
+	 * true 이면 부하조정(seoul.step.load-adjust.enabled)보다 우선한다.
+	 * TB_CONFIG(DB) 로 무중단 토글 가능 — isSeoulLevelConditionEnabled() 사용.
+	 */
+	@Value("${seoul.level-condition.enabled:false}")
+	private boolean seoulLevelConditionEnabled;
 
 	@Value("${pump.predict.mode:euclidean}")
 	private String pumpPredictMode; // 조합 선택 방식: "euclidean"(유클리드 최근접) | "flowrange"(유량 범위 매칭, 미매칭/중복 시 euclidean 폴백)
@@ -298,10 +321,15 @@ public class DrvnConfig {
 		return seoulActiveThreshold;
 	}
 
+	/** 수위조건 판정 사용 여부. TB_CONFIG(DB) 우선 → 재기동 없이 토글 가능. */
+	public boolean isSeoulLevelConditionEnabled() {
+		return appConfigStore.getBoolean("seoul.level-condition.enabled", seoulLevelConditionEnabled);
+	}
+
 	// === 목표/임계값: TB_CONFIG(DB) 우선, 없으면 @Value 폴백. AppConfigStore 가 60초마다 재로딩 → 무중단 반영 ===
-	/** 공릉 07:00 목표 수위 (m) - 경부하(L) 도달 판정. */
+	/** 공릉 07시 목표 수위 (m) - 경부하(L) 도달 판정. */
 	public double getSeoulGnTarget()      { return appConfigStore.getDouble("seoul.step.gn.target",       seoulGnTarget); }
-	/** 북악 07:00 목표 수위 (m) - 경부하(L) 도달 판정(유출/상한 평균 기준). */
+	/** 북악 경부하 종료시점 목표 수위 (m) - 경부하(L) 도달 판정(유출/상한 평균 기준). */
 	public double getSeoulBaTarget()      { return appConfigStore.getDouble("seoul.step.ba.target",       seoulBaTarget); }
 	/** 공릉 중간/최대부하 안전선 임계 (m). */
 	public double getSeoulGnMhThreshold() { return appConfigStore.getDouble("seoul.step.gn.mh.threshold", seoulGnMhThreshold); }
@@ -3335,7 +3363,12 @@ public class DrvnConfig {
 
 			// === [Seoul/Dev] 부하 + 수위 기반 단계 조정 =====================================
 			// 정책 (강북정수장 부하시간대.png + 공릉/북악 수위 정책, properties 키 seoul.step.*):
-			//   • "#1" = collectData index 0  (최소대수 조합),  "#N" = sizeMax
+			//   • "#1" = 최소대수 조합,  "#N" = 최대대수 조합
+			//   • ★ 단계 조정의 기준점은 '현재 실측 조합' 이다(유량·압력 예측으로 고른 closestPointIndex 아님).
+			//     실측 조합의 가동 대수(actualCombLevel) → 같은 대수의 조합 인덱스(findCombIndexByLevel)
+			//     → 한 단계 증/감(shiftCombIndexByLevel). 유지(0)는 실측 조합 그대로.
+			//     즉 유량·압력 예측은 조합 선택에 관여하지 않고, 수위만 판단 근거가 된다.
+			//     실측 조합을 못 구하면(피드 결측·전 펌프 정지) 부득이 closestPointIndex 로 폴백 + WARN.
 			//   • 활성 수조 = 수위 ≥ seoulActiveThreshold (기본 3.0m). 활성 수조 평균이 "현재 수위".
 			//
 			//   [경부하 L]  기존 신림 정수장(DrvnConfig:3683~3807) 방식 차용:
@@ -3353,25 +3386,107 @@ public class DrvnConfig {
 			//     1) 최근 5분 변화량: delta = activeAvg(now) − activeAvg(now−5min)  (상승+, 하락−, 변화없음 0)
 			//        delta == 0 또는 활성 평균 0이면 5분씩 거슬러 최대 60분까지 탐색
 			//     2) 시간당 수위변화율 ratePerHour = delta / stepMin × 60  (m/h, 사진의 "×12"는 stepMin=5 케이스)
-			//     3) 22시 예상수위 = curLevel + ratePerHour × remainHours  (remainHours = (오늘 22:00 − now), now≥22:00이면 0)
-			//     4) 두 곳 모두 22시 예상수위 ≥ 4m 유지 가능 → −1단계
+			//     3) 종료시점 예상수위 = curLevel + ratePerHour × remainHours
+			//        remainHours = max(0, 최대부하 종료 시각 − now).
+			//        종료 시각은 resolvePeakEndTime() 이 TB_RT_RATE_INF(월별 시간대 등급) +
+			//        주말/공휴일 보정(일·공휴일→전부 L, 토→H 강등)으로 산출한다. 22:00 하드코딩 아님.
+			//        (7월 평일이면 H=15~20시 → 종료 21:00, 7월 토요일이면 H 없음 → 마지막 M(21시)+1 = 22:00)
+			//     4) 판정용 값 = 구간 예상 최저수위 = min(현재수위, 종료시점 예상수위).
+			//        "종료 시점'까지' 유지 가능한가" 이므로 한 점이 아니라 구간 최저로 본다.
+			//        상승 추세면 최저는 현재 수위다(종료시점 값만 보면 현재 미달을 놓친다).
+			//     5) 두 곳 모두 구간 최저 ≥ 4m 유지 가능 → −1단계
 			//        한 곳이라도 유지 불가(또는 변화량 탐색 60분 실패) → +1단계
 			//
 			//   [최대부하 H]
-			//     - 공릉 & 북악 모두 수위 > 4m → #1 (최소대수 조합) 고정
+			//     - 공릉 & 북악 모두 수위 > 4m → −1단계
 			//     - 하나라도 수위 ≤ 4m         → +1단계
+			//     ※ 정책 도식에는 "#1(최소대수) 고정" 으로 그려져 있으나, 운영 판단으로 −1단계를
+			//       채택했다(급격한 대수 점프 방지). 도식과 다른 것은 의도된 것이므로 되돌리지 말 것.
+			//       단, 활성 0개 fallback 의 H 는 아래처럼 #1 고정을 유지한다.
 			//
 			//   [활성 0개 fallback]  공릉 or 북악 활성 수조가 0개 → 수위 기반 비교 불가 →
 			//     시간대 기반 단순 로직으로 fallback:
-			//       L → +1단계,  M → −1단계,  H → #1 (최소대수 조합) 고정
+			//       L → +1단계,  M → +1단계,  H → #1 (최소대수 조합) 고정
+			//     M 이 +1 인 이유: 수위를 확인할 수 없으면 "버팀 불가" 로 보수적 판정(정책 도식의
+			//     '활성 평균이 비정상이면 → 버팀 불가' 예외와 동일 방향). 판정 API(buildControlJudgment)
+			//     도 같은 상황에서 sustain=false(✗) 를 반환하므로 화면 표시와 방향이 일치한다.
 			//
 			// 공통:
-			//   - 단계 범위 초과 시 [0, size−1] 클램프 (#1 또는 #N 끝단 유지)
+			//   - 단계 이동은 인덱스 산술이 아니라 대수(pumpLevel) 기준 탐색 (shiftCombIndexByLevel 주석 참고).
+			//     더 큰/작은 대수가 없으면 끝단 유지(#1 또는 #N).
 			//   - 30분 타이머/수동 우선은 기존 TB_MNL_CHN_LOG throttle 로직이 별도로 보장
 			//   - 토/일/공휴일 보정: 일요일·공휴일 → L 강제, 토요일 H → M
 			//   - Seoul 인버터 미보유 → freqMap = null
 			//   - seoul.step.load-adjust.enabled=false 일 때는 부하 분기 전체 스킵 → 유클리드 거리 결과만 사용
+			//
+			// === [Seoul/Dev] 수위조건 (seoul.level-condition.enabled=true, 부하조정보다 우선) =========
+			// 부하(L/M/H) 분기·추세 예측·4m 고정 안전선을 모두 대체하는 신규 정책.
+			// TB_TARGET_LEVEL 의 배수지별·시간대별 목표수위 상/하한(USER 설정값 우선)과 현재 수위를 직접 비교:
+			//   ① 공릉 현재수위 ≤ 공릉 하한  OR  북악 현재수위 ≤ 북악 하한   → +1단계
+			//   ② 공릉 현재수위 ≥ 공릉 상한  AND 북악 현재수위 ≥ 북악 상한   → −1단계
+			//   ③ 그 외(하한~상한 사이)                                    → 유지(0)
+			// 비대칭(증량 OR / 감량 AND)은 공급 안정 우선 — 기존 L/M 분기와 같은 기조.
+			// 하한~상한 사이가 데드밴드로 작동해 경계 채터링을 억제한다(기존 로직에는 유지(0)가 없었다).
+			// 판정 불가(활성 수조 0개 또는 그 시간대 목표수위 미설정)면 보수적으로 +1단계.
 			if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
+					&& collectData != null && !collectData.isEmpty() && isSeoulLevelConditionEnabled()) {
+				double[] gnLv = stationLevelWithTarget(seoulGnTags, dateTime);
+				double[] baLv = stationLevelWithTarget(seoulBaTags, dateTime);
+				int gnCnt = (int) gnLv[3];
+				int baCnt = (int) baLv[3];
+
+				int levelDelta;
+				String levelReason;
+				if (gnCnt == 0 || baCnt == 0) {
+					// 수위 또는 목표수위를 확인할 수 없음 → 공급 안정 우선으로 증량
+					levelDelta  = +1;
+					levelReason = "판정불가(gnCnt=" + gnCnt + ", baCnt=" + baCnt + ") → +1";
+				} else if (gnLv[0] <= gnLv[1] || baLv[0] <= baLv[1]) {
+					levelDelta  = +1;
+					levelReason = "하한 이하 (gn " + String.format("%.3f", gnLv[0]) + "<=" + String.format("%.3f", gnLv[1])
+							+ " ? " + (gnLv[0] <= gnLv[1]) + ", ba " + String.format("%.3f", baLv[0]) + "<=" + String.format("%.3f", baLv[1])
+							+ " ? " + (baLv[0] <= baLv[1]) + ") → +1";
+				} else if (gnLv[0] >= gnLv[2] && baLv[0] >= baLv[2]) {
+					levelDelta  = -1;
+					levelReason = "둘다 상한 이상 (gn " + String.format("%.3f", gnLv[0]) + ">=" + String.format("%.3f", gnLv[2])
+							+ ", ba " + String.format("%.3f", baLv[0]) + ">=" + String.format("%.3f", baLv[2]) + ") → −1";
+				} else {
+					levelDelta  = 0;
+					levelReason = "하한~상한 사이 → 유지";
+				}
+
+				// 기준점은 '현재 실측 조합' 이다(유량·압력 예측으로 고른 closestPointIndex 를 쓰지 않는다).
+				// 유지(0)도 예측 조합이 아니라 실측 조합을 그대로 유지한다.
+				// → 유량·압력 예측은 조합 선택에 관여하지 않고, 수위(목표수위 대비)만 판단 근거가 된다.
+				// 실측 조합을 못 구하면(피드 결측·전 펌프 정지) 실측 기준을 세울 수 없어
+				// 부득이 예측 기준(closestPointIndex)으로 폴백하고 WARN 을 남긴다.
+				Double actLevel = actualCombLevel(ts, pump_grp, typeMap, pumpLevelInfoMap);
+				int levelBaseIdx;
+				if (actLevel == null) {
+					levelBaseIdx = closestPointIndex;
+					logger.warn("[SEOUL/LEVEL] 실측 조합 확인 불가 → 예측 기준(baseIdx={}) 폴백. ts={} pump_grp={}",
+							closestPointIndex, ts, pump_grp);
+				} else {
+					levelBaseIdx = findCombIndexByLevel(collectData, actLevel);
+					if (levelBaseIdx < 0) levelBaseIdx = closestPointIndex;
+				}
+
+				int levelIdx = shiftCombIndexByLevel(collectData, levelBaseIdx, levelDelta);
+				Object levelPc = collectData.get(levelIdx).get("pumpComb");
+				if (levelPc instanceof List) {
+					@SuppressWarnings("unchecked")
+					List<String> levelPcList = (List<String>) levelPc;
+					returnComb = new ArrayList<>(levelPcList);
+				}
+				freqMap = null;  // Seoul 인버터 없음
+
+				logger.info("[SEOUL/LEVEL] ts={} pump_grp={} hour={} gn(cur={}, low={}, up={}, tanks={}) ba(cur={}, low={}, up={}, tanks={}) reason='{}' delta={} actLevel={} baseIdx={}(실측) adjustedIdx={} predIdx={} sizeMax={} returnComb={}",
+						ts, pump_grp, dateTime.getHour(),
+						String.format("%.3f", gnLv[0]), String.format("%.3f", gnLv[1]), String.format("%.3f", gnLv[2]), gnCnt,
+						String.format("%.3f", baLv[0]), String.format("%.3f", baLv[1]), String.format("%.3f", baLv[2]), baCnt,
+						levelReason, levelDelta, actLevel, levelBaseIdx, levelIdx, closestPointIndex,
+						collectData.size() - 1, returnComb);
+			} else if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && closestPointIndex >= 0
 					&& collectData != null && !collectData.isEmpty() && !seoulLoadAdjustEnabled) {
 				// === [Seoul/Dev] 부하 조정 OFF: 유클리드 거리(closestPointIndex)의 조합만 그대로 사용 ===
 				Object seoulPcRaw = collectData.get(closestPointIndex).get("pumpComb");
@@ -3414,16 +3529,23 @@ public class DrvnConfig {
 						seoulDelta = +1;
 						adjReason  = "fallback(활성0): L→+1";
 					} else if ("M".equals(seoulLoad)) {
-						seoulDelta = -1;
-						adjReason  = "fallback(활성0): M→−1";
+						// 수위를 확인할 수 없으면 "버팀 불가" 로 보수 판정 → 증량.
+						// (정책 도식의 '활성 평균이 비정상이면 → 버팀 불가' 예외와 동일 방향.
+						//  판정 API 도 이 상황에서 sustain=false(✗) 를 내므로 화면과 방향이 일치한다)
+						seoulDelta = +1;
+						adjReason  = "fallback(활성0): M→+1";
 					} else {  // H
 						forceFirstComb = true;
 						adjReason      = "fallback(활성0): H→#1";
 					}
 				} else if ("L".equals(seoulLoad)) {
 					// 신림 정수장(DrvnConfig:3683~3807) 방식: 5분 변화량 × 12 → 도달 절대시각 vs 데드라인.
+					// 데드라인은 07:00 정책값이다. 부하시간대 테이블상 경부하 종료는 08:00 이지만,
+					// 그대로 쓰면 여유가 없어 목표수위 확보가 빠듯해지므로 1시간 앞선 07:00 에 미리
+					// 확보하도록 정한 값이다. 테이블에서 유도하지 않는다(중간부하 M 의 최대부하 종료
+					// 시각과 달리 이쪽은 의도된 고정 정책값).
 					int nowScore     = dateTime.getHour() * 60 + dateTime.getMinute();
-					final int deadline7 = 7 * 60;                                      // 07:00 = 420분
+					final int deadline7 = SEOUL_LOW_LOAD_DEADLINE_HOUR * 60;            // 07:00 = 420분
 					int optMinute    = (nowScore < deadline7) ? deadline7 : deadline7 + 24 * 60;
 
 					double gnTarget = getSeoulGnTarget();
@@ -3441,43 +3563,49 @@ public class DrvnConfig {
 						seoulDelta = -1;
 						adjReason  = "L: 둘다 도달가능 → −1";
 					}
-					logger.info("[SEOUL/L] ts={} pump_grp={} nowScore={} optMinute={} gn(target={}, reachable={}) ba(target={}, reachable={}, 유출/상한)",
-							ts, pump_grp, nowScore, optMinute,
+					logger.info("[SEOUL/L] ts={} pump_grp={} nowScore={} deadline={}시 optMinute={} gn(target={}, reachable={}) ba(target={}, reachable={}, 유출/상한)",
+							ts, pump_grp, nowScore, SEOUL_LOW_LOAD_DEADLINE_HOUR, optMinute,
 							gnTarget, gnReachable, baTarget, baReachable);
 
 				} else if ("M".equals(seoulLoad)) {
-					// 22시까지 두 곳 모두 각 안전선(공릉/북악 분리) 이상 유지 가능한가? (추세 기반 예측)
+					// 최대부하 종료 시각까지 두 곳 모두 각 안전선(공릉/북악 분리) 이상 유지 가능한가? (추세 기반 예측)
+					// 종료 시각은 resolvePeakEndTime() 이 부하시간대 테이블 + 주말/공휴일 보정으로 산출.
 					// 북악은 유입/하한(seoulBaTags) 기준 — 상단 baLevel 그대로 사용.
 					double gnTh = getSeoulGnMhThreshold();
 					double baTh = getSeoulBaMhThreshold();
-					double[] gnSustain = predict22LevelSeoul(seoulGnTags, gnLevel, dateTime);
-					double[] baSustain = predict22LevelSeoul(seoulBaTags, baLevel, dateTime);
-					double gnPred = gnSustain[0];  // 22시 예상수위 (NaN = 변화량 탐색 실패)
-					double baPred = baSustain[0];
+					double[] gnSustain = predictPeakEndLevelSeoul(seoulGnTags, gnLevel, dateTime);
+					double[] baSustain = predictPeakEndLevelSeoul(seoulBaTags, baLevel, dateTime);
+					// [0] = 구간 예상 최저수위(판정용) = min(현재수위, 종료시점 예상수위), [3] = 종료시점 값(참고)
+					double gnMin  = gnSustain[0];  // NaN = 변화량 탐색 실패
+					double baMin  = baSustain[0];
 					double gnRate = gnSustain[1];
 					double baRate = baSustain[1];
 					int    gnStep = (int) gnSustain[2];
 					int    baStep = (int) baSustain[2];
-					boolean gnOk = !Double.isNaN(gnPred) && gnPred >= gnTh;
-					boolean baOk = !Double.isNaN(baPred) && baPred >= baTh;
+					double gnEnd  = gnSustain[3];
+					double baEnd  = baSustain[3];
+					boolean gnOk = !Double.isNaN(gnMin) && gnMin >= gnTh;
+					boolean baOk = !Double.isNaN(baMin) && baMin >= baTh;
 
 					if (gnOk && baOk) {
 						seoulDelta = -1;
-						adjReason  = "M: 둘다 22시예상≥안전선"
-								+ " (gn=" + String.format("%.3f", gnPred) + "/th" + gnTh
-								+ ", ba=" + String.format("%.3f", baPred) + "/th" + baTh + ")";
+						adjReason  = "M: 둘다 구간최저≥안전선"
+								+ " (gn=" + String.format("%.3f", gnMin) + "/th" + gnTh
+								+ ", ba=" + String.format("%.3f", baMin) + "/th" + baTh + ")";
 					} else {
 						seoulDelta = +1;
-						adjReason  = "M: 한곳이상 22시예상<안전선 또는 탐색실패"
-								+ " (gn=" + (Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred)) + "/th" + gnTh
-								+ ", ba=" + (Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)) + "/th" + baTh + ")";
+						adjReason  = "M: 한곳이상 구간최저<안전선 또는 탐색실패"
+								+ " (gn=" + (Double.isNaN(gnMin) ? "NaN" : String.format("%.3f", gnMin)) + "/th" + gnTh
+								+ ", ba=" + (Double.isNaN(baMin) ? "NaN" : String.format("%.3f", baMin)) + "/th" + baTh + ")";
 					}
-					logger.info("[SEOUL/M] ts={} pump_grp={} gn(cur={}, rate={}m/h, step={}m, pred22={}, th={}m) ba(cur={}, rate={}m/h, step={}m, pred22={}, th={}m)",
-							ts, pump_grp,
+					logger.info("[SEOUL/M] ts={} pump_grp={} peakEnd={} gn(cur={}, rate={}m/h, step={}m, predEnd={}, min={}, th={}m) ba(cur={}, rate={}m/h, step={}m, predEnd={}, min={}, th={}m)",
+							ts, pump_grp, resolvePeakEndTime(dateTime),
 							String.format("%.3f", gnLevel), String.format("%.4f", gnRate), gnStep,
-							(Double.isNaN(gnPred) ? "NaN" : String.format("%.3f", gnPred)), gnTh,
+							(Double.isNaN(gnEnd) ? "NaN" : String.format("%.3f", gnEnd)),
+							(Double.isNaN(gnMin) ? "NaN" : String.format("%.3f", gnMin)), gnTh,
 							String.format("%.3f", baLevel), String.format("%.4f", baRate), baStep,
-							(Double.isNaN(baPred) ? "NaN" : String.format("%.3f", baPred)), baTh);
+							(Double.isNaN(baEnd) ? "NaN" : String.format("%.3f", baEnd)),
+							(Double.isNaN(baMin) ? "NaN" : String.format("%.3f", baMin)), baTh);
 				} else {  // "H" 최대부하 — 공릉/북악 각 안전선 기준. 북악은 유입/하한(baLevel) 기준.
 					double gnTh = getSeoulGnMhThreshold();
 					double baTh = getSeoulBaMhThreshold();
@@ -3490,11 +3618,26 @@ public class DrvnConfig {
 					}
 				}
 
+				// 기준점은 '현재 실측 조합' 이다(유량·압력 예측으로 고른 closestPointIndex 를 쓰지 않는다).
+				// 실측 조합을 못 구하면 예측 기준으로 폴백 + WARN.
+				Double seoulActLevel = actualCombLevel(ts, pump_grp, typeMap, pumpLevelInfoMap);
+				int seoulBaseIndex;
+				if (seoulActLevel == null) {
+					seoulBaseIndex = closestPointIndex;
+					logger.warn("[SEOUL] 실측 조합 확인 불가 → 예측 기준(baseIdx={}) 폴백. ts={} pump_grp={}",
+							closestPointIndex, ts, pump_grp);
+				} else {
+					seoulBaseIndex = findCombIndexByLevel(collectData, seoulActLevel);
+					if (seoulBaseIndex < 0) seoulBaseIndex = closestPointIndex;
+				}
+
 				int seoulAdjustedIndex;
 				if (forceFirstComb) {
-					seoulAdjustedIndex = 0;                                              // #1 = 최소대수 조합
+					// #1 = 최소대수 조합. 실측과 무관한 절대 점프(전기료 최고 시간대 정책)라 그대로 둔다.
+					int minIdx = minLevelCombIndex(collectData);
+					seoulAdjustedIndex = (minIdx >= 0) ? minIdx : 0;
 				} else {
-					seoulAdjustedIndex = Math.min(Math.max(closestPointIndex + seoulDelta, 0), seoulSizeMax);
+					seoulAdjustedIndex = shiftCombIndexByLevel(collectData, seoulBaseIndex, seoulDelta);
 				}
 
 				Object seoulPc = collectData.get(seoulAdjustedIndex).get("pumpComb");
@@ -3505,12 +3648,12 @@ public class DrvnConfig {
 				}
 				freqMap = null;  // Seoul 인버터 없음
 
-				logger.info("[SEOUL] ts={} pump_grp={} load={} gn(active={}, lvl={}) ba(active={}, lvl={}) reason='{}' baseIdx={} adjustedIdx={} sizeMax={} returnComb={}",
+				logger.info("[SEOUL] ts={} pump_grp={} load={} gn(active={}, lvl={}) ba(active={}, lvl={}) reason='{}' delta={} actLevel={} baseIdx={}(실측) adjustedIdx={} predIdx={} sizeMax={} returnComb={}",
 						ts, pump_grp, seoulLoad,
 						gnActive, String.format("%.3f", gnLevel),
 						baActive, String.format("%.3f", baLevel),
-						adjReason,
-						closestPointIndex, seoulAdjustedIndex, seoulSizeMax,
+						adjReason, seoulDelta, seoulActLevel,
+						seoulBaseIndex, seoulAdjustedIndex, closestPointIndex, seoulSizeMax,
 						returnComb);
 			}
 			// === [Seoul/Dev] 단계 조정 끝 ====================================================
@@ -5882,10 +6025,10 @@ public class DrvnConfig {
 	 * 활성 평균 0(센서 결측) 인 경우도 거슬러 올라감. 끝까지 변화 못 찾으면 보수적으로 false(증가).
 	 *
 	 * @param tags       정수장 수위 태그 배열
-	 * @param target     07:00 목표 수위 (m)
+	 * @param target     07시 목표 수위 (m)
 	 * @param dateTime   현재 시각
 	 * @param nowScore   현재 시각의 자정 기준 분 (hour×60 + minute)
-	 * @param optMinute  데드라인 (자정 기준 분, 07시 이후이면 +1440 추가됨)
+	 * @param optMinute  데드라인 (오늘 자정 기준 분. 경부하 종료가 다음 날이면 +1440 이 포함된 값)
 	 * @return true = 데드라인 안에 도달 가능 (감소 후보), false = 도달 불가 (증가 필요)
 	 */
 	private boolean isStationReachableSinlimStyle(String[] tags, double target,
@@ -5928,23 +6071,28 @@ public class DrvnConfig {
 	}
 
 	/**
-	 * [Seoul/Dev · 중간부하 M] 22시(최대부하 종료 시각) 예상 수위 산출.
+	 * [Seoul/Dev · 중간부하 M] 최대부하 종료 시각의 예상 수위 산출.
 	 *
 	 * 알고리즘 (사진 "중간부하 M" 정책):
 	 *   1) 최근 5분 활성 평균 변화량 측정. step ∈ {5,10,...,60}분을 차례로 시도해 첫 유효 값 채택.
 	 *      - 활성 평균 개수가 0인 시점이 포함되면 다음 step 으로 진행
 	 *      - delta == 0 이어도 다음 step 으로 진행 (변화 추세 탐색)
-	 *      - 60분까지 못 찾으면 22시 예상수위 NaN 반환 → 호출부가 "버팀 불가"로 처리
+	 *      - 60분까지 못 찾으면 예상수위 NaN 반환 → 호출부가 "버팀 불가"로 처리
 	 *   2) 시간당 변화율 ratePerHour = delta / stepMin × 60 (m/h). 상승 +, 하락 −, 변화없음 0.
-	 *   3) remainHours = max(0, (오늘 22:00 − now)). now ≥ 22:00 이면 0 으로 폴백.
-	 *   4) 22시 예상수위 = curLevel + ratePerHour × remainHours.
+	 *      (정책 문구의 "×12" 는 stepMin=5 인 경우이고, 소급 채택 시 그 간격으로 정규화한다)
+	 *   3) remainHours = max(0, (최대부하 종료 시각 − now)). 종료 시각 이후면 0 → 현재 수위로 판정.
+	 *      종료 시각은 resolvePeakEndTime() 이 부하시간대 테이블 + 주말/공휴일 보정으로 산출한다.
+	 *   4) 종료시점 예상수위 = curLevel + ratePerHour × remainHours.
+	 *   5) 판정용 값은 "구간 내 예상 최저수위" = min(curLevel, 종료시점 예상수위).
+	 *      정책이 "종료 시점'까지' 유지 가능한가" 이므로 종료시점 한 점이 아니라 구간 최저로 비교한다.
 	 *
 	 * @param tags      수위 TAG 배열 (공릉 또는 북악)
 	 * @param curLevel  현재 활성 평균 수위 (호출부에서 이미 산출한 값 재사용)
 	 * @param dateTime  현재 시각
-	 * @return double[3] = {22시 예상수위(NaN=탐색실패), ratePerHour(m/h, 실패시 0), 채택 stepMin(실패시 0)}
+	 * @return double[4] = {구간 예상 최저수위(NaN=탐색실패, 판정용), ratePerHour(m/h, 실패시 0),
+	 *                     채택 stepMin(실패시 0), 종료시점 예상수위(참고용)}
 	 */
-	private double[] predict22LevelSeoul(String[] tags, double curLevel, LocalDateTime dateTime) {
+	private double[] predictPeakEndLevelSeoul(String[] tags, double curLevel, LocalDateTime dateTime) {
 		// stepMin ∈ {5,10,...,60} + slot=0(now) → 0,5,...,60 (총 13개 슬롯)
 		int[] slots = new int[13];
 		for (int i = 0; i < 13; i++) slots[i] = i * 5;
@@ -5972,18 +6120,131 @@ public class DrvnConfig {
 		if (!found) {
 			return new double[]{Double.NaN, 0.0, 0};        // 탐색 실패 → 버팀 불가
 		}
-		LocalDateTime endAt = dateTime.toLocalDate().atTime(22, 0);
+		LocalDateTime endAt = resolvePeakEndTime(dateTime);
 		long remainSec = Duration.between(dateTime, endAt).getSeconds();
 		double remainHours = Math.max(0.0, remainSec / 3600.0);
-		double pred = curLevel + rate * remainHours;
-		return new double[]{pred, rate, stepUsed};
+		double predEnd = curLevel + rate * remainHours;
+
+		// 판정 기준은 "최대부하 종료 시점'까지' 4m 이상 유지 가능한가" 이므로 구간 내 최저수위로 비교한다.
+		// 지금~종료시점을 직선으로 보므로 최저는 양 끝 중 작은 값이다:
+		//   하락 추세(rate<0) → 종료시점 값,  상승 추세(rate>0) → 현재 수위,  정체(rate=0) → 동일.
+		// 종료시점 값만 쓰면 상승 추세일 때 이미 안전선 미달인 현재 수위를 놓친다
+		// (예: 현재 3.8m, +0.1m/h, 12h → predEnd 5.0m 로 "유지 가능(감량)" 오판).
+		double minLevel = Math.min(curLevel, predEnd);
+		return new double[]{minLevel, rate, stepUsed, predEnd};
+	}
+
+	/**
+	 * [Seoul/Dev] '최대부하 종료 시각' 을 부하시간대 테이블에서 동적으로 산출.
+	 *
+	 * 종전에는 22:00 하드코딩이었다. 최대부하 구간은 계절(월)마다 다르고 주말·공휴일 보정으로
+	 * 사라지기도 하므로, 고정값을 쓰면 remainHours 가 실제와 어긋나 예상수위가 과대/과소 산출된다.
+	 * (예: 7월 평일 최대부하는 15~20시 → 종료 21:00 인데 22:00 을 쓰면 1시간 과다 외삽)
+	 *
+	 * 등급 원천: TB_RT_RATE_INF(RATE_IDX=1) → getLoadInquiry() → reduceMap[월][시] = 'L'|'M'|'H'.
+	 * 보정 규칙은 호출부(insertPumpComb / buildControlJudgment)와 동일하게 맞춘다:
+	 *   - 일요일·공휴일 → 그 날 전체 L
+	 *   - 토요일       → H 를 M 으로 강등
+	 *
+	 * 종료 시각 = 보정 후 그 날 마지막 H 시각 + 1시간.
+	 *   - H 가 없으면(토요일 강등 등) 마지막 M 시각 + 1시간 = 비경부하 구간의 끝.
+	 *     (7월 토요일이면 M 이 21시까지 → 22:00. 종전 하드코딩과 같은 값이 된다)
+	 *   - 마지막 시각이 23시면 다음 날 00:00.
+	 *   - 테이블 조회 실패 또는 그 날 H/M 이 전혀 없으면(전부 L) 22:00 폴백 + 경고 로그.
+	 *     경부하(L)에는 이 판정 자체가 쓰이지 않으므로 정상 경로에서는 도달하지 않는다.
+	 *
+	 * @param dateTime 판단 기준 시각
+	 * @return 최대부하 종료 시각
+	 */
+	private LocalDateTime resolvePeakEndTime(LocalDateTime dateTime) {
+		LocalDateTime fallback = dateTime.toLocalDate().atTime(22, 0);
+
+		HashMap<Integer, String> hourMap = adjustedGradeMap(dateTime.toLocalDate());
+		if (hourMap == null || hourMap.isEmpty()) {
+			logger.warn("[SEOUL] 부하시간대 조회 실패 → 최대부하 종료 22:00 폴백. ts={}", dateTime);
+			return fallback;
+		}
+
+		int lastH = -1;
+		int lastM = -1;
+		for (int h = 0; h <= 23; h++) {
+			String grade = hourMap.get(h);
+			if (grade == null) continue;
+			if ("H".equals(grade)) {
+				lastH = h;
+			} else if ("M".equals(grade)) {
+				lastM = h;
+			}
+		}
+
+		int endHour = (lastH >= 0) ? lastH + 1 : (lastM >= 0 ? lastM + 1 : -1);
+		if (endHour < 0) {
+			logger.warn("[SEOUL] 해당 일자에 H/M 구간 없음(전부 L) → 최대부하 종료 22:00 폴백. ts={}", dateTime);
+			return fallback;
+		}
+		int week = dateTime.getDayOfWeek().getValue();
+		boolean isHoliday = isSeoulHoliday(dateTime.toLocalDate());
+
+		LocalDateTime endAt = (endHour >= 24)
+				? dateTime.toLocalDate().plusDays(1).atStartOfDay()
+				: dateTime.toLocalDate().atTime(endHour, 0);
+		logger.debug("[SEOUL] 최대부하 종료 시각 산출: ts={} month={} week={} holiday={} lastH={} lastM={} → endAt={}",
+				dateTime, dateTime.getMonthValue(), week, isHoliday, lastH, lastM, endAt);
+		return endAt;
+	}
+
+	/**
+	 * [Seoul/Dev] 특정 일자의 시간대별 부하등급 맵(0~23시 → 'L'|'M'|'H'), 주말·공휴일 보정 적용.
+	 *
+	 * 원천: TB_RT_RATE_INF(RATE_IDX=1) → getLoadInquiry() → reduceMap[월][시].
+	 * 보정 규칙은 호출부(insertPumpComb 3388~3396 / buildControlJudgment 5999~6016)와 동일:
+	 *   - 일요일·공휴일 → 그 날 전체 L
+	 *   - 토요일       → H 를 M 으로 강등
+	 *
+	 * @param date 대상 일자
+	 * @return 보정된 등급 맵. 테이블 조회 실패 시 null
+	 */
+	private HashMap<Integer, String> adjustedGradeMap(LocalDate date) {
+		HashMap<Integer, String> src = (reduceMap != null) ? reduceMap.get(date.getMonthValue()) : null;
+		if (src == null || src.isEmpty()) {
+			HashMap<Integer, HashMap<Integer, String>> rm = getMonthPwrReduc();
+			src = (rm != null) ? rm.get(date.getMonthValue()) : null;
+		}
+		if (src == null || src.isEmpty()) return null;
+
+		int week = date.getDayOfWeek().getValue();
+		boolean allLow  = (week == 7 || isSeoulHoliday(date));   // 일요일·공휴일
+		boolean demoteH = (week == 6);                           // 토요일
+
+		HashMap<Integer, String> out = new HashMap<>();
+		for (int h = 0; h <= 23; h++) {
+			String grade = src.get(h);
+			if (grade == null) continue;
+			if (allLow) {
+				grade = "L";
+			} else if (demoteH && "H".equals(grade)) {
+				grade = "M";
+			}
+			out.put(h, grade);
+		}
+		return out;
+	}
+
+	/** 공휴일 판정. HolidayChecker.isPassDay 가 "yyyy-MM-dd HH:mm" 포맷을 요구하므로 자정 기준으로 넘긴다. */
+	private boolean isSeoulHoliday(LocalDate date) {
+		try {
+			return new HolidayChecker().isPassDay(
+					date.atStartOfDay().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")));
+		} catch (Exception e) {
+			return false;
+		}
 	}
 
 	/**
 	 * [Seoul/Dev] AI 제어사유 팝업용 부하판정 정보 (읽기 전용).
 	 * insertPumpComb 의 seoul 판정 로직(3303~3406)을 부수효과 없이 발췌:
-	 *  - 경부하(L): 공릉/북악 07시 목표수위 도달 가능 여부(reachable)
-	 *  - 중간부하(M): 22시 예상수위 ≥ 안전선(sustain) + 22시 예상수위(pred22)
+	 *  - 경부하(L): 공릉/북악 07시 목표수위 도달 가능 여부(reachable) + 데드라인 시(deadlineHour)
+	 *  - 중간부하(M): 최대부하 종료시점 예상수위 ≥ 안전선(sustain) + 예상수위(pred22) + 종료시각(peakEndTime)
 	 *  - 최대부하(H): 현재 수위 > 안전선(sustain) — insertPumpComb 와 동일 기준
 	 * DB write / 상태 변경 없음. 산출 결과(TB_CTR_PUMPYN_RST)에 영향 주지 않음.
 	 *
@@ -6036,8 +6297,9 @@ public class DrvnConfig {
 		baObj.put("level", baLevel); baObj.put("active", (int) ba[1]);
 
 		if ("L".equals(load)) {
+			// 데드라인은 insertPumpComb 의 L 분기와 동일한 07:00 정책값.
 			int nowScore = dateTime.getHour() * 60 + dateTime.getMinute();
-			final int deadline7 = 7 * 60;
+			final int deadline7 = SEOUL_LOW_LOAD_DEADLINE_HOUR * 60;
 			int optMinute = (nowScore < deadline7) ? deadline7 : deadline7 + 24 * 60;
 			double gnTarget = getSeoulGnTarget();
 			double baTarget = getSeoulBaTarget();
@@ -6046,15 +6308,28 @@ public class DrvnConfig {
 			baObj.put("reachable", isStationReachableSinlimStyle(seoulBaUpperTags, baTarget, dateTime, nowScore, optMinute));
 			gnObj.put("target", gnTarget);
 			baObj.put("target", baTarget);
+			// 화면 라벨("07시 기준 목표수위 충족여부")과 맞춘 데드라인 시(hour)를 함께 내려준다.
+			gnObj.put("deadlineHour", SEOUL_LOW_LOAD_DEADLINE_HOUR);
+			baObj.put("deadlineHour", SEOUL_LOW_LOAD_DEADLINE_HOUR);
 		} else if ("M".equals(load)) {
 			double gnTh = getSeoulGnMhThreshold();
 			double baTh = getSeoulBaMhThreshold();
-			double gnPred = predict22LevelSeoul(seoulGnTags, gnLevel, dateTime)[0];
-			double baPred = predict22LevelSeoul(seoulBaTags, baLevel, dateTime)[0];
-			gnObj.put("sustain", !Double.isNaN(gnPred) && gnPred >= gnTh);
-			baObj.put("sustain", !Double.isNaN(baPred) && baPred >= baTh);
-			gnObj.put("pred22", Double.isNaN(gnPred) ? null : gnPred); gnObj.put("threshold", gnTh);
-			baObj.put("pred22", Double.isNaN(baPred) ? null : baPred); baObj.put("threshold", baTh);
+			double[] gnSustain = predictPeakEndLevelSeoul(seoulGnTags, gnLevel, dateTime);
+			double[] baSustain = predictPeakEndLevelSeoul(seoulBaTags, baLevel, dateTime);
+			// [0] = 구간 예상 최저수위(판정용), [3] = 종료시점 예상수위. insertPumpComb 의 M 분기와 동일 기준.
+			double gnMin = gnSustain[0], baMin = baSustain[0];
+			double gnEnd = gnSustain[3], baEnd = baSustain[3];
+			gnObj.put("sustain", !Double.isNaN(gnMin) && gnMin >= gnTh);
+			baObj.put("sustain", !Double.isNaN(baMin) && baMin >= baTh);
+			// pred22: 판정에 쓰인 값(= 구간 예상 최저수위). 키 이름은 기존 응답 호환을 위해 유지한다.
+			// predEnd: 종료 시점 예상수위(참고). 종료 시각은 22:00 고정이 아니라 resolvePeakEndTime() 산출값.
+			gnObj.put("pred22", Double.isNaN(gnMin) ? null : gnMin); gnObj.put("threshold", gnTh);
+			baObj.put("pred22", Double.isNaN(baMin) ? null : baMin); baObj.put("threshold", baTh);
+			gnObj.put("predEnd", Double.isNaN(gnEnd) ? null : gnEnd);
+			baObj.put("predEnd", Double.isNaN(baEnd) ? null : baEnd);
+			String peakEnd = resolvePeakEndTime(dateTime).format(fmt);
+			gnObj.put("peakEndTime", peakEnd);
+			baObj.put("peakEndTime", peakEnd);
 		} else if ("H".equals(load)) {
 			double gnTh = getSeoulGnMhThreshold();
 			double baTh = getSeoulBaMhThreshold();
@@ -6162,6 +6437,179 @@ public class DrvnConfig {
 			pt.put("v", sum / cnt);
 			series.add(pt);
 		}
+	}
+
+	/**
+	 * [Seoul/Dev] 현재 실측 조합의 가동 대수(가중치 합) 산출.
+	 *
+	 * 실측 조합은 curPumpCheck(pre=false) → getCurUsePumpString → TB_RAWDATA × PMB_TAG 기준.
+	 * 대수는 dstrb.pump.level(pumpLevelInfoGrpMap) 가중치로 합산한다(서울: 1·7호기 0.5대, 그 외 1대).
+	 *
+	 * @return 실측 대수. 실측 조합을 못 구하면 null (호출부가 폴백 처리)
+	 */
+	private Double actualCombLevel(String ts, int pump_grp, LinkedHashMap<String, Integer> typeMap,
+	                               HashMap<Integer, Double> pumpLevelInfoMap) {
+		if (pumpLevelInfoMap == null) return null;
+		HashMap<String, Object> cur;
+		try {
+			cur = curPumpCheck(ts, pump_grp, typeMap, false);
+		} catch (Exception e) {
+			logger.warn("[SEOUL] 실측 조합 조회 실패 ts={} pump_grp={}: {}", ts, pump_grp, e.getMessage());
+			return null;
+		}
+		if (cur == null || !cur.containsKey("comb")) return null;
+		Object combRaw = cur.get("comb");
+		if (!(combRaw instanceof List)) return null;
+		@SuppressWarnings("unchecked")
+		List<String> comb = (List<String>) combRaw;
+		if (comb.isEmpty()) return null;   // 전 펌프 정지 또는 실측 피드 결측
+
+		double level = 0.0;
+		for (String s : comb) {
+			try {
+				level += pumpLevelInfoMap.getOrDefault(Integer.parseInt(s.trim()), 0.0);
+			} catch (NumberFormatException ignore) {
+				// 숫자 아닌 항목은 무시
+			}
+		}
+		return level;
+	}
+
+	/**
+	 * [Seoul/Dev] 가동 대수와 가장 가까운 조합의 collectData 인덱스.
+	 * 정확히 같은 대수가 있으면 그 인덱스, 없으면 대수 차 최소인 인덱스.
+	 *
+	 * @return 인덱스. collectData 가 비었거나 pumpLevel 이 없으면 −1
+	 */
+	private int findCombIndexByLevel(List<HashMap<String, Object>> collectData, double level) {
+		if (collectData == null || collectData.isEmpty()) return -1;
+		int best = -1;
+		double bestDiff = Double.MAX_VALUE;
+		for (int i = 0; i < collectData.size(); i++) {
+			Object lv = collectData.get(i).get("pumpLevel");
+			if (!(lv instanceof Number)) continue;
+			double diff = Math.abs(((Number) lv).doubleValue() - level);
+			if (diff < bestDiff) { bestDiff = diff; best = i; }
+		}
+		return best;
+	}
+
+	/**
+	 * [Seoul/Dev] 기준 인덱스에서 한 단계 증/감한 조합의 인덱스.
+	 *
+	 * 인덱스 산술(base ± 1)을 쓰지 않는 이유: collectData 정렬은
+	 * ORDER BY C_IDX, C_ORD, PUMP_COUNT, PUMP_PRIORITY 이고 실질적으로 C_IDX 가 순서를 지배한다.
+	 * 즉 "인덱스 오름차순 = 대수 오름차순" 은 C_IDX 가 대수 순으로 부여되어 있다는 데이터 관례에
+	 * 의존할 뿐 코드가 보장하지 않는다. 조합이 추가되며 관례가 깨지면 base+1 이 오히려 대수 감소가
+	 * 되어 증량 판정에 감량 조합이 나갈 수 있다. 그래서 대수(pumpLevel) 기준으로 탐색한다.
+	 *
+	 * @param delta +1 = 한 단계 증량, −1 = 한 단계 감량, 0 = 그대로
+	 * @return 이동한 인덱스. 더 큰/작은 대수가 없으면 끝단 유지(기존 클램프와 동일 거동)
+	 */
+	private int shiftCombIndexByLevel(List<HashMap<String, Object>> collectData, int baseIdx, int delta) {
+		if (collectData == null || collectData.isEmpty() || baseIdx < 0) return baseIdx;
+		if (delta == 0) return baseIdx;
+		Object baseLvObj = collectData.get(baseIdx).get("pumpLevel");
+		if (!(baseLvObj instanceof Number)) return baseIdx;
+		double baseLv = ((Number) baseLvObj).doubleValue();
+
+		int best = -1;
+		double bestLv = 0.0;
+		for (int i = 0; i < collectData.size(); i++) {
+			Object lv = collectData.get(i).get("pumpLevel");
+			if (!(lv instanceof Number)) continue;
+			double v = ((Number) lv).doubleValue();
+			if (delta > 0) {
+				// baseLv 보다 큰 대수 중 가장 작은 것
+				if (v > baseLv && (best < 0 || v < bestLv)) { best = i; bestLv = v; }
+			} else {
+				// baseLv 보다 작은 대수 중 가장 큰 것
+				if (v < baseLv && (best < 0 || v > bestLv)) { best = i; bestLv = v; }
+			}
+		}
+		return (best >= 0) ? best : baseIdx;   // 끝단이면 유지
+	}
+
+	/** [Seoul/Dev] 최소 대수 조합의 인덱스(#1). 활성 0개 fallback 의 H 처리용. */
+	private int minLevelCombIndex(List<HashMap<String, Object>> collectData) {
+		if (collectData == null || collectData.isEmpty()) return -1;
+		int best = -1;
+		double bestLv = Double.MAX_VALUE;
+		for (int i = 0; i < collectData.size(); i++) {
+			Object lv = collectData.get(i).get("pumpLevel");
+			if (!(lv instanceof Number)) continue;
+			double v = ((Number) lv).doubleValue();
+			if (v < bestLv) { bestLv = v; best = i; }
+		}
+		return best;
+	}
+
+	/**
+	 * [Seoul/Dev · 수위조건] 배수지 하나의 (현재수위, 목표 하한, 목표 상한) 을 산출.
+	 *
+	 * 핵심: 세 값을 **같은 태그 집합**에서 평균낸다. 기존 두 경로는 활성 필터가 서로 달라
+	 *   - 현재수위(avgActiveSeoulWaterLevel): 실측값 ≥ seoulActiveThreshold 인 태그
+	 *   - 목표수위(addTargetAvgPoint):        목표수위 값 ≥ seoulActiveThreshold 인 태그
+	 * 두 평균이 다른 수조 집합에서 나올 수 있었다(빈 수조는 실측 평균에서 빠지지만 목표 평균에는
+	 * 남는다). 수위조건은 현재수위와 목표수위를 직접 비교하므로 그대로 두면 판정이 왜곡된다.
+	 * → 여기서는 "실측이 활성이고 그 시간대 목표수위 상·하한이 모두 있는" 태그만 채택한다.
+	 *
+	 * 목표수위 상/하한은 pickTargetVal() 로 USER 설정값(USER_MIN_VL/USER_MAX_VL) 우선,
+	 * 없으면 기본값(MIN_VL/MAX_VL). 시간대는 dateTime 의 hour(HOURS 0~23).
+	 *
+	 * @param tags     배수지 수위 태그 배열 (공릉 또는 북악)
+	 * @param dateTime 판단 기준 시각
+	 * @return double[4] = {현재수위 평균, 목표 하한 평균, 목표 상한 평균, 채택 태그 수}.
+	 *         채택 태그 수 0 이면 판정 불가(앞의 세 값은 0).
+	 */
+	private double[] stationLevelWithTarget(String[] tags, LocalDateTime dateTime) {
+		double[] none = new double[]{0.0, 0.0, 0.0, 0};
+		if (tags == null || tags.length == 0) return none;
+
+		List<HashMap<String, Object>> rows = drvnMapper.selectTargetLevelByTags(Arrays.asList(tags));
+		if (rows == null || rows.isEmpty()) return none;
+
+		// TAG(대문자) → HOURS → row
+		Map<String, Map<Integer, HashMap<String, Object>>> byTag = new HashMap<>();
+		for (HashMap<String, Object> r : rows) {
+			if (r == null || r.get("HOURS") == null) continue;
+			String tag = String.valueOf(r.get("TAG")).toUpperCase();
+			int hours = ((Number) r.get("HOURS")).intValue();
+			byTag.computeIfAbsent(tag, k -> new HashMap<>()).put(hours, r);
+		}
+
+		int hours = dateTime.getHour();
+		String nowDateTime = dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("nowDateTime", nowDateTime);
+
+		double curSum = 0.0, lowSum = 0.0, upSum = 0.0;
+		int cnt = 0;
+		for (String tag : tags) {
+			Map<Integer, HashMap<String, Object>> hm = byTag.get(tag.toUpperCase());
+			if (hm == null) continue;
+			HashMap<String, Object> row = hm.get(hours);
+			if (row == null) continue;
+			Double lower = pickTargetVal(row, false);
+			Double upper = pickTargetVal(row, true);
+			if (lower == null || upper == null) continue;   // 목표 미설정 태그는 제외
+
+			Double cur = null;
+			param.put("tagname", tag);
+			try {
+				cur = drvnMapper.selectRawData(param);
+			} catch (Exception e) {
+				// 단일 태그 조회 실패는 무시하고 계속
+			}
+			if (cur == null || cur < seoulActiveThreshold) continue;   // 비활성 수조 제외
+
+			curSum += cur;
+			lowSum += lower;
+			upSum  += upper;
+			cnt++;
+		}
+		if (cnt == 0) return none;
+		return new double[]{curSum / cnt, lowSum / cnt, upSum / cnt, cnt};
 	}
 
 	/** 목표수위 행에서 상/하한 선택. USER 값 우선, 없으면 기본값. */

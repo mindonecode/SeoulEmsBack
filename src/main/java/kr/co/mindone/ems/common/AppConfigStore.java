@@ -82,4 +82,27 @@ public class AppConfigStore {
             return fallback;
         }
     }
+
+    /**
+     * boolean 설정값 조회. 키 부재/미인식 값이면 fallback 반환(경고 로그).
+     * 인식 값: true/false, 1/0, y/n, yes/no, on/off (대소문자 무시).
+     * @param key      설정 키 (예: "seoul.level-condition.enabled")
+     * @param fallback DB 미적용/파싱 실패 시 사용할 기본값 (보통 @Value 주입 기본값)
+     */
+    public boolean getBoolean(String key, boolean fallback) {
+        String raw = cache.get(key);
+        if (raw == null || raw.trim().isEmpty()) {
+            return fallback;
+        }
+        String v = raw.trim().toLowerCase();
+        switch (v) {
+            case "true": case "1": case "y": case "yes": case "on":
+                return true;
+            case "false": case "0": case "n": case "no": case "off":
+                return false;
+            default:
+                log.warn("[AppConfigStore] key '{}' value '{}' 파싱 실패 → fallback {} 사용", key, raw, fallback);
+                return fallback;
+        }
+    }
 }
