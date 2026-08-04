@@ -498,6 +498,32 @@
 		) m ON m.TAG = t.TAG AND m.HOURS = t.HOURS AND m.MX_MDFCN = t.MDFCN_DT
 	</select>
 
+	<!-- ===== 수위조건 복귀수위 되돌림 대기 상태 (TB_CTR_LEVEL_RETURN, 그룹당 1행) ===== -->
+	<select id="selectLevelReturnState" parameterType="int" resultType="hashMap">
+		SELECT PUMP_GRP, DIRECTION, TRIGGER_STATIONS,
+		       DATE_FORMAT(START_TIME, '%Y-%m-%d %H:%i') AS START_TIME
+		FROM TB_CTR_LEVEL_RETURN
+		WHERE PUMP_GRP = #{pumpGrp}
+	</select>
+
+	<insert id="upsertLevelReturnState" parameterType="hashmap">
+		<!-- 새 이탈이 나면 기존 대기 상태를 교체한다(새 이탈 우선 정책). -->
+		INSERT INTO TB_CTR_LEVEL_RETURN
+			(PUMP_GRP, DIRECTION, TRIGGER_STATIONS, START_TIME, START_COMB, START_REASON)
+		VALUES
+			(#{pumpGrp}, #{direction}, #{triggerStations}, #{startTime}, #{startComb}, #{startReason})
+		ON DUPLICATE KEY UPDATE
+			DIRECTION        = VALUES(DIRECTION),
+			TRIGGER_STATIONS = VALUES(TRIGGER_STATIONS),
+			START_TIME       = VALUES(START_TIME),
+			START_COMB       = VALUES(START_COMB),
+			START_REASON     = VALUES(START_REASON)
+	</insert>
+
+	<delete id="deleteLevelReturnState" parameterType="int">
+		DELETE FROM TB_CTR_LEVEL_RETURN WHERE PUMP_GRP = #{pumpGrp}
+	</delete>
+
 	<!--
 	  임의 horizon(분) 예측 조회. prdctFlowPressure 의 일반화 버전.
 	  horizonMin = 10/60/120/180/360 등.

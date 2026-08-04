@@ -207,6 +207,15 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 제어현황 목표수위 팝업용 배수지별·시간대별 목표수위 표(TB_TARGET_LEVEL, 조회 전용).
+	 * @return { gn:[{hours,lower,upper,lowerCnt,upperCnt}...24], baFront:[...], baRear:[...] }
+	 */
+	@GetMapping("/targetLevelTable")
+	public ResponseObject<HashMap<String, Object>> targetLevelTable(){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.buildTargetLevelTable());
+	}
+
+	/**
 	 * [GET] 시간 범위에 대한 시간대별 부하 시간대 시리즈 조회 (정시 단위).
 	 * @param startTs "yyyy-MM-dd HH:mm"
 	 * @param endTs   "yyyy-MM-dd HH:mm"

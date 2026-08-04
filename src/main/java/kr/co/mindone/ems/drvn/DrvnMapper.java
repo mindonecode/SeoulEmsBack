@@ -119,6 +119,22 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectTargetLevelByTags(@Param("tags") List<String> tags);
 
 	/**
+	 * 수위조건 복귀수위 되돌림 대기 상태 조회 (TB_CTR_LEVEL_RETURN, 그룹당 1행).
+	 * @param pumpGrp 펌프 그룹
+	 * @return PUMP_GRP, DIRECTION(UP|DOWN), TRIGGER_STATIONS(CSV), START_TIME. 대기 없으면 null
+	 */
+	HashMap<String, Object> selectLevelReturnState(@Param("pumpGrp") int pumpGrp);
+
+	/**
+	 * 되돌림 대기 상태 기록/교체. 새 이탈이 나면 기존 상태를 덮어쓴다(새 이탈 우선 정책).
+	 * @param param pumpGrp, direction, triggerStations, startTime, startComb, startReason
+	 */
+	void upsertLevelReturnState(HashMap<String, Object> param);
+
+	/** 되돌림 완료 또는 상태 무효화 시 대기 상태 삭제. */
+	void deleteLevelReturnState(@Param("pumpGrp") int pumpGrp);
+
+	/**
 	 * 탱크 유량 및 압력 데이터를 조회하는 메서드
 	 * @param map 조회 조건을 담은 맵
 	 * @return 탱크 유량 및 압력 데이터를 반환

@@ -145,25 +145,11 @@ public class PumpScheduler {
                 //HashMap < String, Object > pumpStatus = pumpService.pumpCommandStatus(pumpGrpStr);
                 System.out.println("#pumpAiControlTask pumpStatus:" + pumpStatus.get("isChange").toString()+"/"+ pumpRunningStatus+ ", pumpGrpStr:" + pumpGrpStr);
                 // [DEV/SEOUL] dev/seoul 에서는 거리 계산 결과(PUMP_YN_RST) → TB_HMI_CTR_TAG 직접 INSERT (운영 SCADA/Kafka 흐름 우회)
+                // 주 발사 경로는 판정 직후(DrvnConfig.setInsertPumpComn → tryDispatchAutoControl("batch")) 다.
+                // 이 폴링은 그때 락·예측 미도착으로 못 쏜 경우를 잡는 보조 경로로만 남긴다.
+                // 가드는 tryDispatchAutoControl 안에 있으므로 여기서 중복 검사하지 않는다.
                 if ("dev".equals(wpp_code) || "seoul".equals(wpp_code)) {
-                    // dev 인스턴스가 같은 DB 에 자동제어 명령을 INSERT 하면 운영(seoul) 결과를 덮어쓰는 멀티 인스턴스 충돌.
-                    // seoul.control.dispatch.enabled=false (dev 기본) 이면 자동 dispatch 전체 skip.
-                    if (!pumpService.isControlDispatchEnabled()) {
-                        System.out.println("[pumpAiControlTask] DISPATCH DISABLED (seoul.control.dispatch.enabled=false) → skip auto control");
-                        return;
-                    }
-                    final int pumpGrpFixed = 1;
-                    HashMap<String, Object> lockStatus = pumpService.checkControlLockStatus(pumpGrpFixed);
-                    if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
-                        System.out.println("[pumpAiControlTask] LOCKED pumpGrp=" + pumpGrpFixed
-                                + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime")
-                                + " → skip auto control");
-                        return;
-                    }
-                    int inserted = pumpService.devInsertHmiTagFromLatestPumpYn(pumpGrpFixed);
-                    if (inserted > 0) {
-                        pumpService.recordControlCommand(pumpGrpFixed, "ai_auto");
-                    }
+                    pumpService.tryDispatchAutoControl("poll");
                     return;
                 }
                 if (Boolean.parseBoolean(pumpStatus.get("isChange").toString()) && pumpRunningStatus) {
