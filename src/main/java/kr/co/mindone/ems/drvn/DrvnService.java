@@ -280,6 +280,14 @@ public class DrvnService {
 	}
 
 	/**
+	 * 제어현황 목표수위 팝업용 배수지별·시간대별 목표수위 표 (TB_TARGET_LEVEL, 조회 전용).
+	 * TB_TARGET_LEVEL 은 HOURS(0~23) 기준이라 날짜 파라미터가 필요 없다.
+	 */
+	public HashMap<String, Object> buildTargetLevelTable() {
+		return drvnConfig.buildTargetLevelTable();
+	}
+
+	/**
 	 * 제어기준(배수지 상/하한 수위) 변경 (TB_CONFIG upsert).
 	 * 저장 직후 AppConfigStore.reload() 로 즉시 캐시 반영(실패해도 다음 제어 산출 사이클 진입 시 반영됨).
 	 * @param param baUpper, baLower, gnUpper, gnLower (숫자/문자 허용)

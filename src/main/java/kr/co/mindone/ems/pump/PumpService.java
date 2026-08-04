@@ -106,9 +106,9 @@ public class PumpService {
 
     /**
      * [dev/seoul 2단계 제어] 전체 OFF 명령을 먼저 발사한 뒤, 실제 예측 제어명령을 몇 분 뒤에 발사할지(분).
-     * 기본 5분. 0 이하로 설정하면 지연 없이 즉시 예측명령을 발사(2단계 기능 off).
+     * 기본 3분. 0 이하로 설정하면 지연 없이 즉시 예측명령을 발사(2단계 기능 off).
      */
-    @Value("${seoul.control.preoff.delay.minutes:5}")
+    @Value("${seoul.control.preoff.delay.minutes:3}")
     private int preOffDelayMinutes;
 
     /**
@@ -191,6 +191,45 @@ public class PumpService {
             }
         }
         return lockMin;
+    }
+
+    /**
+     * [DEV/SEOUL] 자동 제어 발사 1회 시도. 가드 체인을 여기 한 곳에 모아 둔다.
+     *
+     * 호출 경로가 둘이다:
+     *   1) DrvnConfig.setInsertPumpComn — 판정(insertPumpComb) 직후 즉시 발사. 주 경로.
+     *   2) PumpScheduler.pumpAiControlTask — 매분 폴링. 1) 이 락/미도착으로 못 쏜 경우의 보조 경로.
+     * 어느 쪽으로 들어와도 같은 가드를 통과하므로 중복 발사가 나지 않는다
+     * (발사에 성공하면 recordControlCommand 로 락이 걸려 다음 호출이 스스로 막힌다).
+     *
+     * 가드 순서:
+     *   testMode → aiControlStatus → dispatch.enabled(dev 차단) → 제어주기 락 → 변화 여부
+     * 변화가 없으면 devInsertHmiTagFromLatestPumpYn 가 0 을 반환하고 락도 기록하지 않는다.
+     *
+     * @param caller 로그 태그 (예: "batch", "poll")
+     * @return 발사한 제어 액션 수. 0 이면 가드에 막혔거나 변화 없음
+     */
+    public int tryDispatchAutoControl(String caller) {
+        if (!("dev".equals(wpp_code) || "seoul".equals(wpp_code))) return 0;
+        if (!checkTestMode() || !aiControlStatus()) return 0;
+        // dev 인스턴스가 같은 DB 에 자동제어 명령을 INSERT 하면 운영(seoul) 결과를 덮어쓰는 멀티 인스턴스 충돌.
+        if (!isControlDispatchEnabled()) {
+            System.out.println("[dispatch/" + caller + "] DISABLED (seoul.control.dispatch.enabled=false) → skip");
+            return 0;
+        }
+        final int pumpGrpFixed = 1;
+        HashMap<String, Object> lockStatus = checkControlLockStatus(pumpGrpFixed);
+        if (Boolean.TRUE.equals(lockStatus.get("locked"))) {
+            System.out.println("[dispatch/" + caller + "] LOCKED pumpGrp=" + pumpGrpFixed
+                    + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime"));
+            return 0;
+        }
+        int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpFixed);
+        if (inserted > 0) {
+            recordControlCommand(pumpGrpFixed, "ai_auto");
+            System.out.println("[dispatch/" + caller + "] FIRED actions=" + inserted + " pumpGrp=" + pumpGrpFixed);
+        }
+        return inserted;
     }
 
     /**
@@ -1684,7 +1723,7 @@ public class PumpService {
                             + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime"));
                     continue;
                 }
-                // AI 추천 팝업도 자동 제어와 동일하게 2단계(전체 OFF 선행 + 5분 지연) 발사
+                // AI 추천 팝업도 자동 제어와 동일하게 2단계(전체 OFF 선행 + preOffDelayMinutes 지연) 발사
                 int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpInt);
                 if (inserted > 0) {
                     recordControlCommand(pumpGrpInt, "ai_command");
@@ -2904,7 +2943,7 @@ public class PumpService {
      * 1) 즉시: 정지 대상(현재 ON & 목표 OFF)이 있으면 "유지 조합"(현재 ∧ 목표) 전체를 발사한다.
      *    → 꺼야 할 펌프만 STOP, 계속 돌 펌프는 RUN 유지, 신규 기동 펌프는 아직 켜지 않음.
      *    예) 현재 1,2,3,4 / 목표 2,3,4,5 → 1단계 = 0,1,1,1,0,0,0,0,0 (1만 정지, 5는 아직).
-     * 2) preOffDelayMinutes(기본 5분) 뒤: 기동 대상(현재 OFF & 목표 ON)이 있으면 목표조합 전체를
+     * 2) preOffDelayMinutes(기본 3분) 뒤: 기동 대상(현재 OFF & 목표 ON)이 있으면 목표조합 전체를
      *    지연 예약 발사(insertPredictionCommands)해 신규 펌프를 기동한다. 예) 2단계 = 0,1,1,1,1,0,0,0,0.
      *    이때 목표 조합은 1단계 시점(T)에 조회한 target 스냅샷을 그대로 사용하며 재조회하지 않는다.
      *    (재조회하면 1단계가 바꿔놓은 실측이 반영된 예측을 받아 2단계가 1단계와 같아지고 기동이 누락됨)

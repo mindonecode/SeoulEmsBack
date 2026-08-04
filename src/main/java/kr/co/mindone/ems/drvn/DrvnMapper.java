@@ -119,6 +119,22 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectTargetLevelByTags(@Param("tags") List<String> tags);
 
 	/**
+	 * 수위조건 복귀수위 되돌림 대기 상태 조회 (TB_CTR_LEVEL_RETURN, 그룹당 1행).
+	 * @param pumpGrp 펌프 그룹
+	 * @return PUMP_GRP, DIRECTION(UP|DOWN), TRIGGER_STATIONS(CSV), START_TIME. 대기 없으면 null
+	 */
+	HashMap<String, Object> selectLevelReturnState(@Param("pumpGrp") int pumpGrp);
+
+	/**
+	 * 되돌림 대기 상태 기록/교체. 새 이탈이 나면 기존 상태를 덮어쓴다(새 이탈 우선 정책).
+	 * @param param pumpGrp, direction, triggerStations, startTime, startComb, startReason
+	 */
+	void upsertLevelReturnState(HashMap<String, Object> param);
+
+	/** 되돌림 완료 또는 상태 무효화 시 대기 상태 삭제. */
+	void deleteLevelReturnState(@Param("pumpGrp") int pumpGrp);
+
+	/**
 	 * 탱크 유량 및 압력 데이터를 조회하는 메서드
 	 * @param map 조회 조건을 담은 맵
 	 * @return 탱크 유량 및 압력 데이터를 반환
@@ -279,6 +295,13 @@ public interface DrvnMapper {
 	 * @return 이전 사용 펌프 문자열 데이터를 반환
 	 */
 	HashMap<String, String> getCurUsePumpString(HashMap<String, Object> pumpUseParam);
+
+	/**
+	 * [Seoul/Dev] 실측 가동 펌프 조합 (PMB_TAG 기준 공통 최신 단일시점).
+	 * getCurUsePumpString 의 '전체 max(TS)' 결함을 피하기 위한 대체 쿼리 — XML 주석 참고.
+	 * @return { ts, PUMP_USE_RST("3,5,6,9") }. 해당 창에 PMB 실측이 없으면 값이 null
+	 */
+	HashMap<String, String> selectActualPumpUseByGrp(HashMap<String, Object> param);
 
 	/**
 	 * 실제 측정된 펌프 조합 데이터를 조회하는 메서드
