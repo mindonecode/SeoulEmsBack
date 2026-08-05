@@ -3484,9 +3484,11 @@ public class DrvnConfig {
 				double[] gnLv     = stationLevelWithTarget(seoulGnTags, dateTime);
 				double[] baFrontLv = stationLevelWithTarget(seoulBaTags, dateTime);       // 유입 — 하한(증량) 판정
 				double[] baRearLv  = stationLevelWithTarget(seoulBaUpperTags, dateTime);  // 유출 — 상한(감량) 판정
-				int gnCnt      = (int) gnLv[3];
-				int baFrontCnt = (int) baFrontLv[3];
-				int baRearCnt  = (int) baRearLv[3];
+				// 로그용 "실측/목표" 채택 수조 수. 두 집합이 분리돼 있어(stationLevelWithTarget)
+				// 한 숫자만 남기면 판정불가·평균 이상의 원인을 실측 결손과 목표 결손으로 가릴 수 없다.
+				String gnTanks      = (int) gnLv[4]      + "/" + (int) gnLv[5];
+				String baFrontTanks = (int) baFrontLv[4] + "/" + (int) baFrontLv[5];
+				String baRearTanks  = (int) baRearLv[4]  + "/" + (int) baRearLv[5];
 
 				// 증감 판정 + 복귀수위 되돌림은 resolveLevelWithReturn 에 모아 두었다 —
 				// 제어사유 팝업(buildControlJudgment)이 같은 산식을 재사용해 화면과 실제 판정이 갈리지 않게 한다.
@@ -3530,14 +3532,14 @@ public class DrvnConfig {
 				// baFront 는 하한(증량), baRear 는 상한(감량) 판정에 쓰인 값이다.
 				// rtn = 지점별 복귀수위((상한+하한)/2). pending = 되돌림 대기 방향(없으면 null).
 				// delta = 복귀+이탈 합계. 실제 조합 이동은 baseIdx → returnIdx(복귀) → adjustedIdx(이탈) 순차.
-				logger.info("[SEOUL/LEVEL] ts={} pump_grp={} hour={}(실측·목표 기준, tsHour={}) gn(cur={}, low={}, up={}, rtn={}, tanks={}) baFront(cur={}, low={}, rtn={}, tanks={}) baRear(cur={}, up={}, rtn={}, tanks={}) pending={}/{} returned={} cycleWait={} reason='{}' delta={} actLevel={} baseIdx={}(실측) adjustedIdx={} predIdx={} sizeMax={} returnComb={} | returnDelta={} devDelta={} returnIdx={}",
+				logger.info("[SEOUL/LEVEL] ts={} pump_grp={} hour={}(실측·목표 기준, tsHour={}) gn(cur={}, low={}, up={}, rtn={}, tanks={}(실측/목표)) baFront(cur={}, low={}, rtn={}, tanks={}) baRear(cur={}, up={}, rtn={}, tanks={}) pending={}/{} returned={} cycleWait={} reason='{}' delta={} actLevel={} baseIdx={}(실측) adjustedIdx={} predIdx={} sizeMax={} returnComb={} | returnDelta={} devDelta={} returnIdx={}",
 						ts, pump_grp, dateTime.minusMinutes(PRDCT_OFFSET_MIN).getHour(), dateTime.getHour(),
 						String.format("%.3f", gnLv[0]), String.format("%.3f", gnLv[1]), String.format("%.3f", gnLv[2]),
-						String.format("%.3f", returnLevel(gnLv)), gnCnt,
+						String.format("%.3f", returnLevel(gnLv)), gnTanks,
 						String.format("%.3f", baFrontLv[0]), String.format("%.3f", baFrontLv[1]),
-						String.format("%.3f", returnLevel(baFrontLv)), baFrontCnt,
+						String.format("%.3f", returnLevel(baFrontLv)), baFrontTanks,
 						String.format("%.3f", baRearLv[0]), String.format("%.3f", baRearLv[2]),
-						String.format("%.3f", returnLevel(baRearLv)), baRearCnt,
+						String.format("%.3f", returnLevel(baRearLv)), baRearTanks,
 						levelJudge.get("pending"), levelJudge.get("pendingTriggers"), levelJudge.get("returned"),
 						levelJudge.get("cycleWait"),
 						levelReason, levelDelta, actLevel, levelBaseIdx, levelIdx, closestPointIndex,
@@ -6307,6 +6309,8 @@ public class DrvnConfig {
 	 * @return loadZone/loadZoneLabel/judgmentTime/actualRefTime
 	 *         + 수위조건 ON 이면 levelDelta/levelReason/targetHour/levelConditionEnabled + baRear
 	 *           + returnPending(UP|DOWN|null)/returnPendingTriggers/returnApplied
+	 *         + actualComb/recommendComb/combSlotTime — 실제 적재·발사 기준 조합 CSV.
+	 *           화면 조합 배지가 산포도 예측이 아니라 이 값을 써야 판정과 갈리지 않는다.
 	 *         + gn/ba(=북악 전단)/baRear(=북악 후단)
 	 *           {level,active,levelCur,levelLower,levelUpper,returnLevel,tanks,levelRole,
 	 *            reachable,sustain,pred22,threshold,target}
@@ -6405,6 +6409,31 @@ public class DrvnConfig {
 			result.put("targetHour", actualRefTime.getHour());
 		} else {
 			result.put("levelConditionEnabled", false);
+		}
+
+		// === 실제 적재/발사 조합 — 팝업 '현재/추천 펌프 조합' 의 단일 소스 ===
+		// 종전 팝업은 조합 배지를 산포도 예측(/dr/systemResistanceCurves, opt_idx=pre)에서 받아
+		// 수위조건 판정 결과와 갈렸다. 판정이 유지(delta=0, baseIdx=adjustedIdx)인데 화면에는
+		// 예측 기반 감량이 떠서 "유지여야 하는데 추천이 감량" 으로 읽혔다
+		// (2026-08-04 17:20 슬롯: 적재 [2,4,7,8] 3.5대인데 화면은 [2,4,8] 3.0대 → "0.5대 감량").
+		// pumpDrvnMinute(latestSlot=1) 는 조합 변경 알림(AiService.collectAlarmItems)과
+		// 발사 경로(PumpMapper.selectLatestPumpYnByGrp)가 보는 최신 슬롯과 같은 기준이므로,
+		// 이 값을 내려주면 팝업·알람·발사 셋이 같은 조합을 가리킨다.
+		// pump_grp=1 은 위 resolveLevelWithReturn 호출과 같은 서울 송수 단일 그룹 전제다.
+		try {
+			HashMap<String, String> combParam = new HashMap<>();
+			combParam.put("pump_grp", "1");
+			combParam.put("nowDate", pumpService.nowStringDate());
+			combParam.put("latestSlot", "1");   // 발사 슬롯과 동일 기준
+			HashMap<String, String> comb = aiMapper.pumpDrvnMinute(combParam);
+			if (comb != null) {
+				result.put("actualComb", comb.get("cur_comb"));       // 실측 조합 CSV (PMB_TAG 공통 최신시점)
+				result.put("recommendComb", comb.get("pre_comb"));    // 적재된 추천 조합 CSV
+				result.put("combSlotTime", comb.get("rgstr_time"));   // 그 추천 조합의 슬롯 시각
+			}
+		} catch (Exception e) {
+			// 조합 조회 실패는 판정 자체를 막지 않는다 — 화면이 산포도 폴백으로 표시한다.
+			logger.warn("[SEOUL] 팝업 표시용 실측·추천 조합 조회 실패: {}", e.getMessage());
 		}
 
 		if ("L".equals(load)) {
@@ -6856,20 +6885,20 @@ public class DrvnConfig {
 	/**
 	 * [Seoul/Dev · 수위조건] 배수지 하나의 (현재수위, 목표 하한, 목표 상한) 을 산출.
 	 *
-	 * 핵심: 세 값을 **같은 태그 집합**에서 평균낸다. 기존 두 경로는 활성 필터가 서로 달라
-	 *   - 현재수위(avgActiveSeoulWaterLevel): 실측값 ≥ seoulActiveThreshold 인 태그
-	 *   - 목표수위(addTargetAvgPoint):        목표수위 값 ≥ seoulActiveThreshold 인 태그
-	 * 두 평균이 다른 수조 집합에서 나올 수 있었다(빈 수조는 실측 평균에서 빠지지만 목표 평균에는
-	 * 남는다). 수위조건은 현재수위와 목표수위를 직접 비교하므로 그대로 두면 판정이 왜곡된다.
-	 * → 여기서는 "실측이 활성이고, 그 시간대 목표수위 상·하한이 모두 있고, 그 목표값들도 활성"인
-	 *   태그만 채택한다. 두 활성 조건(실측·목표)을 모두 걸어야 화면 시리즈(addTargetAvgPoint)와
-	 *   같은 수조 집합이 되어 화면에 보이는 상/하한과 판정이 쓰는 상/하한이 일치한다.
+	 * <b>실측 집합과 목표 집합을 분리한다.</b>
+	 *   - 현재수위: 실측값 ≥ seoulActiveThreshold 인 태그 (= 운영중 수조). 목표수위 조건 무관.
+	 *   - 목표 하한·상한: 그 시간대 목표 상·하한이 모두 있고 두 값 모두 ≥ seoulActiveThreshold 인 태그.
 	 *
-	 * 목표값 활성 조건이 빠져 있어 실제로 오판정이 발생했다(2026-07-31 10:50 공릉):
-	 *   목표 상한이 3m 미만으로 설정된 수조 1개가 실측만 3m 이상이어서 판정에는 포함 →
-	 *   6지 상한 평균 5.049 (화면은 그 수조를 제외한 5지 평균 5.6). 실측 평균 5.497 이
-	 *   5.049 를 넘어 감량(−1)이 나갔지만 화면상으로는 상한(5.6) 미달로 보였다.
-	 *   (해당 수조가 몇 지인지는 TB_TARGET_LEVEL 확인 필요 — 평균 역산으로는 특정 불가)
+	 * 종전에는 목표수위 조건을 통과한 태그만 실측 평균에도 넣어 두 평균의 집합을 강제로 일치시켰다.
+	 * 그 결과 목표수위 결손이 현재수위까지 오염시켰다 — 실제로 물이 차 있는 수조가 TB_TARGET_LEVEL
+	 * 에 그 시간대 행이 없다는 이유로 현재수위 평균에서 빠졌다(대시보드는 5개가 3m 이상인데 판정
+	 * 현재수위는 4개 평균). "운영중 수조" 의 정의는 실측 수위 하나뿐이므로 실측 집합에서 목표 조건을
+	 * 떼어냈다.
+	 *
+	 * 목표 상·하한끼리는 여전히 같은 집합을 쓴다. 상/하한을 따로 걸러 집합이 갈리면 상한 &lt; 하한
+	 * 역전이 생긴다. 목표값 활성 조건(≥ 임계)도 유지한다 — 빠져 있어 오판정이 발생한 이력이 있다
+	 * (2026-07-31 10:50 공릉: 목표 상한이 3m 미만인 수조 1개가 섞여 상한 평균이 5.049 로 내려가
+	 *  실측 5.497 이 이를 넘어 감량(−1)이 나갔으나 화면상으로는 상한(5.6) 미달로 보였다).
 	 *
 	 * 목표수위 상/하한은 pickTargetVal() 로 USER 설정값(USER_MIN_VL/USER_MAX_VL) 우선,
 	 * 없으면 기본값(MIN_VL/MAX_VL). 시간대는 실측과 동일한 actualRefTime(dateTime − 10분) 의
@@ -6877,23 +6906,30 @@ public class DrvnConfig {
 	 *
 	 * @param tags     배수지 수위 태그 배열 (공릉 또는 북악)
 	 * @param dateTime 판단 기준 시각
-	 * @return double[4] = {현재수위 평균, 목표 하한 평균, 목표 상한 평균, 채택 태그 수}.
-	 *         채택 태그 수 0 이면 판정 불가(앞의 세 값은 0).
+	 * @return double[6] = {현재수위 평균, 목표 하한 평균, 목표 상한 평균,
+	 *                      판정가능 여부(0=불가, 그 외는 실측 채택 수),
+	 *                      실측 채택 수조 수(운영수조), 목표 채택 수조 수}.
+	 *         실측·목표 어느 한쪽이라도 0 이면 index 3 은 0(판정 불가)이지만,
+	 *         index 0~2 는 있는 쪽 값을 그대로 담는다(화면 표시용).
 	 */
 	private double[] stationLevelWithTarget(String[] tags, LocalDateTime dateTime) {
-		double[] none = new double[]{0.0, 0.0, 0.0, 0};
+		double[] none = new double[]{0.0, 0.0, 0.0, 0, 0, 0};
 		if (tags == null || tags.length == 0) return none;
 
 		List<HashMap<String, Object>> rows = drvnMapper.selectTargetLevelByTags(Arrays.asList(tags));
-		if (rows == null || rows.isEmpty()) return none;
 
 		// TAG(대문자) → HOURS → row
+		// 목표수위 행이 하나도 없어도 조기 반환하지 않는다 — 실측 평균은 목표수위와 무관하게 산출해야
+		// 하므로(아래 curCnt 블록) 여기서 끊으면 실측까지 0 이 된다. byTag 가 빈 맵이면
+		// 목표 집합(tgtCnt)만 0 이 되고 판정 불가로 빠진다.
 		Map<String, Map<Integer, HashMap<String, Object>>> byTag = new HashMap<>();
-		for (HashMap<String, Object> r : rows) {
-			if (r == null || r.get("HOURS") == null) continue;
-			String tag = String.valueOf(r.get("TAG")).toUpperCase();
-			int hours = ((Number) r.get("HOURS")).intValue();
-			byTag.computeIfAbsent(tag, k -> new HashMap<>()).put(hours, r);
+		if (rows != null) {
+			for (HashMap<String, Object> r : rows) {
+				if (r == null || r.get("HOURS") == null) continue;
+				String tag = String.valueOf(r.get("TAG")).toUpperCase();
+				int hours = ((Number) r.get("HOURS")).intValue();
+				byTag.computeIfAbsent(tag, k -> new HashMap<>()).put(hours, r);
+			}
 		}
 
 		// 현재 수위는 '실제 산출 시점' 기준으로 읽어야 한다 → actualRefTime(dateTime − 10분).
@@ -6918,10 +6954,28 @@ public class DrvnConfig {
 
 		Map<String, Double> latestByTag = latestRawByTag(tags, actualRefTime);
 
-		double curSum = 0.0, lowSum = 0.0, upSum = 0.0;
-		int cnt = 0;
+		// 실측 평균과 목표 상·하한 평균은 서로 다른 태그 집합으로 낸다.
+		//   • 실측(curSum/curCnt) — '운영중 수조' 정의는 실측 수위 ≥ 임계 하나뿐이다.
+		//     목표수위가 그 시간대에 없거나 미설정이어도 실제로 물이 차 있는 수조는 현재수위에 들어가야 한다.
+		//     (종전에는 목표수위 조건까지 통과한 태그만 실측 평균에 넣어, 목표 결손이 현재수위까지
+		//      오염시켰다. 화면 대시보드는 5개가 3m 이상인데 판정 현재수위는 4개 평균이 나오는 불일치.)
+		//   • 목표(lowSum·upSum/tgtCnt) — 목표가 온전히 설정된 수조만.
+		//     상·하한은 반드시 같은 집합으로 낸다. 따로 걸러 집합이 갈리면 상한 < 하한 역전이 생긴다.
+		double curSum = 0.0;
+		int curCnt = 0;
+		double lowSum = 0.0, upSum = 0.0;
+		int tgtCnt = 0;
 		for (String tag : tags) {
 			String key = tag.toUpperCase();
+
+			// --- 실측 집합: 목표수위 조건과 완전히 독립 ---
+			Double cur = latestByTag.get(key);
+			if (cur != null && cur >= seoulActiveThreshold) {
+				curSum += cur;
+				curCnt++;
+			}
+
+			// --- 목표 집합 ---
 			Map<Integer, HashMap<String, Object>> hm = byTag.get(key);
 			if (hm == null) continue;
 			HashMap<String, Object> row = hm.get(hours);
@@ -6930,21 +6984,21 @@ public class DrvnConfig {
 			Double upper = pickTargetVal(row, true);
 			if (lower == null || upper == null) continue;   // 목표 미설정 태그는 제외
 			// 목표값 자체가 임계 미만인 수조 제외 — 화면 시리즈(addTargetAvgPoint)와 동일 기준.
-			// 목표수위 값 ≥ 3m = 해당 수조 정상 동작중으로 판단한다. 상·하한 중 하나라도 미달이면
-			// 그 수조는 정상 운영 대상이 아니므로 상한·하한 양쪽 평균에서 함께 뺀다
-			// (상/하한을 따로 걸러 태그 집합이 갈리면 상한 < 하한 역전이 생긴다).
+			// 목표수위 값 ≥ 3m = 해당 수조 정상 동작중으로 판단한다.
 			if (lower < seoulActiveThreshold || upper < seoulActiveThreshold) continue;
 
-			Double cur = latestByTag.get(key);
-			if (cur == null || cur < seoulActiveThreshold) continue;   // 비활성 수조 제외
-
-			curSum += cur;
 			lowSum += lower;
 			upSum  += upper;
-			cnt++;
+			tgtCnt++;
 		}
-		if (cnt == 0) return none;
-		return new double[]{curSum / cnt, lowSum / cnt, upSum / cnt, cnt};
+
+		double curAvg = curCnt > 0 ? curSum / curCnt : 0.0;
+		double lowAvg = tgtCnt > 0 ? lowSum / tgtCnt : 0.0;
+		double upAvg  = tgtCnt > 0 ? upSum  / tgtCnt : 0.0;
+		// lv[3] = 판정 가능 여부(0 = 불가). 실측·목표 어느 한쪽이라도 비면 비교 자체가 성립하지 않는다.
+		// 값은 실측 채택 수를 담아 종전 로그·reason 의 '수조 수' 의미를 유지한다.
+		int judgeCnt = (curCnt > 0 && tgtCnt > 0) ? curCnt : 0;
+		return new double[]{curAvg, lowAvg, upAvg, judgeCnt, curCnt, tgtCnt};
 	}
 
 	/**
@@ -6952,7 +7006,10 @@ public class DrvnConfig {
 	 * 쿼리가 TAGNAME, TS DESC 정렬이라 태그별 첫 행이 최신이다.
 	 *
 	 * @param tags 조회 태그 배열
-	 * @param at   기준 시각 (조회 창 [at, at])
+	 * @param at   기준 시각. 실제 조회 창은 <b>(at − 10분, at]</b> 이다 — startDateTime/endDateTime
+	 *             에 같은 값을 넣지만 selectRawDataRangeForTags 가 하한을
+	 *             {@code DATE_SUB(startDateTime, INTERVAL 10 MINUTE)} 로 스스로 넓힌다.
+	 *             그 창에서 태그별 최신 TS 1건을 채택하므로 해당 분 데이터가 비어도 직전 값으로 메워진다.
 	 * @return TAG(대문자) → 값. 값이 없는 태그는 키 자체가 없다.
 	 */
 	private Map<String, Double> latestRawByTag(String[] tags, LocalDateTime at) {
@@ -6988,38 +7045,43 @@ public class DrvnConfig {
 
 	/**
 	 * 수위조건 판정에 쓰인 값을 응답 객체(gn/ba)에 담는다 — 화면이 판정 근거를 그대로 표시하도록.
-	 * 키: levelCur(현재수위), levelLower(하한), levelUpper(상한), tanks(평균에 참여한 수조 수).
-	 * tanks 는 화면에 반드시 노출한다. 예를 들어 북악 전단 2지 중 1지만 채택된 상황
-	 * (실측 &lt;3m 이거나 목표 미설정)이 숨으면 1지 평균을 2지 평균으로 오해한다.
+	 * 키: levelCur(현재수위), levelLower(하한), levelUpper(상한), tanks(운영수조 수).
+	 *
+	 * tanks 는 <b>현재수위 평균에 들어간 수조 수</b>(= 실측 ≥ 임계, 목표수위 무관)다. 화면에
+	 * "운영수조 N개" 로 노출한다. 예를 들어 북악 전단 2지 중 1지만 운영중인 상황이 숨으면
+	 * 1지 값을 2지 평균으로 오해한다.
+	 *
+	 * 실측·목표는 집합이 다르므로 null 처리도 따로 한다 — 목표수위만 결손일 때 현재수위를
+	 * 같이 null 로 만들면 화면에서 멀쩡한 실측값이 사라진다.
 	 */
 	private void putLevelCondition(HashMap<String, Object> obj, double[] lv) {
-		int tanks = (int) lv[3];
-		obj.put("tanks", tanks);
-		if (tanks == 0) {   // 판정 불가 — 0.0 을 실제 수위로 오해하지 않도록 null
-			obj.put("levelCur", null);
-			obj.put("levelLower", null);
-			obj.put("levelUpper", null);
-			return;
-		}
-		obj.put("levelCur", lv[0]);
-		obj.put("levelLower", lv[1]);
-		obj.put("levelUpper", lv[2]);
+		int curCnt = (int) lv[4];   // 실측 채택 = 운영수조
+		int tgtCnt = (int) lv[5];   // 목표 채택
+		obj.put("tanks", curCnt);
+		// 0.0 을 실제 수위로 오해하지 않도록, 채택 수조가 없는 쪽만 null
+		obj.put("levelCur",   curCnt > 0 ? (Object) lv[0] : null);
+		obj.put("levelLower", tgtCnt > 0 ? (Object) lv[1] : null);
+		obj.put("levelUpper", tgtCnt > 0 ? (Object) lv[2] : null);
 	}
 
 	/**
 	 * [Seoul/Dev] 수위조건 증감 판정. insertPumpComb 와 제어사유 팝업(buildControlJudgment)이 공유한다.
 	 *
 	 * 정책(3437~3448 주석):
-	 *   ① 공릉수위 ≤ 공릉 하한  OR  북악 전단수위 ≤ 북악 전단 하한 → +1  (증량 우선 — 공급 안정)
+	 *   ① 공릉수위 ≤ 공릉 하한  OR  북악 전단수위 ≤ 북악 전단 하한 → +1
 	 *   ② 공릉수위 ≥ 공릉 상한  OR  북악 후단수위 ≥ 북악 후단 상한 → −1
-	 *   ③ 그 외(하한~상한 데드밴드)                                → 0
-	 *   판정 불가(세 지점 중 하나라도 활성 수조 0개 또는 목표수위 미설정) → 0.
+	 *   ③ ①과 ②가 <b>동시 성립</b>                                → 0 (유지)
+	 *      어느 방향으로 움직여도 반대쪽 이탈을 악화시킨다. 대기 상태도 기록하지 않는다.
+	 *      ①을 먼저 평가하는 else-if 로 두면 동시 이탈에서 증량이 나갔다 —
+	 *      북악 후단이 이미 상한인데 증량하면 월류 방향이다.
+	 *   ④ 그 외(하한~상한 데드밴드)                                → 0
+	 *   판정 불가(세 지점 중 하나라도 운영수조 0개 또는 목표수위 채택 0개) → 0.
 	 *   데이터 결손으로 펌프를 조작하지 않는다.
 	 *
 	 * 북악은 경계별로 보는 지점이 다르다: 하한(증량)은 전단=유입, 상한(감량)은 후단=유출.
 	 * 공릉은 한 지점에서 하한·상한 둘 다 본다.
 	 *
-	 * @param gnLv      공릉 {현재, 하한, 상한, 채택 수조수} — {@link #stationLevelWithTarget} 결과
+	 * @param gnLv      공릉 {현재, 하한, 상한, 판정가능, 운영수조수, 목표채택수} — {@link #stationLevelWithTarget} 결과
 	 * @param baFrontLv 북악 전단(유입) 동일 형식 — 하한만 사용
 	 * @param baRearLv  북악 후단(유출) 동일 형식 — 상한만 사용
 	 * @return { delta:Integer(-1|0|+1), reason:String, triggers:String }
@@ -7033,30 +7095,50 @@ public class DrvnConfig {
 		int delta;
 		String reason;
 		String triggers = "";
+
+		// 하한·상한 이탈을 먼저 각각 판정한다. else-if 로 하한을 먼저 잡으면 동시 이탈에서
+		// 하한만 걸려 증량이 나가고 triggers 에도 상한 지점이 빠져 복귀 대상까지 누락된다.
+		// 동시 이탈은 지점이 달라 물리적으로 성립한다(공릉 갈수 + 북악후단 만수). 같은 지점 안에서는
+		// 하한 < 상한이라 불가능하므로 이것이 유일한 동시 이탈 경로다.
+		// 북악후단이 이미 상한인데 증량하면 월류 방향이라 반드시 유지여야 한다.
+		boolean gnLower      = gnLv[0] <= gnLv[1];
+		boolean baFrontLower = baFrontLv[0] <= baFrontLv[1];
+		boolean gnUpper      = gnLv[0] >= gnLv[2];
+		boolean baRearUpper  = baRearLv[0] >= baRearLv[2];
+		boolean lowerHit = gnLower || baFrontLower;
+		boolean upperHit = gnUpper || baRearUpper;
+		String lowDetail = "하한: gn " + String.format("%.3f", gnLv[0]) + "<=" + String.format("%.3f", gnLv[1])
+				+ " ? " + gnLower
+				+ ", baFront " + String.format("%.3f", baFrontLv[0]) + "<=" + String.format("%.3f", baFrontLv[1])
+				+ " ? " + baFrontLower;
+		String upDetail = "상한: gn " + String.format("%.3f", gnLv[0]) + ">=" + String.format("%.3f", gnLv[2])
+				+ " ? " + gnUpper
+				+ ", baRear " + String.format("%.3f", baRearLv[0]) + ">=" + String.format("%.3f", baRearLv[2])
+				+ " ? " + baRearUpper;
+
 		// 세 지점 all-or-nothing. 한 곳만 읽혀도 OR 조건이 성립할 수는 있지만,
 		// "수위로 판단하는 정책이므로 못 읽으면 조작하지 않는다" 는 기존 방침을 그대로 확장했다.
 		// (종전에는 공급안정 우선으로 +1 이었으나, 데이터 결손만으로 펌프가 올라가는
 		//  부작용이 실제 발생했다: 2026-07-30 15:30 슬롯 tanks=0 → 엉뚱한 0.5대 증량)
 		if (gnCnt == 0 || baFrontCnt == 0 || baRearCnt == 0) {
 			delta  = 0;
-			reason = "판정불가(gnCnt=" + gnCnt + ", baFrontCnt=" + baFrontCnt
-					+ ", baRearCnt=" + baRearCnt + ") → 유지";
-		} else if (gnLv[0] <= gnLv[1] || baFrontLv[0] <= baFrontLv[1]) {
+			// 실측/목표 중 어느 쪽이 비었는지 남긴다 — 집합이 분리돼 있어 한 숫자로는 원인을 못 가린다.
+			reason = "판정불가(실측/목표 채택 수조: gn=" + (int) gnLv[4] + "/" + (int) gnLv[5]
+					+ ", baFront=" + (int) baFrontLv[4] + "/" + (int) baFrontLv[5]
+					+ ", baRear=" + (int) baRearLv[4] + "/" + (int) baRearLv[5] + ") → 유지";
+		} else if (lowerHit && upperHit) {
+			// 상·하한 동시 이탈 → 유지. 어느 방향으로 움직여도 반대쪽 이탈을 악화시킨다.
+			delta  = 0;
+			triggers = "";   // 대기 상태를 기록하지 않는다 — 되돌릴 제어가 없다
+			reason = "상·하한 동시 이탈 (" + lowDetail + " / " + upDetail + ") → 유지";
+		} else if (lowerHit) {
 			delta  = +1;
-			triggers = joinNonEmpty(gnLv[0] <= gnLv[1] ? "GN" : null,
-					baFrontLv[0] <= baFrontLv[1] ? "BA_FRONT" : null);
-			reason = "하한 이하 (gn " + String.format("%.3f", gnLv[0]) + "<=" + String.format("%.3f", gnLv[1])
-					+ " ? " + (gnLv[0] <= gnLv[1])
-					+ ", baFront " + String.format("%.3f", baFrontLv[0]) + "<=" + String.format("%.3f", baFrontLv[1])
-					+ " ? " + (baFrontLv[0] <= baFrontLv[1]) + ") → +1";
-		} else if (gnLv[0] >= gnLv[2] || baRearLv[0] >= baRearLv[2]) {
+			triggers = joinNonEmpty(gnLower ? "GN" : null, baFrontLower ? "BA_FRONT" : null);
+			reason = "하한 이하 (" + lowDetail + ") → +1";
+		} else if (upperHit) {
 			delta  = -1;
-			triggers = joinNonEmpty(gnLv[0] >= gnLv[2] ? "GN" : null,
-					baRearLv[0] >= baRearLv[2] ? "BA_REAR" : null);
-			reason = "상한 이상 (gn " + String.format("%.3f", gnLv[0]) + ">=" + String.format("%.3f", gnLv[2])
-					+ " ? " + (gnLv[0] >= gnLv[2])
-					+ ", baRear " + String.format("%.3f", baRearLv[0]) + ">=" + String.format("%.3f", baRearLv[2])
-					+ " ? " + (baRearLv[0] >= baRearLv[2]) + ") → −1";
+			triggers = joinNonEmpty(gnUpper ? "GN" : null, baRearUpper ? "BA_REAR" : null);
+			reason = "상한 이상 (" + upDetail + ") → −1";
 		} else {
 			delta  = 0;
 			reason = "하한~상한 사이 → 유지";
