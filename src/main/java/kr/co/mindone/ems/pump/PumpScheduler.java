@@ -296,7 +296,7 @@ public class PumpScheduler {
                     //부분 AI 알람 생성
                     HashMap<String, Object> alarm = new HashMap<>();
                     alarm.put("alr_typ", "PUMP");
-                    alarm.put("nowDate", pumpService.nowStringDate());
+                    alarm.put("nowDate", pumpService.nowStringDateReal());
                     alarm.put("msg", "[" + ctrRunItem.get("CTR_NM").toString() + "] 제어 결과를 확인 할 수 없습니다.|");
                     //alarm.put("msg", "[" + ctrRunItem.get("CTR_NM").toString() + "] 제어 결과를 확인 할 수 없어 분석모드로 변경됩니다.|");
                     alarm.put("link", "");

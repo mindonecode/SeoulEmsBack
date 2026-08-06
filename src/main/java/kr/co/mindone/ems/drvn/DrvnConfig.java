@@ -6403,7 +6403,9 @@ public class DrvnConfig {
 			result.put("returnPending", judge.get("pending"));                 // UP/DOWN/null
 			result.put("returnPendingTriggers", judge.get("pendingTriggers")); // CSV/null
 			result.put("returnApplied", judge.get("returned"));                // 이 슬롯에 되돌림 판정
-			result.put("returnCycleWait", judge.get("cycleWait"));             // "12/30분" 또는 "미발사"/null
+			// "경과 12분 / 주기 30분"/null. 값이 있으면 항상 '제어 발사 후 대기' 다
+			// (발사 기록 없이는 대기가 걸리지 않는다 — resolveLevelWithReturn 참고).
+			result.put("returnCycleWait", judge.get("cycleWait"));
 			result.put("levelConditionEnabled", true);
 			// 목표수위 시간대는 실측과 동일한 actualRefTime 의 hour (stationLevelWithTarget 참고)
 			result.put("targetHour", actualRefTime.getHour());
@@ -7192,7 +7194,8 @@ public class DrvnConfig {
 	 * 되돌림이 한 슬롯(10분) 밀린다. 격자로 내리면 "정확히 N번째 슬롯에 열린다"가 성립한다.
 	 * (판정 직후 발사이므로 내림 오차는 초 단위다. 폴링 경로로 늦게 쏜 경우 최대 9분 관대해진다)
 	 *
-	 * @return 격자 정렬된 발사 시각. 두 소스 모두 없거나 조회 실패면 null(호출부가 판정 시각으로 폴백)
+	 * @return 격자 정렬된 발사 시각. 두 소스 모두 없거나 조회 실패면 null
+	 *         (호출부는 제어주기 대기를 걸지 않는다 — 반영을 기다릴 제어가 없다는 뜻이므로)
 	 */
 	private LocalDateTime lastDispatchTime(int pumpGrp) {
 		LocalDateTime latest = null;
@@ -7261,7 +7264,7 @@ public class DrvnConfig {
 	 *   ① 복귀 체크 (대기 상태가 있을 때만)
 	 *      0) 제어주기 대기: 마지막 제어명령 <b>발사 시각</b>부터 tb_ctr_cycle.LOCK_MIN 분이
 	 *         지나지 않았으면 복귀 체크를 건너뛴다(대기 유지). 이탈 체크는 그대로 진행한다.
-	 *         이탈 제어가 아직 발사되지 않았으면(마지막 발사 &lt; START_TIME) 무조건 대기.
+	 *         대기는 '제어 후 대기' 뿐이다 — 발사 기록이 없으면 대기 없이 복귀 체크로 넘어간다.
 	 *      제어의 원인이 된 배수지(TRIGGER_STATIONS)가 복귀수위 도달?
 	 *        도달  → returnDelta = ∓1 (UP 대기면 −1, DOWN 대기면 +1), 대기 상태 삭제
 	 *        미달  → returnDelta = 0, 대기 유지
@@ -7292,7 +7295,8 @@ public class DrvnConfig {
 	 * @param persist   true = 상태 기록/삭제 수행(insertPumpComb),
 	 *                  false = 읽기만(제어사유 팝업 — 조회 API 가 상태를 바꾸면 안 된다)
 	 * @return { returnDelta, deviationDelta, delta(=두 값의 합, 로그/표시용), reason,
-	 *           pending:String|null(대기 방향 UP/DOWN), pendingTriggers, returned:Boolean }
+	 *           pending:String|null(대기 방향 UP/DOWN), pendingTriggers, returned:Boolean,
+	 *           cycleWait:String|null(제어주기 대기 진행률 — 발사 후 대기 중일 때만) }
 	 *         조합 적용은 delta 합이 아니라 returnDelta → deviationDelta 순차 적용이어야 한다
 	 *         ({@link #shiftCombIndexByLevel} 은 한 단계씩만 이동한다).
 	 */
@@ -7328,49 +7332,27 @@ public class DrvnConfig {
 			// 제어주기(tb_ctr_cycle.LOCK_MIN) 대기 — 제어명령을 <b>발사한 시점</b>부터 이 시간이
 			// 지나기 전에는 복귀 체크를 하지 않는다. 정지/기동이 현장 수위에 반영되기 전에 판정하면
 			// 아직 움직이지 않은 수위로 되돌림이 나가 제어가 진동한다.
-			// 기준은 판정 시각(START_TIME)이 아니라 발사 시각이다 — 이탈 추천이 나도 발사는 throttle 에
-			// 밀려 더 늦을 수 있어서, 판정 시각 기준이면 실제 제어 직후에 대기가 풀려 버린다.
+			//
+			// 대기는 오직 '제어 후 대기' 다. 기준은 언제나 마지막 발사 시각이며 판정 시각(START_TIME)
+			// 기준 대기는 두지 않는다:
+			//   - 발사 기록이 없으면 → 반영을 기다릴 제어 자체가 없다. 대기 없이 복귀 체크로 넘어간다.
+			//   - 마지막 발사가 START_TIME 보다 이전이어도 → 그 발사 시각 그대로 센다. 선후를 따져
+			//     '미발사' 로 막으면, AI 추천 모드처럼 발사가 나지 않는 운용에서 대기가 영구히 풀리지
+			//     않는다(억제 구간에는 이탈 UPSERT 도 건너뛰어 START_TIME 이 고정되고, 증감 추천이
+			//     안 나오니 승인할 변경도 없어 발사 → 대기 해제 경로가 스스로 닫힌다).
 			int cycleMin = controlCycleMinutes();
-			// 비교 기준을 '실제 시각' 으로 통일한다. dateTime·START_TIME 은 PRDCT_TIME(= 실행 + 10분)
+			// 비교 기준을 '실제 시각' 으로 통일한다. dateTime 은 PRDCT_TIME(= 실행 + 10분)
 			// 이므로 −PRDCT_OFFSET_MIN 해서 발사 시각(실제 시각)과 같은 축에 놓는다.
 			LocalDateTime nowReal = dateTime.minusMinutes(PRDCT_OFFSET_MIN);
-			LocalDateTime startReal = null;
-			Object startObj = state.get("START_TIME");
-			if (startObj != null) {
-				try {
-					startReal = LocalDateTime.parse(String.valueOf(startObj).trim().replace(' ', 'T'))
-							.minusMinutes(PRDCT_OFFSET_MIN);
-				} catch (Exception e) {
-					logger.warn("[SEOUL/RETURN] START_TIME 파싱 실패 '{}': {}", startObj, e.getMessage());
-				}
-			}
 			LocalDateTime dispatched = lastDispatchTime(pumpGrp);
 
-			LocalDateTime waitFrom;
-			String waitBase;
-			if (dispatched == null) {
-				// 발사 기록이 아예 없음 → 판정 시각으로 폴백(막아버리면 대기가 영구히 안 풀린다).
-				waitFrom = startReal;
-				waitBase = "판정시각(발사기록 없음)";
-			} else if (startReal != null && dispatched.isBefore(startReal)) {
-				// 마지막 발사가 이 이탈 판정보다 이전 → 이탈 제어가 아직 발사되지 않았다.
-				// 발사도 안 된 제어를 되돌릴 수는 없으므로 무조건 대기.
-				waitFrom = null;
-				waitBase = "미발사";
-			} else {
-				waitFrom = dispatched;
-				waitBase = "발사시각";
-			}
-
-			long elapsedMin = (waitFrom == null) ? -1 : Duration.between(waitFrom, nowReal).toMinutes();
-			if (waitFrom == null || elapsedMin < cycleMin) {
+			long elapsedMin = (dispatched == null) ? -1 : Duration.between(dispatched, nowReal).toMinutes();
+			if (dispatched != null && elapsedMin < cycleMin) {
 				// 복귀만 건너뛴다 — 이탈 체크(②)는 그대로 진행해야 하므로 return 하지 않는다.
 				// returnDelta 는 0 으로 남고, 대기 상태도 그대로 보존된다.
 				// "경과 9분 / 주기 30분" 형태로 남긴다. "9/30분" 은 무엇이 분자인지 읽히지 않는다.
-				String prog = (waitFrom == null)
-						? "미발사"
-						: ("경과 " + elapsedMin + "분 / 주기 " + cycleMin + "분");
-				returnReason = "제어주기 대기 (" + prog + ", " + waitBase + ", " + state.get("DIRECTION") + ")";
+				String prog = "경과 " + elapsedMin + "분 / 주기 " + cycleMin + "분";
+				returnReason = "제어주기 대기 (" + prog + ", 발사시각, " + state.get("DIRECTION") + ")";
 				pendingDir = String.valueOf(state.get("DIRECTION"));
 				pendingTrg = String.valueOf(state.get("TRIGGER_STATIONS"));
 				cycleWaitDir = pendingDir;

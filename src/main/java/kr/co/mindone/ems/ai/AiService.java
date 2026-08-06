@@ -1564,7 +1564,7 @@ public class AiService {
                 pumpService.initCtrTag();
                 logItem.put("tag", "AiMode");
                 logItem.put("value", "AI Recommend Start");
-                logItem.put("time", pumpService.nowStringDate());
+                logItem.put("time", pumpService.nowStringDateReal());
                 logItem.put("anly_cd", "INIT");
                 logItem.put("flag", 2);
                 pumpService.insertHmiTagLog(logItem);
@@ -1585,7 +1585,7 @@ public class AiService {
                 pumpService.initCtrTag();
                 logItem.put("tag", "AiMode");
                 logItem.put("value", "AI Mode End");
-                logItem.put("time", pumpService.nowStringDate());
+                logItem.put("time", pumpService.nowStringDateReal());
                 logItem.put("anly_cd", "INIT");
                 logItem.put("flag", 2);
                 pumpService.insertHmiTagLog(logItem);
@@ -1618,7 +1618,7 @@ public class AiService {
             pumpService.initCtrTag();
             logItem.put("TAG", "AiMode");
             logItem.put("VALUE", "AI Control Start");
-            logItem.put("TIME", pumpService.nowStringDate());
+            logItem.put("TIME", pumpService.nowStringDateReal());
             logItem.put("ANLY_CD", "INIT");
             logItem.put("FLAG", 2);
             pumpService.insertHmiTagLog(logItem);
@@ -1652,7 +1652,7 @@ public class AiService {
             pumpService.initCtrTag();
             logItem.put("TAG", "AiMode");
             logItem.put("VALUE", "AI Recommend Start");
-            logItem.put("TIME", pumpService.nowStringDate());
+            logItem.put("TIME", pumpService.nowStringDateReal());
             logItem.put("ANLY_CD", "INIT");
             logItem.put("FLAG", 2);
             pumpService.insertHmiTagLog(logItem);
@@ -1679,7 +1679,7 @@ public class AiService {
             pumpService.initCtrTag();
             logItem.put("TAG", "AiMode");
             logItem.put("VALUE", "AI Mode End");
-            logItem.put("TIME", pumpService.nowStringDate());
+            logItem.put("TIME", pumpService.nowStringDateReal());
             logItem.put("ANLY_CD", "INIT");
             logItem.put("FLAG", 2);
             pumpService.insertHmiTagLog(logItem);

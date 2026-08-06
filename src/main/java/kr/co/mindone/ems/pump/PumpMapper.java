@@ -205,6 +205,22 @@ interface PumpMapper {
     void emsPumpAlarmInsert(HashMap < String, Object > map);
 
     /**
+     * 제어명령 발사 이벤트 적재 (TB_CTR_DISPATCH_EVT). 단계별 1행.
+     * @param map pumpGrp, stage(1|2), action('STOP'|'RUN'), pumpIdxs(변화분 CSV), triggerSrc, rgstrTime
+     */
+    void insertDispatchEvt(HashMap < String, Object > map);
+
+    /**
+     * afterIdx 이후의 발사 이벤트 조회 (최근 withinMin 분 이내, 최대 20건).
+     * @param map afterIdx, withinMin, pumpGrp(nullable)
+     * @return [{evtIdx, pumpGrp, stage, action, pumpIdxs, triggerSrc, rgstrTime}]
+     */
+    List < HashMap < String, Object >> selectDispatchEvtAfter(HashMap < String, Object > map);
+
+    /** 현재 최대 EVT_IDX (행이 없으면 0). 최초 폴링의 기준선 산출용. */
+    Integer selectDispatchEvtMaxIdx();
+
+    /**
      * 제어 태그 업데이트
      * @param map 업데이트할 데이터
      */

@@ -152,6 +152,53 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
+	 * [GET] 제어명령 발사 알림 폴링. (TB_CTR_DISPATCH_EVT)
+	 * 1단계(정지) · 2단계(기동) 발사가 일어난 순간을 단계별로 반환한다.
+	 * 프론트가 이 응답으로 발사 팝업을 띄우고 펌프별 음성 안내를 재생한다.
+	 *
+	 * afterIdx 를 주지 않으면 기준선(lastIdx)만 반환하고 items 는 비운다 —
+	 * 화면 최초 진입에서 지난 발사가 한꺼번에 재생되는 것을 막기 위함.
+	 *
+	 * @param afterIdx  마지막으로 받은 EVT_IDX. 없으면 기준선 요청
+	 * @param pumpGrp   특정 그룹만 볼 때 지정 (없으면 전체)
+	 * @param withinMin 최근 몇 분 이내만 (기본 10)
+	 * @return { lastIdx, items: [{evtIdx, pumpGrp, stage, action, pumpIdxs, triggerSrc, rgstrTime}] }
+	 */
+	@Operation(summary = "제어명령 발사 알림", description = "dispatchAlarm — 1/2단계 발사 이벤트 폴링")
+	@GetMapping("/dispatchAlarm")
+	public ResponseObject<HashMap<String, Object>> dispatchAlarm(
+			@RequestParam(required = false) Integer afterIdx,
+			@RequestParam(required = false) Integer pumpGrp,
+			@RequestParam(required = false) Integer withinMin){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS,
+				pumpService.dispatchAlarm(afterIdx, pumpGrp, withinMin));
+	}
+
+	/**
+	 * [GET] 수위조건 복귀수위 되돌림 대기 상태 조회. (TB_CTR_LEVEL_RETURN)
+	 * @param pumpGrp 펌프 그룹 (기본 1)
+	 * @return {PUMP_GRP, DIRECTION, TRIGGER_STATIONS, START_TIME} 또는 null(대기 없음)
+	 */
+	@Operation(summary = "복귀 대기 상태 조회", description = "selectLevelReturnState")
+	@GetMapping("/levelReturn")
+	public ResponseObject<HashMap<String, Object>> getLevelReturn(
+			@RequestParam(required = false, defaultValue = "1") int pumpGrp){
+		return makeSuccessObj(ResponseMessage.SELECT_SUCCESS, drvnService.selectLevelReturnState(pumpGrp));
+	}
+
+	/**
+	 * [DELETE] 수위조건 복귀 대기 상태 수동 해제. (TB_CTR_LEVEL_RETURN 삭제)
+	 * 대기가 비정상적으로 남아 이탈 판정이 계속 억제될 때 쓰는 복구 통로.
+	 * @param pumpGrp 펌프 그룹
+	 * @return 삭제 직전 상태(없었으면 null)
+	 */
+	@Operation(summary = "복귀 대기 상태 해제", description = "deleteLevelReturnState")
+	@DeleteMapping("/levelReturn/{pumpGrp}")
+	public ResponseObject<HashMap<String, Object>> deleteLevelReturn(@PathVariable int pumpGrp){
+		return makeSuccessObj(ResponseMessage.DELETE_SUCCESS, drvnService.deleteLevelReturnState(pumpGrp));
+	}
+
+	/**
 	 * [GET] 펌프 예측 가동이력 타임라인 조회 (예측·실측 비교 차트용).
 	 * @param param date(yyyy-MM-dd), pump_grp
 	 * @return [{ts, PUMP_IDX, PUMP_GRP_IDX, name, PUMP_YN}]

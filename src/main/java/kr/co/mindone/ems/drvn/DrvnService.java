@@ -362,6 +362,30 @@ public class DrvnService {
 		return commonMapper.selectCtrCfgHist(param);
 	}
 
+	/**
+	 * 수위조건 복귀수위 되돌림 대기 상태 조회 (TB_CTR_LEVEL_RETURN).
+	 * 화면·운영에서 "왜 제어주기 대기가 걸려 있나" 를 확인하는 용도.
+	 * @param pumpGrp 펌프 그룹
+	 * @return PUMP_GRP, DIRECTION, TRIGGER_STATIONS, START_TIME. 대기 없으면 null
+	 */
+	public HashMap<String, Object> selectLevelReturnState(int pumpGrp) {
+		return drvnMapper.selectLevelReturnState(pumpGrp);
+	}
+
+	/**
+	 * 되돌림 대기 상태 수동 해제 (TB_CTR_LEVEL_RETURN 삭제).
+	 * 평시에는 복귀수위 도달 시 배치가 스스로 지운다(DrvnConfig.resolveLevelWithReturn).
+	 * 대기가 비정상적으로 남아 이탈 판정이 계속 억제될 때 DB 직접 접속 없이 풀기 위한 통로다.
+	 * 지운 뒤 이탈이 여전하면 다음 10분 슬롯에 새 START_TIME 으로 다시 기록된다.
+	 * @param pumpGrp 펌프 그룹
+	 * @return 삭제 직전 상태(없었으면 null) — 무엇을 지웠는지 호출부가 확인할 수 있게 반환한다
+	 */
+	public HashMap<String, Object> deleteLevelReturnState(int pumpGrp) {
+		HashMap<String, Object> before = drvnMapper.selectLevelReturnState(pumpGrp);
+		drvnMapper.deleteLevelReturnState(pumpGrp);
+		return before;
+	}
+
 	@Autowired
 	SettingMapper settingMapper;
 	/**
