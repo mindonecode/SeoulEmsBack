@@ -224,7 +224,7 @@ public class PumpService {
                     + " remaining=" + lockStatus.get("remainingMinutes") + "min, lastCtrl=" + lockStatus.get("lastCtrlTime"));
             return 0;
         }
-        int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpFixed);
+        int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpFixed, "ai_auto");
         if (inserted > 0) {
             recordControlCommand(pumpGrpFixed, "ai_auto");
             System.out.println("[dispatch/" + caller + "] FIRED actions=" + inserted + " pumpGrp=" + pumpGrpFixed);
@@ -711,7 +711,7 @@ public class PumpService {
             //부분 AI 알람 생성
             HashMap < String, Object > alarm = new HashMap < > ();
             alarm.put("alr_typ", "PUMP");
-            alarm.put("nowDate", nowStringDate());
+            alarm.put("nowDate", nowStringDateReal());
             alarm.put("msg", sb.toString());
             alarm.put("link", "");
             System.out.println("alarm: " + alarm.toString());
@@ -778,7 +778,7 @@ public class PumpService {
             //부분 AI 알람 생성
             HashMap < String, Object > alarm = new HashMap < > ();
             alarm.put("alr_typ", "PUMP");
-            alarm.put("nowDate", nowStringDate());
+            alarm.put("nowDate", nowStringDateReal());
             alarm.put("msg", sb.toString());
             alarm.put("link", "");
             System.out.println("alarm: " + alarm.toString());
@@ -847,7 +847,7 @@ public class PumpService {
             //부분 AI 알람 생성
             HashMap < String, Object > alarm = new HashMap < > ();
             alarm.put("alr_typ", "PUMP");
-            alarm.put("nowDate", nowStringDate());
+            alarm.put("nowDate", nowStringDateReal());
             alarm.put("msg", sb.toString());
             alarm.put("link", "");
             System.out.println("alarm: " + alarm.toString());
@@ -1009,7 +1009,7 @@ public class PumpService {
             //부분 AI 알람 생성
             HashMap < String, Object > alarm = new HashMap < > ();
             alarm.put("alr_typ", "PUMP");
-            alarm.put("nowDate", nowStringDate());
+            alarm.put("nowDate", nowStringDateReal());
             alarm.put("msg", sb.toString());
             alarm.put("link", "");
             System.out.println("alarm: " + alarm.toString());
@@ -1724,7 +1724,7 @@ public class PumpService {
                     continue;
                 }
                 // AI 추천 팝업도 자동 제어와 동일하게 2단계(전체 OFF 선행 + preOffDelayMinutes 지연) 발사
-                int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpInt);
+                int inserted = devInsertHmiTagFromLatestPumpYn(pumpGrpInt, "ai_command");
                 if (inserted > 0) {
                     recordControlCommand(pumpGrpInt, "ai_command");
                 }
@@ -1780,7 +1780,7 @@ public class PumpService {
             boolean isFREQ = false;
             // 초기 DEBUG 로그
             tempCtrItem.put("TAG", "DEBUG");
-            tempCtrItem.put("TIME", nowStringDate());
+            tempCtrItem.put("TIME", nowStringDateReal());
             tempCtrItem.put("VALUE", changeList.toString());
             tempCtrItem.put("ANLY_CD", "pumpCommand");
             tempCtrItem.put("FLAG", 2);
@@ -2064,7 +2064,7 @@ public class PumpService {
             if (aiControlStatus() && !changeList.isEmpty()) {
                 HashMap < String, Object > alarm = new HashMap < > ();
                 alarm.put("alr_typ", "PUMP");
-                alarm.put("nowDate", nowStringDate());
+                alarm.put("nowDate", nowStringDateReal());
                 StringBuilder sb = new StringBuilder();
                 sb.append("[AI운전] 펌프 상태를 변경합니다.||");
                 for (HashMap < String, Object > changeItem: changeList) {
@@ -2138,7 +2138,7 @@ public class PumpService {
                 if (aiControlStatus()) {
                     HashMap<String, Object> alarm = new HashMap<>();
                     alarm.put("alr_typ", "PUMP_ERROR");
-                    alarm.put("nowDate", nowStringDate());
+                    alarm.put("nowDate", nowStringDateReal());
                     String msg = "[AI운전 경고] 신정수장 펌프 전체 정지 시도 감지. 안전을 위해 펌프 제어 명령을 취소했습니다.";
                     alarm.put("msg", msg);
                     alarm.put("link", "");
@@ -2324,7 +2324,7 @@ public class PumpService {
             if (aiControlStatus() && !changeList.isEmpty()) {
                 HashMap<String, Object> alarm = new HashMap<>();
                 alarm.put("alr_typ", "PUMP");
-                alarm.put("nowDate", nowStringDate());
+                alarm.put("nowDate", nowStringDateReal());
 
                 // StringJoiner를 사용하여 메시지를 깔끔하게 만듭니다.
                 StringJoiner sj = new StringJoiner("|");
@@ -2407,7 +2407,7 @@ public class PumpService {
 
             // 초기 DEBUG 로그
             tempCtrItem.put("TAG", "DEBUG");
-            tempCtrItem.put("TIME", nowStringDate());
+            tempCtrItem.put("TIME", nowStringDateReal());
             tempCtrItem.put("VALUE", changeList.toString());
             tempCtrItem.put("ANLY_CD", "pumpCommandWm");
             tempCtrItem.put("FLAG", 2);
@@ -2486,7 +2486,7 @@ public class PumpService {
                                 // 알람 생성
                                 HashMap < String, Object > alarm = new HashMap < > ();
                                 alarm.put("alr_typ", "PUMP");
-                                alarm.put("nowDate", nowStringDate());
+                                alarm.put("nowDate", nowStringDateReal());
                                 alarm.put("msg", "[AI운전] 현재 펌프 상태를 확인하지 못하였습니다. - PUMP_IDX: " + pumpIdx);
                                 alarm.put("link", "");
                                 emsPumpAlarmInsert(alarm);
@@ -2686,7 +2686,7 @@ public class PumpService {
                 if (aiControlStatus()) {
                     HashMap < String, Object > alarm = new HashMap < > ();
                     alarm.put("alr_typ", "PUMP");
-                    alarm.put("nowDate", nowStringDate());
+                    alarm.put("nowDate", nowStringDateReal());
                     StringBuffer sb = new StringBuffer();
                     sb.append("[AI운전] 펌프 상태를 변경합니다.||");
                     for (HashMap < String, Object > changeItem: changeList) {
@@ -2740,7 +2740,7 @@ public class PumpService {
 
             // 초기 DEBUG 로그
             tempCtrItem.put("TAG", "DEBUG");
-            tempCtrItem.put("TIME", nowStringDate());
+            tempCtrItem.put("TIME", nowStringDateReal());
             tempCtrItem.put("VALUE", changeList.toString());
             tempCtrItem.put("ANLY_CD", "pumpCommandWm");
             tempCtrItem.put("FLAG", 2);
@@ -2819,7 +2819,7 @@ public class PumpService {
                                 // 알람 생성
                                 HashMap < String, Object > alarm = new HashMap < > ();
                                 alarm.put("alr_typ", "PUMP");
-                                alarm.put("nowDate", nowStringDate());
+                                alarm.put("nowDate", nowStringDateReal());
                                 alarm.put("msg", "[AI운전] 현재 펌프 상태를 확인하지 못하였습니다. - PUMP_IDX: " + pumpIdx);
                                 alarm.put("link", "");
                                 emsPumpAlarmInsert(alarm);
@@ -2874,7 +2874,7 @@ public class PumpService {
                 if (aiControlStatus()) {
                     HashMap < String, Object > alarm = new HashMap < > ();
                     alarm.put("alr_typ", "PUMP");
-                    alarm.put("nowDate", nowStringDate());
+                    alarm.put("nowDate", nowStringDateReal());
                     StringBuffer sb = new StringBuffer();
                     sb.append("[AI운전] 펌프 상태를 변경합니다.||");
                     for (HashMap < String, Object > changeItem: changeList) {
@@ -2928,7 +2928,7 @@ public class PumpService {
         tempCtrItem.put("OPT_IDX", opx_idx);
         tempCtrItem.put("CTR_NM", ctr_nm);
         tempCtrItem.put("TAG", tag);
-        tempCtrItem.put("TIME", nowStringDate());
+        tempCtrItem.put("TIME", nowStringDateReal());
         tempCtrItem.put("VALUE", value);
         tempCtrItem.put("ANLY_CD", anlyCd);
         tempCtrItem.put("FLAG", 0);
@@ -2960,6 +2960,17 @@ public class PumpService {
      * @return 개시된 제어 액션 수(1단계 발사 row + 2단계 예약). 변화 없으면 0
      */
     public int devInsertHmiTagFromLatestPumpYn(int pumpGrp) {
+        return devInsertHmiTagFromLatestPumpYn(pumpGrp, null);
+    }
+
+    /**
+     * 발사 경로를 함께 남기는 변형. 기록되는 발사 이벤트(TB_CTR_DISPATCH_EVT.TRIGGER_SRC)에만 쓰이고
+     * 제어 판단에는 영향이 없다.
+     * @param pumpGrp    대상 펌프 그룹
+     * @param triggerSrc "ai_auto" | "ai_command" 등 진단용 경로 태그
+     * @return 개시된 제어 액션 수. 변화 없으면 0
+     */
+    public int devInsertHmiTagFromLatestPumpYn(int pumpGrp, String triggerSrc) {
         java.util.HashMap<String, Object> param = new java.util.HashMap<>();
         param.put("PUMP_GRP", pumpGrp);
         List<HashMap<String, Object>> target = pumpMapper.selectLatestPumpYnByGrp(param);
@@ -2972,16 +2983,19 @@ public class PumpService {
         java.util.Set<Integer> running = selectRunningPumpIdx(pumpGrp);
 
         // diff 계산: toStop(현재 ON & 목표 OFF), toStart(현재 OFF & 목표 ON)
-        boolean hasStop = false;
-        boolean hasStart = false;
+        // 집합 자체를 들고 있는다 — 발사 알림(팝업·음성)은 조합 전체가 아니라 이 '변화분' 을 읽는다.
+        java.util.TreeSet<Integer> toStop = new java.util.TreeSet<>();
+        java.util.TreeSet<Integer> toStart = new java.util.TreeSet<>();
         for (HashMap<String, Object> row : target) {
             if (row == null || row.get("PUMP_IDX") == null) continue;
             int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
             boolean targetOn = "1".equals(String.valueOf(row.get("PUMP_YN")));
             boolean nowOn = running.contains(pumpIdx);
-            if (nowOn && !targetOn) hasStop = true;
-            if (!nowOn && targetOn) hasStart = true;
+            if (nowOn && !targetOn) toStop.add(pumpIdx);
+            if (!nowOn && targetOn) toStart.add(pumpIdx);
         }
+        boolean hasStop = !toStop.isEmpty();
+        boolean hasStart = !toStart.isEmpty();
 
         if (!hasStop && !hasStart) {
             System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: no change (current == target) PUMP_GRP=" + pumpGrp);
@@ -2998,6 +3012,8 @@ public class PumpService {
             System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase1(keep) fired " + n
                     + " rows (PUMP_GRP=" + pumpGrp + ")");
             actions += n;
+            // 실제로 적재된 경우에만 알림 이벤트를 남긴다 — 마스터 누락 등으로 0건이면 발사가 아니다.
+            if (n > 0) recordDispatchEvt(pumpGrp, 1, "STOP", toStop, triggerSrc);
         }
 
         // 2단계: 기동 대상이 있으면 목표조합 전체를 발사.
@@ -3008,13 +3024,17 @@ public class PumpService {
         // 자기 행동의 결과가 반영된 목표(= 유지 조합)를 받아 2단계가 1단계와 같아지고 기동이 누락된다.
         if (hasStart) {
             final List<HashMap<String, Object>> targetSnapshot = target;
+            // 2단계 알림 대상도 시퀀스 개시 시점의 변화분으로 고정한다. 목표 스냅샷을 고정하는 것과
+            // 같은 이유 — 지연 사이에 실측이 바뀌었다고 안내 대상까지 흔들리면 1·2단계가 어긋난다.
+            final java.util.TreeSet<Integer> startSnapshot = new java.util.TreeSet<>(toStart);
             if (preOffDelayMinutes > 0 && hasStop) {
                 java.time.Instant fireAt = java.time.Instant.now().plus(java.time.Duration.ofMinutes(preOffDelayMinutes));
                 System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase2(target) 예약 "
                         + preOffDelayMinutes + "분 뒤(PUMP_GRP=" + pumpGrp + "), snapshot=" + combToString(targetSnapshot));
                 taskScheduler.schedule(() -> {
                     try {
-                        insertPredictionCommands(pumpGrp, targetSnapshot);
+                        int n = insertPredictionCommands(pumpGrp, targetSnapshot);
+                        if (n > 0) recordDispatchEvt(pumpGrp, 2, "RUN", startSnapshot, triggerSrc);
                     } catch (Exception e) {
                         System.out.println("[DEV] 지연 예측명령 발사 실패 PUMP_GRP=" + pumpGrp + " err=" + e.getMessage());
                     }
@@ -3025,10 +3045,101 @@ public class PumpService {
                 System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: phase2(target) 즉시 발사"
                         + " (hasStop=" + hasStop + ", preOffDelayMinutes=" + preOffDelayMinutes
                         + ") PUMP_GRP=" + pumpGrp + ", snapshot=" + combToString(targetSnapshot));
-                actions += insertPredictionCommands(pumpGrp, targetSnapshot);
+                int n = insertPredictionCommands(pumpGrp, targetSnapshot);
+                actions += n;
+                if (n > 0) recordDispatchEvt(pumpGrp, 2, "RUN", startSnapshot, triggerSrc);
             }
         }
         return actions;
+    }
+
+    /**
+     * [DEV/SEOUL] 제어명령 발사 이벤트 1건 적재 (TB_CTR_DISPATCH_EVT).
+     * 운전원 화면의 발사 알림(팝업 + 음성 안내)이 폴링하는 원본이다.
+     *
+     * 조합 전체가 아니라 <b>이번 단계에 상태가 바뀌는 펌프</b>만 담는다 —
+     * 2단계는 이미 돌고 있던 펌프에도 RUN 을 쏘므로, 조합을 그대로 안내하면
+     * 멀쩡히 돌던 펌프까지 "가동 명령 전송 완료" 로 방송된다.
+     *
+     * 적재 실패는 무시한다. 표시용 로그라 실패가 제어 발사를 되돌릴 이유가 되지 않는다.
+     *
+     * @param pumpGrp    펌프 그룹
+     * @param stage      1=정지 단계 / 2=기동 단계
+     * @param action     "STOP" | "RUN"
+     * @param pumpIdxs   변화 대상 PUMP_IDX 집합 (비어 있으면 적재하지 않음)
+     * @param triggerSrc 발사 경로 (batch / ai_command / polling 등, 진단용)
+     */
+    private void recordDispatchEvt(int pumpGrp, int stage, String action,
+                                   java.util.Collection<Integer> pumpIdxs, String triggerSrc) {
+        if (pumpIdxs == null || pumpIdxs.isEmpty()) return;
+        StringJoiner csv = new StringJoiner(",");
+        for (Integer idx : pumpIdxs) csv.add(String.valueOf(idx));
+        try {
+            HashMap<String, Object> evt = new HashMap<>();
+            evt.put("pumpGrp", pumpGrp);
+            evt.put("stage", stage);
+            evt.put("action", action);
+            evt.put("pumpIdxs", csv.toString());
+            evt.put("triggerSrc", triggerSrc);
+            evt.put("rgstrTime", nowStringDateReal());
+            pumpMapper.insertDispatchEvt(evt);
+            System.out.println("[DEV] recordDispatchEvt stage=" + stage + " " + action
+                    + " pumps=[" + csv + "] PUMP_GRP=" + pumpGrp + " src=" + triggerSrc);
+        } catch (Exception e) {
+            System.out.println("[DEV] recordDispatchEvt 적재 실패(무시) stage=" + stage
+                    + " PUMP_GRP=" + pumpGrp + " err=" + e.getMessage());
+        }
+    }
+
+    /**
+     * 발사 이벤트 폴링 (운전원 화면 발사 알림).
+     * afterIdx 를 주지 않으면 기준선만 잡도록 빈 목록과 현재 최대 EVT_IDX 를 돌려준다 —
+     * 화면 최초 진입에서 지난 발사가 한꺼번에 음성으로 재생되는 것을 막는다.
+     *
+     * @param afterIdx  클라이언트가 마지막으로 받은 EVT_IDX (null 이면 기준선 요청)
+     * @param pumpGrp   특정 그룹만 볼 때 지정 (null 이면 전체)
+     * @param withinMin 최근 몇 분 이내 이벤트만 (기본 10)
+     * @return { lastIdx, items:[{evtIdx, pumpGrp, stage, action, pumpIdxs, triggerSrc, rgstrTime}] }
+     */
+    public HashMap<String, Object> dispatchAlarm(Integer afterIdx, Integer pumpGrp, Integer withinMin) {
+        HashMap<String, Object> result = new HashMap<>();
+        int maxIdx = 0;
+        try {
+            Integer m = pumpMapper.selectDispatchEvtMaxIdx();
+            if (m != null) maxIdx = m;
+        } catch (Exception e) {
+            System.out.println("[dispatchAlarm] maxIdx 조회 실패 err=" + e.getMessage());
+        }
+        if (afterIdx == null) {
+            // 최초 폴링 — 기준선만 알려주고 아무것도 표시하지 않는다.
+            result.put("lastIdx", maxIdx);
+            result.put("items", new ArrayList<HashMap<String, Object>>());
+            return result;
+        }
+        List<HashMap<String, Object>> items = new ArrayList<>();
+        try {
+            HashMap<String, Object> param = new HashMap<>();
+            param.put("afterIdx", afterIdx);
+            param.put("withinMin", (withinMin == null || withinMin <= 0) ? 10 : withinMin);
+            param.put("pumpGrp", pumpGrp);
+            List<HashMap<String, Object>> rows = pumpMapper.selectDispatchEvtAfter(param);
+            if (rows != null) items = rows;
+        } catch (Exception e) {
+            System.out.println("[dispatchAlarm] 이벤트 조회 실패 err=" + e.getMessage());
+        }
+        // lastIdx 는 '실제로 내려준 것' 기준이어야 한다. maxIdx 를 그대로 주면 시간창 밖이라
+        // 제외된 이벤트까지 본 것으로 처리되는 건 맞지만, 조회 실패 시엔 커서가 튀면 안 된다.
+        int lastIdx = afterIdx;
+        for (HashMap<String, Object> it : items) {
+            Object v = it.get("evtIdx");
+            if (v != null) lastIdx = Math.max(lastIdx, Integer.parseInt(v.toString()));
+        }
+        // 시간창 밖으로 밀려난 오래된 이벤트는 영영 안 내려오므로 커서를 maxIdx 까지 끌어올린다.
+        // (items 가 LIMIT 20 에 걸린 경우는 제외 — 남은 것을 다음 폴링에서 받아야 한다)
+        if (items.size() < 20) lastIdx = Math.max(lastIdx, maxIdx);
+        result.put("lastIdx", lastIdx);
+        result.put("items", items);
+        return result;
     }
 
     /**
@@ -3209,7 +3320,7 @@ public class PumpService {
         if (inserted > 0) {
             HashMap<String, Object> alarm = new HashMap<>();
             alarm.put("alr_typ", "PUMP");
-            alarm.put("nowDate", nowStringDate());
+            alarm.put("nowDate", nowStringDateReal());
             alarm.put("msg", alarmTitle + "||" + alarmDetail.toString());
             alarm.put("link", "");
             emsPumpAlarmInsert(alarm);
@@ -3232,7 +3343,7 @@ public class PumpService {
         tempCtrItem.put("OPT_IDX", opx_idx);
         tempCtrItem.put("CTR_NM", ctr_nm);
         tempCtrItem.put("TAG", tag);
-        tempCtrItem.put("TIME", nowStringDate());
+        tempCtrItem.put("TIME", nowStringDateReal());
         tempCtrItem.put("VALUE", value);
         tempCtrItem.put("ANLY_CD", anlyCd);
         tempCtrItem.put("FLAG", 0);
@@ -3274,14 +3385,14 @@ public class PumpService {
 
         if (isBtn) {
             logItem.put("TAG", "DEBUG");
-            logItem.put("TIME", nowStringDate());
+            logItem.put("TIME", nowStringDateReal());
             logItem.put("VALUE", nowPrdctlist.toString());
             logItem.put("ANLY_CD", "nowPrdctlist");
             logItem.put("FLAG", 2);
             insertHmiTagLog(logItem);
 
             logItem.put("TAG", "DEBUG");
-            logItem.put("TIME", nowStringDate());
+            logItem.put("TIME", nowStringDateReal());
             logItem.put("VALUE", nowRumnList.toString());
             logItem.put("ANLY_CD", "nowRumnList");
             logItem.put("FLAG", 2);
@@ -3384,7 +3495,7 @@ public class PumpService {
 
                                         HashMap < String, Object > tempCtrItem = new HashMap < > ();
                                         tempCtrItem.put("TAG", "DEBUG");
-                                        tempCtrItem.put("TIME", nowStringDate());
+                                        tempCtrItem.put("TIME", nowStringDateReal());
                                         tempCtrItem.put("ANLY_CD", "FREQ");
                                         tempCtrItem.put("FLAG", 2);
 
@@ -3484,7 +3595,7 @@ public class PumpService {
         if (isBtn) {
             HashMap < String, Object > tempCtrItem = new HashMap < > ();
             tempCtrItem.put("TAG", "DEBUG");
-            tempCtrItem.put("TIME", nowStringDate());
+            tempCtrItem.put("TIME", nowStringDateReal());
             tempCtrItem.put("VALUE", getRunPumpIdxStr(result));
             tempCtrItem.put("ANLY_CD", "result");
             tempCtrItem.put("FLAG", 2);
@@ -3625,7 +3736,7 @@ public class PumpService {
 
                 HashMap < String, Object > tempCtrItem = new HashMap < > ();
                 tempCtrItem.put("TAG", "DEBUG2");
-                tempCtrItem.put("TIME", nowStringDate());
+                tempCtrItem.put("TIME", nowStringDateReal());
                 tempCtrItem.put("VALUE", getRunPumpIdxStr(result));
                 tempCtrItem.put("ANLY_CD", "result2");
                 tempCtrItem.put("FLAG", 2);
@@ -3639,7 +3750,7 @@ public class PumpService {
         if (result.size() >= ctrLimit) {
             HashMap < String, Object > tempCtrItem = new HashMap < > ();
             tempCtrItem.put("TAG", "DEBUG");
-            tempCtrItem.put("TIME", nowStringDate());
+            tempCtrItem.put("TIME", nowStringDateReal());
             tempCtrItem.put("VALUE", getRunPumpIdxStr(result));
             tempCtrItem.put("ANLY_CD", "clear");
             tempCtrItem.put("FLAG", 2);
@@ -3708,7 +3819,7 @@ public class PumpService {
                     System.out.println("#ALL_OFF_CHECK PUMP_GRP " + pumpGrp + "의 pump_yn_0_count: " + pumpYn0Count + " (일치) CLEAR");
                     HashMap < String, Object > tempCtrItem = new HashMap < > ();
                     tempCtrItem.put("TAG", "DEBUG");
-                    tempCtrItem.put("TIME", nowStringDate());
+                    tempCtrItem.put("TIME", nowStringDateReal());
                     tempCtrItem.put("VALUE", getRunPumpIdxStr(result));
                     tempCtrItem.put("ANLY_CD", "clearStop");
                     tempCtrItem.put("FLAG", 2);
@@ -3722,7 +3833,7 @@ public class PumpService {
                 System.out.println("PUMP_GRP " + pumpGrp + "의 pump_yn_1_count: " + pumpYn1Count + " (일치)");
                 HashMap < String, Object > tempCtrItem = new HashMap < > ();
                 tempCtrItem.put("TAG", "DEBUG");
-                tempCtrItem.put("TIME", nowStringDate());
+                tempCtrItem.put("TIME", nowStringDateReal());
                 tempCtrItem.put("VALUE", getRunPumpIdxStr(result));
                 tempCtrItem.put("ANLY_CD", "clearStart");
                 tempCtrItem.put("FLAG", 2);
@@ -3799,7 +3910,7 @@ public class PumpService {
                     // 로그 기록
                     HashMap<String, Object> tempCtrItem = new HashMap<>();
                     tempCtrItem.put("TAG", "DEBUG");
-                    tempCtrItem.put("TIME", nowStringDate());
+                    tempCtrItem.put("TIME", nowStringDateReal());
                     tempCtrItem.put("VALUE", removeGrp);
                     tempCtrItem.put("ANLY_CD", "clearStop");
                     tempCtrItem.put("FLAG", 2);
@@ -3840,7 +3951,7 @@ public class PumpService {
                     System.out.println("#ALL_OFF_CHECK PUMP_GRP GS " + pumpGrpOld+"/"+pumpGrpNew);
                     HashMap < String, Object > tempCtrItem = new HashMap < > ();
                     tempCtrItem.put("TAG", "DEBUG");
-                    tempCtrItem.put("TIME", nowStringDate());
+                    tempCtrItem.put("TIME", nowStringDateReal());
                     tempCtrItem.put("VALUE", getRunPumpIdxStr(result));
                     tempCtrItem.put("ANLY_CD", "clearStop");
                     tempCtrItem.put("FLAG", 2);
@@ -3863,6 +3974,15 @@ public class PumpService {
     /**
      * yyyy-MM-dd HH:mm:ss 형식의 현재 시점 일시 (제외)
      *
+     * <b>주의: 실제 시각이 아니다.</b> {@code time.diff.min}(application.properties, 현재 2) 만큼
+     * 과거로 당겨진 값을 돌려준다. 원래 의도는 SCADA→Kafka→DB 적재 지연 보정으로 보이나
+     * 설정에 근거 주석이 없고 프로파일 오버라이드도 없다.
+     *
+     * 용도는 두 가지로 갈린다:
+     *   - 조회 기준 (pumpDrvnMinute 의 nowDate, checkTimeDifference) → 종전 동작 유지를 위해 이 메서드
+     *   - Kafka payload 의 TIME → SCADA 외부 계약이라 이 메서드
+     *   - DB 기록 컬럼 → {@link #nowStringDateReal()} 을 쓸 것. 기록된 시각이 벽시계와 어긋나면 안 된다.
+     *
      * @return the 일시
      */
     public String nowStringDate() {
@@ -3870,6 +3990,25 @@ public class PumpService {
         ZonedDateTime koreaZonedDateTime = ZonedDateTime.now(koreaZoneId).minusMinutes(TIME_DIFF_MIN);
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
         // Format the ZonedDateTime using the formatter
+        return koreaZonedDateTime.format(formatter);
+    }
+
+    /**
+     * yyyy-MM-dd HH:mm:ss 형식의 <b>실제</b> 현재 시각. {@code time.diff.min} 오프셋을 적용하지 않는다.
+     *
+     * DB 기록 컬럼 전용 —
+     * TB_HMI_CTR_TAG.TIME / TB_CTR_DISPATCH_EVT.RGSTR_TIME / TB_EMS_ALR.ALR_TIME / TB_HMI_CTR_LOG.TIME.
+     * 종전에는 {@link #nowStringDate()} 를 써서 기록 시각이 DB current_timestamp 보다 항상 2분 일렀고,
+     * 운전원이 화면 시각과 실제 발사 시각을 대조할 수 없었다.
+     *
+     * 조회 기준과 Kafka payload 는 종전 동작을 유지해야 하므로 {@link #nowStringDate()} 를 그대로 쓴다.
+     *
+     * @return the 일시 (오프셋 없음)
+     */
+    public String nowStringDateReal() {
+        ZoneId koreaZoneId = ZoneId.of("Asia/Seoul");
+        ZonedDateTime koreaZonedDateTime = ZonedDateTime.now(koreaZoneId);
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
         return koreaZonedDateTime.format(formatter);
     }
 
@@ -4466,7 +4605,7 @@ public class PumpService {
 
         HashMap < String, Object > tempCtrItem = new HashMap < > ();
         tempCtrItem.put("TAG", "DEBUG");
-        tempCtrItem.put("TIME", nowStringDate());
+        tempCtrItem.put("TIME", nowStringDateReal());
 
         String tagStr = "";
 
@@ -4559,7 +4698,7 @@ public class PumpService {
 
             HashMap < String, Object > tempCtrItem = new HashMap < > ();
             tempCtrItem.put("TAG", "DEBUG");
-            tempCtrItem.put("TIME", nowStringDate());
+            tempCtrItem.put("TIME", nowStringDateReal());
 
             if (pump.equals("1")) {
                 // 주파수

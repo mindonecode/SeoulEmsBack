@@ -2300,9 +2300,13 @@
 	</select>
 
 	<!--
-	  TB_HMI_CTR_TAG 의 가장 최근 실제 명령 발사 시각 (ANLY_CD IN RUN/STOP/FREQ).
+	  TB_HMI_CTR_TAG 의 가장 최근 실제 명령 발사 시각 (보조/상태 명령 제외).
 	  멀티 인스턴스(여러 로컬 백엔드가 동일 DB 공유) 환경에서 노드 간 공유 가능한 단일 진실 원천.
 	  PUMP_GRP 컬럼이 TB_HMI_CTR_TAG 에 없어 그룹 무관 전체 락 의도.
+
+	  '1'/'0' 을 함께 보는 이유: dev/seoul 은 PumpService.insertPumpControlData 에서
+	  ANLY_CD 를 RUN→'1', STOP→'0' 으로 정규화해 적재한다. RUN/STOP/FREQ 만 걸면 이 환경에서
+	  결과가 항상 NULL 이 되어 발사시각 소스가 통째로 죽는다.
 	-->
 	<select id="selectLastHmiCtrTime" resultType="String">
 		SELECT
@@ -2310,7 +2314,7 @@
 		FROM
 			TB_HMI_CTR_TAG
 		WHERE
-			ANLY_CD IN ('RUN', 'STOP', 'FREQ')
+			ANLY_CD IN ('RUN', 'STOP', 'FREQ', '1', '0')
 	</select>
 
 	<!--

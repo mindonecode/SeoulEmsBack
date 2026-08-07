@@ -954,6 +954,47 @@
 		);
 	</insert>
 
+	<!--
+	  제어명령 발사 이벤트 적재 (TB_CTR_DISPATCH_EVT).
+	  단계별 1행. PUMP_IDXS 는 조합 전체가 아니라 '이번 단계에 상태가 바뀌는 펌프' CSV 다.
+	  운전원 화면의 발사 알림(팝업 + 음성)이 이 행을 읽는다 — 제어 판단에는 쓰이지 않는다.
+	-->
+	<insert id="insertDispatchEvt" parameterType="hashMap">
+		INSERT INTO TB_CTR_DISPATCH_EVT
+			(PUMP_GRP, STAGE, ACTION, PUMP_IDXS, TRIGGER_SRC, RGSTR_TIME)
+		VALUES
+			(#{pumpGrp}, #{stage}, #{action}, #{pumpIdxs}, #{triggerSrc}, #{rgstrTime})
+	</insert>
+
+	<!--
+	  발사 이벤트 폴링. afterIdx 이후의 신규 이벤트만, 그리고 최근 withinMin 분 이내만 반환한다.
+	  시간 조건을 함께 거는 이유: 브라우저가 오래 꺼져 있다가 켜졌을 때 지난 발사를 몰아서
+	  음성으로 쏟아내면 안 된다. afterIdx 가 없으면(최초 폴링) 기준선만 잡도록 빈 목록을 준다.
+	-->
+	<select id="selectDispatchEvtAfter" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			EVT_IDX      AS evtIdx,
+			PUMP_GRP     AS pumpGrp,
+			STAGE        AS stage,
+			ACTION       AS action,
+			PUMP_IDXS    AS pumpIdxs,
+			TRIGGER_SRC  AS triggerSrc,
+			DATE_FORMAT(RGSTR_TIME, '%Y-%m-%d %H:%i:%s') AS rgstrTime
+		FROM TB_CTR_DISPATCH_EVT
+		WHERE EVT_IDX &gt; #{afterIdx}
+			AND RGSTR_TIME &gt;= DATE_SUB(NOW(), INTERVAL #{withinMin} MINUTE)
+			<if test="pumpGrp != null">
+				AND PUMP_GRP = #{pumpGrp}
+			</if>
+		ORDER BY EVT_IDX ASC
+		LIMIT 20
+	</select>
+
+	<!-- 현재 최대 EVT_IDX. 최초 폴링에서 클라이언트 기준선을 잡는 데 쓴다. 행이 없으면 0. -->
+	<select id="selectDispatchEvtMaxIdx" resultType="java.lang.Integer">
+		SELECT COALESCE(MAX(EVT_IDX), 0) FROM TB_CTR_DISPATCH_EVT
+	</select>
+
 	<select id="selectAiStatus" resultType="hashMap">
 		SELECT
 		TAG_GRP as PUMP_GRP,
