@@ -175,9 +175,14 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
-	 * [GET] 수위조건 복귀수위 되돌림 대기 상태 조회. (TB_CTR_LEVEL_RETURN)
+	 * [GET] 수위조건 복귀수위 되돌림 대기 조회. (TB_CTR_LEVEL_RETURN, 종료되지 않은 최신 1건)
+	 *
+	 * DISPATCHED='N' 이면 이탈 판정은 났지만 실제 발사가 없어 복귀 대상이 아니다 —
+	 * 발사 차단·제어락 구간에서 정상적으로 생기는 상태다(되돌림은 발사된 제어에만 적용된다).
+	 *
 	 * @param pumpGrp 펌프 그룹 (기본 1)
-	 * @return {PUMP_GRP, DIRECTION, TRIGGER_STATIONS, START_TIME} 또는 null(대기 없음)
+	 * @return {PUMP_GRP, DIRECTION, TRIGGER_STATIONS, DISPATCHED, START_SLOT, DISPATCH_TIME,
+	 *          START_COMB, START_REASON} 또는 null(대기 없음)
 	 */
 	@Operation(summary = "복귀 대기 상태 조회", description = "selectLevelReturnState")
 	@GetMapping("/levelReturn")
@@ -187,10 +192,15 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
-	 * [DELETE] 수위조건 복귀 대기 상태 수동 해제. (TB_CTR_LEVEL_RETURN 삭제)
+	 * [DELETE] 수위조건 복귀 대기 수동 해제. (TB_CTR_LEVEL_RETURN 비활성화)
 	 * 대기가 비정상적으로 남아 이탈 판정이 계속 억제될 때 쓰는 복구 통로.
+	 *
+	 * 되돌림(∓1단계)을 발생시키지 않고 대기만 폐기한다. 행은 DELETE 하지 않고
+	 * RETURNED_SLOT 을 채워 비활성화한다 — 지우면 그 슬롯의 판정을 재계산할 수 없어
+	 * 화면과 실제 발사가 갈린다(tb_ctr_level_return.sql 주석 참고).
+	 *
 	 * @param pumpGrp 펌프 그룹
-	 * @return 삭제 직전 상태(없었으면 null)
+	 * @return 폐기 직전 상태(없었으면 null)
 	 */
 	@Operation(summary = "복귀 대기 상태 해제", description = "deleteLevelReturnState")
 	@DeleteMapping("/levelReturn/{pumpGrp}")

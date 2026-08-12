@@ -119,20 +119,69 @@ public interface DrvnMapper {
 	List<HashMap<String, Object>> selectTargetLevelByTags(@Param("tags") List<String> tags);
 
 	/**
-	 * 수위조건 복귀수위 되돌림 대기 상태 조회 (TB_CTR_LEVEL_RETURN, 그룹당 1행).
-	 * @param pumpGrp 펌프 그룹
-	 * @return PUMP_GRP, DIRECTION(UP|DOWN), TRIGGER_STATIONS(CSV), START_TIME. 대기 없으면 null
+	 * 수위조건 복귀수위 되돌림 대기 조회 — <b>슬롯 기준</b> (TB_CTR_LEVEL_RETURN).
+	 *
+	 * 발사된(DISPATCHED='Y') 대기 중 그 슬롯 시점에 유효한 1건을 돌려준다.
+	 * RETURNED_SLOT 이 그 슬롯과 같으면 "이 슬롯에 되돌림이 적용됨" 을 뜻하므로,
+	 * 같은 슬롯을 몇 번 재계산해도 같은 판정이 재현된다(순수 함수).
+	 *
+	 * @param param pumpGrp(int), slot(String "yyyy-MM-dd HH:mm" — 판정 대상 슬롯 PRDCT_TIME)
+	 * @return PUMP_GRP, DIRECTION(UP|DOWN), TRIGGER_STATIONS(CSV), DISPATCHED,
+	 *         START_SLOT, DISPATCH_TIME, RETURNED_SLOT. 유효한 대기 없으면 null
 	 */
-	HashMap<String, Object> selectLevelReturnState(@Param("pumpGrp") int pumpGrp);
+	HashMap<String, Object> selectLevelReturnStateAt(HashMap<String, Object> param);
 
 	/**
-	 * 되돌림 대기 상태 기록/교체. 새 이탈이 나면 기존 상태를 덮어쓴다(새 이탈 우선 정책).
-	 * @param param pumpGrp, direction, triggerStations, startTime, startComb, startReason
+	 * 이탈 대기 개시 — DISPATCHED='N' 으로 기록한다. 실제 발사가 나야 복귀 대상이 된다.
+	 * PK 가 (PUMP_GRP, START_SLOT) 이라 같은 슬롯 반복 호출에도 1행이다(멱등).
+	 * 이미 발사 확정된 행은 덮어쓰지 않는다.
+	 * @param param pumpGrp, startSlot, direction, triggerStations, startComb, startReason
 	 */
-	void upsertLevelReturnState(HashMap<String, Object> param);
+	void openLevelReturnState(HashMap<String, Object> param);
 
-	/** 되돌림 완료 또는 상태 무효화 시 대기 상태 삭제. */
-	void deleteLevelReturnState(@Param("pumpGrp") int pumpGrp);
+	/**
+	 * 미발사 대기 정리 — keepSlot 외의 DISPATCHED='N' 행을 폐기해 살아 있는 미발사 대기를 1건으로 유지.
+	 * 발사가 계속 막히면 슬롯마다 'N' 행이 쌓이는데, 판정에는 영향이 없지만 테이블 가독성이 나빠진다.
+	 * @param param pumpGrp, keepSlot(방금 개시한 슬롯)
+	 */
+	void supersedeUndispatchedLevelReturn(HashMap<String, Object> param);
+
+	/**
+	 * 발사 확정 — 아직 발사되지 않은 가장 최근 대기 1건을 DISPATCHED='Y' 로 올린다.
+	 * 호출부는 판정 내용을 알 필요 없이 "방금 이 그룹에 제어명령이 나갔다" 만 알리면 된다.
+	 * @param param pumpGrp, dispatchTime("yyyy-MM-dd HH:mm:ss")
+	 */
+	void markLevelReturnDispatched(HashMap<String, Object> param);
+
+	/**
+	 * 복귀 되돌림 적용 표시 — DELETE 대신 RETURNED_SLOT 을 채운다.
+	 * 지우면 같은 슬롯 재계산 시 답이 달라져 화면과 실제 발사가 갈린다.
+	 * @param param pumpGrp, startSlot(대상 대기 행), returnedSlot(되돌림이 적용된 슬롯)
+	 */
+	void markLevelReturnReturned(HashMap<String, Object> param);
+
+	/**
+	 * 운영 확인용 — 아직 종료되지 않은(RETURNED_SLOT IS NULL) 최신 대기 1건.
+	 * DISPATCHED='N' 이면 "이탈 판정은 났지만 발사되지 않아 복귀 대상이 아님" 이라는 진단 정보다.
+	 * @param pumpGrp 펌프 그룹
+	 * @return PUMP_GRP, DIRECTION, TRIGGER_STATIONS, DISPATCHED, START_SLOT, DISPATCH_TIME,
+	 *         START_COMB, START_REASON. 대기 없으면 null
+	 */
+	HashMap<String, Object> selectActiveLevelReturnState(@Param("pumpGrp") int pumpGrp);
+
+	/**
+	 * 운영 수동 해제 — 되돌림을 발생시키지 않고 대기만 폐기한다(RETURNED_SLOT = START_SLOT).
+	 * DELETE 하지 않는 이유는 판정 재현 가능성과 사후 추적 — tb_ctr_level_return.sql 주석 참고.
+	 */
+	void discardLevelReturnState(@Param("pumpGrp") int pumpGrp);
+
+	/**
+	 * 현재 유효한 제어 판단 슬롯 = 발사가 참조하는 TB_CTR_PUMPYN_RST 최신 RGSTR_TIME.
+	 * 배치·발사·제어알람·제어사유 팝업이 모두 이 슬롯을 봐야 판단이 갈리지 않는다.
+	 * @param pumpGrp 펌프 그룹
+	 * @return "yyyy-MM-dd HH:mm". 적재된 슬롯이 없으면 null
+	 */
+	String selectCurrentControlSlot(@Param("pumpGrp") int pumpGrp);
 
 	/**
 	 * 탱크 유량 및 압력 데이터를 조회하는 메서드

@@ -99,6 +99,17 @@ public class DrvnConfig {
 	// 예측 배치(10분 단위) 중복 산출 방지용. 마지막으로 산출 완료한 배치 경계("yyyy-MM-dd HH:mm:ss").
 	private volatile String lastProcessedBatch = null;
 
+	// [Seoul/Dev] 수위조건 복귀 대기 상태 전이 '의도' 버퍼 (pump_grp → resolveLevelWithReturn 결과).
+	// insertPumpComb 은 판정만 하고 DB 를 쓰지 않는다. setInsertPumpComn 루프(i=−4~0)가 끝난 뒤
+	// 마지막 슬롯(= 발사에 쓰이는 슬롯)의 의도만 commitLevelReturnTransition 으로 1회 기록한다.
+	// 루프 안에서 쓰면 1회차가 바꾼 상태를 2회차가 읽어 회차마다 다른 판정이 나온다.
+	//
+	// 부수 효과로 수동 백필(DrvnService.pumpCombInsert)은 복귀 상태를 전혀 건드리지 않게 된다 —
+	// 커밋하는 쪽이 배치뿐이기 때문이다. 종전에는 과거 슬롯을 백필하면 그 판정이 현재 대기 상태를
+	// 덮어써 실운전 복귀 판단이 오염됐다.
+	private final java.util.concurrent.ConcurrentHashMap<Integer, HashMap<String, Object>> pendingLevelTransition
+			= new java.util.concurrent.ConcurrentHashMap<>();
+
 	// === [Seoul/Dev] 부하+수위 기반 단계 조정 설정값 ============================
 	@Value("${seoul.step.gn.tags:}")
 	private String seoulGnTagsRaw;          // 공릉 수위 태그 CSV (예: "WB01Q0_P_WTDWLM011_ILE,WB01Q0_P_WTDWLM021_ILE,...")
@@ -155,6 +166,25 @@ public class DrvnConfig {
 	 */
 	@Value("${seoul.level-condition.enabled:false}")
 	private boolean seoulLevelConditionEnabled;
+	/**
+	 * [Seoul] 복귀수위 되돌림 on/off. 수위조건(seoul.level-condition.enabled) 안의 히스테리시스만 끈다.
+	 *
+	 * false 이면 "복귀수위((목표수위 상한+하한)/2) 도달 → ∓1 되돌림" 판정을 하지 않는다.
+	 * 대기 행 기록(TB_CTR_LEVEL_RETURN)·발사 표시(DISPATCHED)·제어주기 게이트와
+	 * '제어주기 내 이탈 억제' 는 그대로 살아 있다 — 그 동작이 이 테이블 위에 얹혀 있기 때문이다.
+	 * TB_CONFIG(DB) 로 무중단 토글 가능 — isSeoulLevelReturnEnabled() 사용.
+	 */
+	@Value("${seoul.level-return.enabled:true}")
+	private boolean seoulLevelReturnEnabled;
+	/**
+	 * [Seoul/Dev] 예측 배치 도착을 기다리는 최대 시간(초). 10분 배치 경계 기준.
+	 *
+	 * 이 시간이 지나도 예측(TB_CTR_TNK_RST)이 안 들어오면 수위조건만으로 산출을 진행한다
+	 * ({@link #schedulePumpTask}). 수위조건이 OFF 면 조합 선택이 예측에 의존하므로 적용되지 않는다.
+	 * 배치 주기(600초)보다 작아야 한다 — 크면 폴백이 영영 발동하지 않는다.
+	 */
+	@Value("${seoul.prediction.grace.seconds:120}")
+	private long predictionGraceSec;
 
 	@Value("${pump.predict.mode:euclidean}")
 	private String pumpPredictMode; // 조합 선택 방식: "euclidean"(유클리드 최근접) | "flowrange"(유량 범위 매칭, 미매칭/중복 시 euclidean 폴백)
@@ -344,6 +374,14 @@ public class DrvnConfig {
 		return appConfigStore.getBoolean("seoul.level-condition.enabled", seoulLevelConditionEnabled);
 	}
 
+	/**
+	 * 복귀수위 되돌림 사용 여부. TB_CONFIG(DB) 우선 → 재기동 없이 토글 가능.
+	 * false 여도 대기 행 기록·발사 표시·제어주기 억제는 그대로 동작한다.
+	 */
+	public boolean isSeoulLevelReturnEnabled() {
+		return appConfigStore.getBoolean("seoul.level-return.enabled", seoulLevelReturnEnabled);
+	}
+
 	// === 목표/임계값: TB_CONFIG(DB) 우선, 없으면 @Value 폴백. AppConfigStore 가 60초마다 재로딩 → 무중단 반영 ===
 	/** 공릉 07시 목표 수위 (m) - 경부하(L) 도달 판정. */
 	public double getSeoulGnTarget()      { return appConfigStore.getDouble("seoul.step.gn.target",       seoulGnTarget); }
@@ -387,7 +425,8 @@ public class DrvnConfig {
 	 *   1) 이번 10분 배치를 이미 산출했으면 skip (중복 산출 방지, UPSERT 멱등 보강)
 	 *   2) 예측이 아직 안 들어왔으면 그냥 반환 → 다음 10초에 재시도
 	 *   3) 예측 도착이 확인되면 1회만 산출하고 배치 경계를 마킹
-	 * 끝내 예측이 안 들어오면 그 배치는 산출하지 않고(skip) 다음 배치를 기다린다.
+	 * 예측이 끝내 안 들어와도 <b>수위조건이 켜진 seoul/dev 는</b> grace
+	 * ({@code seoul.prediction.grace.seconds}) 경과 후 산출을 진행한다 — 아래 2) 참고.
 	 */
 	@Scheduled(cron = "*/10 * * * * *")
 	public void schedulePumpTask() {
@@ -402,9 +441,25 @@ public class DrvnConfig {
 			if (batchKey.equals(lastProcessedBatch)) {
 				return;
 			}
-			// 2) 예측 미도착 → 다음 10초에 재시도
+			// 2) 예측 미도착 → 다음 10초에 재시도.
+			//
+			//    [Seoul/Dev] 단, 수위조건이 켜져 있으면 grace 경과 후 예측 없이 진행한다.
+			//    수위조건 판정은 예측 유량·압력을 쓰지 않는다 — 실측 조합(TB_RAWDATA×PMB_TAG) 기준
+			//    ±1단계이고 판단 근거는 TB_TARGET_LEVEL(목표수위) + 실측수위뿐이다.
+			//    종전처럼 예측을 끝까지 기다리면 예측이 결손된 배치는 통째로 산출되지 않아
+			//    그 슬롯에 추천 조합도, 발사가 참조하는 슬롯(TB_CTR_PUMPYN_RST.MAX(RGSTR_TIME))도
+			//    생기지 않는다. 실제로 2026-08-11 은 추천 0슬롯, 08-12 는 예측이 도착한 2배치만
+			//    산출됐다(하루 144슬롯 기대).
+			//    수위조건 OFF 면 조합 선택이 예측(closestPointIndex)에 의존하므로 종전대로 기다린다.
 			if (!isPredictionReady(batchStart, f)) {
-				return;
+				boolean levelOnly = ("seoul".equals(wpp_code) || "dev".equals(wpp_code))
+						&& isSeoulLevelConditionEnabled();
+				long waitedSec = Duration.between(batchStart, now).getSeconds();
+				if (!levelOnly || waitedSec < predictionGraceSec) {
+					return;
+				}
+				log.warn("=== [예측 미도착 {}초 경과(grace {}초) → 수위조건만으로 산출 진행] batch={} ===",
+						waitedSec, predictionGraceSec, batchKey);
 			}
 			// 3) 도착 확인 → 1회 산출 후 마킹 (setInsertPumpComn 은 @Async 비동기 실행)
 			log.info("=== [예측 배치 {} 도착 확인 → 펌프 조합 산출 트리거] ===", batchKey);
@@ -486,6 +541,35 @@ public class DrvnConfig {
 			}
 
 			logger.info("최종적으로 결정된 epaMode: {}", epaMode);
+			// 수위조건 전이 의도 버퍼는 이번 사이클 것만 봐야 한다 — 직전 사이클의 잔여가 남으면
+			// 이번에 판정하지 않은 슬롯의 전이를 잘못 기록한다.
+			pendingLevelTransition.clear();
+
+			// [Seoul/Dev] 수위조건 판정 슬롯은 <b>시계로</b> 정한다 — 예측 적재에 묶지 않는다.
+			//
+			// 종전에는 ts 를 예측행(prdctFlowPressure)의 PRDCT_TIME 에서만 받았다. 그런데 그 쿼리는
+			// "RGSTR_TIME <= now 인 MAX" 를 잡으므로, 예측이 안 들어오면 ts 가 <b>과거 슬롯에 고정</b>된다.
+			// 그러면 매 배치가 같은 옛 슬롯만 덮어쓰고 현재 슬롯에는 추천이 생기지 않는다
+			// (발사가 참조하는 currentControlSlot = MAX(RGSTR_TIME) 도 과거에 멈춘다).
+			// 예측이 한 번도 없던 구간에서는 ts=null 이라 insertPumpComb 호출 자체가 스킵됐다.
+			//
+			// 수위조건 판정은 예측 유량·압력을 쓰지 않는다 — 실측 조합 기준 ±1단계이고 판단 근거는
+			// TB_TARGET_LEVEL(목표수위) + 실측수위뿐이다. 그러니 예측이 없어도 성립한다.
+			// 배치 실행 시각을 10분 격자로 내린 뒤 +PRDCT_OFFSET_MIN — 예측이 정상 도착했을 때의
+			// ts(= RGSTR_TIME + 10분)와 같은 값이 된다.
+			//
+			// 아래 i 루프(−4~0) 밖에서 <b>배치당 1회</b> 계산한다. 루프 안에서 now+i 로 계산하면
+			// 10분 경계를 걸친 회차만 다음 슬롯이 되어 한 배치가 두 슬롯을 쓰고, 과거 슬롯의
+			// 적재 내용이 사후에 덮어써진다. 종전 동작(5회 모두 같은 ts)과도 어긋난다.
+			// 수위조건 OFF 면 조합 선택이 예측(closestPointIndex)에 의존하므로 적용하지 않는다.
+			String levelSlotTs = null;
+			if (("seoul".equals(wpp_code) || "dev".equals(wpp_code)) && isSeoulLevelConditionEnabled()) {
+				levelSlotTs = now
+						.withMinute((now.getMinute() / 10) * 10).withSecond(0).withNano(0)
+						.plusMinutes(PRDCT_OFFSET_MIN)
+						.format(formatter);
+			}
+
 			HashMap<String, Object> param = new HashMap<>();
 			for (int i = -4; i <= 0; i++) {
 				try {
@@ -527,8 +611,16 @@ public class DrvnConfig {
 								gosanDataMap.put("flow" + id, flowDb);
 								gosanDataMap.put("pressure" + id, pressureDb);
 							} else {
-								if (ts != null) {
-									insertPumpComb(flowDb, pressureDb, id, ts);
+								// 수위조건 ON(seoul/dev)이면 시계 기반 슬롯을 쓴다 — 위 levelSlotTs 주석 참고.
+								String useTs = (levelSlotTs != null) ? levelSlotTs : ts;
+								// 마지막 회차(i=0)만 남긴다. i=−4~−1 은 nowDateTime 이 10분 경계를 넘기면
+								// 정상 운영에서도 직전 슬롯을 가리켜 매 배치 4건씩 스팸이 된다.
+								if (i == 0 && levelSlotTs != null && !levelSlotTs.equals(ts)) {
+									log.warn("[SEOUL/LEVEL] 예측 슬롯 미도착·지연 → 시계 기반 슬롯으로 판정. prdctTs={} slotTs={} pump_grp={}",
+											ts, levelSlotTs, id);
+								}
+								if (useTs != null) {
+									insertPumpComb(flowDb, pressureDb, id, useTs);
 								}
 							}
 
@@ -578,6 +670,26 @@ public class DrvnConfig {
 				}
 			}
 
+			// === [Seoul/Dev] 수위조건 복귀 대기 상태 전이 — 배치당 1회 ===
+			// 위 루프는 같은 배치에서 여러 번(i=−4~0) 돌고, 마지막 회차가 발사에 쓰이는 슬롯이다.
+			// 루프 안에서 상태를 쓰면 1회차가 바꾼 것을 2회차가 읽어 회차마다 판정이 갈리므로
+			// (2026-08-10 15:10 슬롯 delta=-2 사고), 여기서 마지막 슬롯의 의도만 1회 기록한다.
+			//
+			// 순서가 중요하다: 전이 기록 → 발사 시도.
+			// 새 대기는 DISPATCHED='N' 으로 열리고, 바로 뒤 발사가 성공해야 'Y' 가 된다
+			// (PumpService.devInsertHmiTagFromLatestPumpYn → markLevelReturnDispatched).
+			// 발사가 막히면 'N' 으로 남아 복귀 판정 대상이 되지 않는다 —
+			// "하지 않은 제어는 되돌리지 않는다".
+			if ("dev".equals(wpp_code) || "seoul".equals(wpp_code)) {
+				for (Map.Entry<Integer, HashMap<String, Object>> e : pendingLevelTransition.entrySet()) {
+					try {
+						commitLevelReturnTransition(e.getKey(), e.getValue());
+					} catch (Exception ex) {
+						log.error("[SEOUL/RETURN] 상태 전이 기록 실패 pump_grp={}: {}", e.getKey(), ex.getMessage(), ex);
+					}
+				}
+			}
+
 			// === [DEV/SEOUL] 판정 직후 발사 ===
 			// 위 루프(offset −4~0)가 TB_CTR_PUMPYN_RST 에 이번 배치의 추천을 다 쓴 뒤 1회만 시도한다.
 			// insertPumpComb 안에서 쏘지 않는 이유: 그 루프는 같은 배치에서 5번 호출되므로
@@ -586,7 +698,7 @@ public class DrvnConfig {
 			// 폴링(pumpAiControlTask, 매분 :20)에 맡기면 발사가 판정 다음 분이 되어 제어주기 경계가
 			// 판정 격자와 어긋난다 — 60분 주기에서 60분 뒤 판정이 경과 59분으로 계산되어 되돌림이
 			// 10분 밀린다. 판정 직후에 쏘면 발사 시각이 판정 시각과 같은 격자에 놓인다.
-			// (복귀 게이트는 발사 시각을 10분 격자로 내려서 비교한다 — lastDispatchTime 주석 참고)
+			// (복귀 게이트 기준은 TB_CTR_LEVEL_RETURN.DISPATCH_TIME — 그 대기를 만든 제어의 발사 시각)
 			//
 			// 가드(testMode·aiControlStatus·dispatch.enabled·제어주기 락·변화 여부)는 전부
 			// PumpService.tryDispatchAutoControl 안에 있다. 발사에 성공하면 락이 걸려
@@ -3492,20 +3604,31 @@ public class DrvnConfig {
 
 				// 증감 판정 + 복귀수위 되돌림은 resolveLevelWithReturn 에 모아 두었다 —
 				// 제어사유 팝업(buildControlJudgment)이 같은 산식을 재사용해 화면과 실제 판정이 갈리지 않게 한다.
-				// persist=true: 이탈 시 대기 상태 기록, 복귀 시 삭제 (팝업은 false 로 읽기만).
-				// actLevel(현재 실측 대수)은 아래 로그와 대기 상태 진단 기록에 함께 쓴다.
+				// DB write 는 하지 않는다(순수 판정). 전이 의도만 받아 두었다가
+				// setInsertPumpComn 이 배치 루프 밖에서 commitLevelReturnTransition 으로 1회 기록한다 —
+				// 이 루프는 한 사이클에 여러 번(i=−4~0) 돌기 때문에 여기서 쓰면 회차마다 판정이 달라진다.
+				// actLevel(현재 실측 대수)은 아래 로그와 대기 개시 진단 기록에 함께 쓴다.
 				Double actLevel = actualCombLevel(ts, pump_grp, typeMap, pumpLevelInfoMap);
 				HashMap<String, Object> levelJudge = resolveLevelWithReturn(pump_grp, dateTime,
 						gnLv, baFrontLv, baRearLv,
-						actLevel == null ? null : String.valueOf(actLevel), true);
+						actLevel == null ? null : String.valueOf(actLevel));
+				pendingLevelTransition.put(pump_grp, levelJudge);
 				int levelReturnDelta = (int) levelJudge.get("returnDelta");     // ① 복귀 되돌림
 				int levelDevDelta    = (int) levelJudge.get("deviationDelta");  // ② 이탈 증감
 				int levelDelta       = (int) levelJudge.get("delta");           // 합계 — 로그 표시용
 				String levelReason   = (String) levelJudge.get("reason");
 
 				// 기준점은 '현재 실측 조합' 이다(유량·압력 예측으로 고른 closestPointIndex 를 쓰지 않는다).
-				// 유지(0)도 예측 조합이 아니라 실측 조합을 그대로 유지한다.
+				// 유지(0)도 예측 조합이 아니라 실측 조합을 기준으로 삼는다.
 				// → 유량·압력 예측은 조합 선택에 관여하지 않고, 수위(목표수위 대비)만 판단 근거가 된다.
+				//
+				// ★ 승계되는 것은 실측 조합의 '가동 대수' 이지 펌프 구성이 아니다.
+				//   findCombIndexByLevel 이 대수(pumpLevel)가 가장 가까운 <b>마스터 조합</b>(TB_PUMP_CAL
+				//   C_ORD=1)을 고르므로, 현장이 마스터에 없는 구성으로 돌고 있으면 유지(0) 판정에서도
+				//   같은 대수의 마스터 조합으로 <b>정규화</b>되어 조합 교체 명령이 나간다.
+				//   예: 실측 (1,3,5,8)=3.5대 → 마스터 3.5 = (3,5,7,8) → 1호기 정지 + 7호기 기동.
+				//   이는 의도된 동작이다(2026-08-12 확인) — 되돌리지 말 것.
+				//   서울 마스터 조합: 3.0=(3,5,8) 3.5=(3,5,7,8) 4.0=(2,3,5,8) 4.5=(1,2,3,5,8) 5.0=(1,3,5,6,7,9)
 				// 실측 조합을 못 구하면 resolveBaseCombIndex 가
 				// 직전 추천 조합(= 조합 변경 없음) → 최소 대수 순으로 폴백한다.
 				// 예측 조합으로는 어떤 경로로도 폴백하지 않는다.
@@ -6301,12 +6424,27 @@ public class DrvnConfig {
 	 *  - 최대부하(H): 현재 수위 > 안전선(sustain) — insertPumpComb 와 동일 기준
 	 * DB write / 상태 변경 없음. 산출 결과(TB_CTR_PUMPYN_RST)에 영향 주지 않음.
 	 *
-	 * 실측(TB_RAWDATA)은 dateTime 이 아니라 dateTime − PRDCT_OFFSET_MIN 으로 읽는다 —
-	 * dateTime 은 예측 대상 시각이라 미래이고, 그 시각으로 조회하면 데이터가 없어 판정이 무너진다
+	 * 실측(TB_RAWDATA)은 판정 슬롯이 아니라 슬롯 − PRDCT_OFFSET_MIN 으로 읽는다 —
+	 * 슬롯은 예측 대상 시각이라 미래이고, 그 시각으로 조회하면 데이터가 없어 판정이 무너진다
 	 * (insertPumpComb 과 동일 기준).
 	 *
-	 * @param dateTime 판정 대상 시각 (PRDCT_TIME)
+	 * <h3>판정 슬롯은 발사 슬롯으로 고정한다 (2026-08-10 개정)</h3>
+	 * 인자 {@code dateTime} 은 <b>쓰지 않는다</b>. 프론트가 넘기던 값은 산포도(preScatterData)
+	 * 마지막 예측 시각이라 발사가 참조하는 슬롯(TB_CTR_PUMPYN_RST 최신 RGSTR_TIME)과 한 칸(10분)
+	 * 어긋났고, 목표수위 시간대는 {@code (슬롯 − 10분).getHour()} 라서 정시 경계에서는 시간대까지 갈렸다.
+	 * 실제 사례(2026-08-10 15:00 배치): 발사는 ts=15:10 / hour=15 로 2단계 감량을 냈는데
+	 * 팝업은 ts=15:00 / hour=14 밴드(공릉 상한 5.26)로 "현 조합 유지" 를 띄웠다 —
+	 * 같은 화면에 "1대 감량" 과 "현 조합 유지" 가 동시에 뜬 원인이다.
+	 * {@link #currentControlSlot} 으로 통일하면 배치·발사·제어알람·팝업이 같은 슬롯을 본다.
+	 * 인자는 하위호환(쿼리스트링 잔존)을 위해 남겨 두되 슬롯 조회 실패 시 폴백으로만 쓴다.
+	 *
+	 * 판정 재계산이 배치와 일치하는 근거: {@link #resolveLevelWithReturn} 은 DB 를 쓰지 않는
+	 * (슬롯, 상태)의 순수 함수이고, 복귀 되돌림은 소비(DELETE)가 아니라 RETURNED_SLOT 기록이라
+	 * 확정된 슬롯을 다시 계산해도 같은 값이 재현된다.
+	 *
+	 * @param dateTime 폴백용 슬롯 (PRDCT_TIME). 정상 경로에서는 무시된다
 	 * @return loadZone/loadZoneLabel/judgmentTime/actualRefTime
+	 *         + judgmentSource: "control-slot"(정상 — 발사 슬롯 기준) | "fallback-request"(적재 슬롯 없음)
 	 *         + 수위조건 ON 이면 levelDelta/levelReason/targetHour/levelConditionEnabled + baRear
 	 *           + returnPending(UP|DOWN|null)/returnPendingTriggers/returnApplied
 	 *         + actualComb/recommendComb/combSlotTime — 실제 적재·발사 기준 조합 CSV.
@@ -6320,9 +6458,26 @@ public class DrvnConfig {
 	public HashMap<String, Object> buildControlJudgment(LocalDateTime dateTime) {
 		HashMap<String, Object> result = new HashMap<>();
 		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+		// === 판정 슬롯을 '발사가 참조하는 슬롯' 으로 고정 ===
+		// 요청 dateTime(산포도 마지막 예측 시각)을 그대로 쓰면 발사 슬롯과 한 칸 어긋나고,
+		// 정시 경계에서는 목표수위 시간대까지 갈린다(상세는 메서드 주석). 아래 슬롯 하나로 통일한다.
+		// pump_grp=1 은 서울 송수 단일 그룹 전제 — 이 메서드 전체가 같은 전제로 쓰여 있다.
+		LocalDateTime controlSlot = currentControlSlot(1);
+		if (controlSlot != null) {
+			if (!controlSlot.equals(dateTime)) {
+				logger.debug("[SEOUL] 제어사유 판정 슬롯 보정 요청={} → 발사슬롯={}", dateTime, controlSlot);
+			}
+			dateTime = controlSlot;
+			result.put("judgmentSource", "control-slot");
+		} else {
+			// 적재된 슬롯이 없다(최초 기동·예측 미도착). 요청 시각으로 폴백하고 화면이 구분할 수 있게 남긴다.
+			logger.warn("[SEOUL] 적재된 제어 슬롯 없음 → 요청 시각으로 폴백 dateTime={}", dateTime);
+			result.put("judgmentSource", "fallback-request");
+		}
 		String ts = dateTime.format(fmt);
 
-		// dateTime 은 프론트가 넘긴 '예측 대상 시각'(= PRDCT_TIME, 산출 시점 + 10분)이라 미래다.
+		// 판정 슬롯은 '예측 대상 시각'(= PRDCT_TIME, 산출 시점 + 10분)이라 미래다.
 		// 실측(TB_RAWDATA)은 그 시각으로 조회하면 아직 데이터가 없어 활성 0개가 되고,
 		// predictPeakEndLevelSeoul 이 NaN 을 물고 나와 판정이 전부 '버팀 불가' 로 기울었다
 		// (실측 슬롯이 비면 예외까지 났다). insertPumpComb 과 동일하게 −PRDCT_OFFSET_MIN 기준으로 읽는다.
@@ -6389,13 +6544,17 @@ public class DrvnConfig {
 			baObj.put("levelRole", "lower");
 			baRearObj.put("levelRole", "upper");
 			// 복귀수위((상한+하한)/2) — 화면이 배지에 표시하고 되돌림 대기 진행을 보여준다.
-			gnObj.put("returnLevel", ((int) gnLv[3]) > 0 ? returnLevel(gnLv) : null);
-			baObj.put("returnLevel", ((int) baFrontLv[3]) > 0 ? returnLevel(baFrontLv) : null);
-			baRearObj.put("returnLevel", ((int) baRearLv[3]) > 0 ? returnLevel(baRearLv) : null);
-			// persist=false: 조회 API 는 대기 상태를 절대 기록/삭제하지 않는다.
-			// 상태 전이는 배치(insertPumpComb)만 한다 — 팝업을 여는 것만으로 제어 상태가 바뀌면 안 된다.
+			// 복귀 OFF 면 판정에 쓰이지 않는 값이므로 내려보내지 않는다(화면 문구도 함께 사라진다).
+			boolean levelReturnOn = isSeoulLevelReturnEnabled();
+			gnObj.put("returnLevel", (levelReturnOn && ((int) gnLv[3]) > 0) ? returnLevel(gnLv) : null);
+			baObj.put("returnLevel", (levelReturnOn && ((int) baFrontLv[3]) > 0) ? returnLevel(baFrontLv) : null);
+			baRearObj.put("returnLevel", (levelReturnOn && ((int) baRearLv[3]) > 0) ? returnLevel(baRearLv) : null);
+			// resolveLevelWithReturn 은 DB 를 쓰지 않는 (슬롯, 상태)의 순수 함수다 —
+			// 팝업을 여는 것만으로 제어 상태가 바뀌지 않고, 배치가 이미 확정한 슬롯을 다시 계산해도
+			// 같은 값이 재현된다(복귀 되돌림을 DELETE 로 소비하지 않고 RETURNED_SLOT 으로 남기므로).
+			// 상태 전이 기록은 배치(setInsertPumpComn)와 발사부(PumpService)만 한다.
 			HashMap<String, Object> judge = resolveLevelWithReturn(1, dateTime,
-					gnLv, baFrontLv, baRearLv, null, false);
+					gnLv, baFrontLv, baRearLv, null);
 			result.put("levelDelta", judge.get("deviationDelta"));   // 이탈 증감 (±1/0)
 			result.put("returnDelta", judge.get("returnDelta"));     // 복귀 되돌림 (∓1/0)
 			result.put("netDelta", judge.get("delta"));              // 합계 (−2~+2)
@@ -6404,9 +6563,12 @@ public class DrvnConfig {
 			result.put("returnPendingTriggers", judge.get("pendingTriggers")); // CSV/null
 			result.put("returnApplied", judge.get("returned"));                // 이 슬롯에 되돌림 판정
 			// "경과 12분 / 주기 30분"/null. 값이 있으면 항상 '제어 발사 후 대기' 다
-			// (발사 기록 없이는 대기가 걸리지 않는다 — resolveLevelWithReturn 참고).
+			// (대기 행은 DISPATCHED='Y' 일 때만 조회되고 기준 시각도 그 행의 DISPATCH_TIME 이다).
 			result.put("returnCycleWait", judge.get("cycleWait"));
 			result.put("levelConditionEnabled", true);
+			// 복귀 되돌림 on/off. false 면 화면이 복귀 도달·복귀 대기 문구를 쓰지 않는다.
+			// (제어주기 대기 문구는 복귀와 무관하게 계속 쓴다 — returnCycleWait 는 그대로 내려간다)
+			result.put("levelReturnEnabled", levelReturnOn);
 			// 목표수위 시간대는 실측과 동일한 actualRefTime 의 hour (stationLevelWithTarget 참고)
 			result.put("targetHour", actualRefTime.getHour());
 		} else {
@@ -6870,6 +7032,88 @@ public class DrvnConfig {
 		return (best >= 0) ? best : baseIdx;   // 끝단이면 유지
 	}
 
+	/**
+	 * [Seoul/Dev] 펌프 IDX 집합의 가동 대수(가중치 합). {@code dstrb.pump.level} 기준
+	 * (서울: 1·7호기 0.5대, 그 외 1대). 인버터 주파수는 반영하지 않는다 — 서울은 인버터가 없다.
+	 *
+	 * 발사부(PumpService)가 실측 조합과 목표 조합을 같은 자로 재기 위해 쓴다.
+	 *
+	 * @return 대수 합. 가중치 맵이 없거나 집합이 null 이면 0.0
+	 */
+	public double pumpCombLevel(int pump_grp, java.util.Collection<Integer> pumpIdxs) {
+		HashMap<Integer, Double> m = (pumpLevelInfoGrpMap == null) ? null : pumpLevelInfoGrpMap.get(pump_grp);
+		if (m == null || pumpIdxs == null) return 0.0;
+		double lv = 0.0;
+		for (Integer idx : pumpIdxs) {
+			if (idx == null) continue;
+			lv += m.getOrDefault(idx, 0.0);
+		}
+		return lv;
+	}
+
+	/**
+	 * [Seoul/Dev] 그룹에서 사용 가능한 조합 대수의 오름차순 distinct 목록.
+	 *
+	 * 판정(collectData)과 같은 소스를 본다 — {@code selectPumpCombCal} 의 C_ORD=1 대표행.
+	 * 서울 운영 기준 [3.0, 3.5, 4.0, 4.5, 5.0] 이지만 <b>간격이 균일하다는 보장은 없다</b>
+	 * (조합이 USE_YN=0 으로 빠지면 벌어진다). 그래서 "1단계" 는 고정 delta 비교가 아니라
+	 * 이 목록에서의 인접 여부로 판단해야 한다 — {@link #combStepDistance} 참고.
+	 *
+	 * @return 대수 오름차순 목록. 못 구하면 빈 목록
+	 */
+	public List<Double> combLevelSteps(int pump_grp) {
+		java.util.TreeSet<Double> set = new java.util.TreeSet<>();
+		List<HashMap<String, Object>> src = calList;
+		if (src == null) return new ArrayList<>(set);
+		for (HashMap<String, Object> row : src) {
+			if (row == null) continue;
+			if (!String.valueOf(row.get("PUMP_GRP")).equals(String.valueOf(pump_grp))) continue;
+			if (!"1".equals(String.valueOf(row.get("C_ORD")))) continue;
+			String comb = String.valueOf(row.get("PUMP_COMB"));
+			if (comb.isEmpty() || "null".equals(comb)) continue;
+			List<Integer> idxs = new ArrayList<>();
+			for (String s : comb.split(",")) {
+				String v = s.trim();
+				if (v.isEmpty()) continue;
+				try {
+					idxs.add(Integer.parseInt(v));
+				} catch (NumberFormatException ignore) { /* 조합 문자열 이상치는 건너뛴다 */ }
+			}
+			double lv = pumpCombLevel(pump_grp, idxs);
+			if (lv > 0) set.add(lv);
+		}
+		return new ArrayList<>(set);
+	}
+
+	/**
+	 * [Seoul/Dev] 두 대수 사이의 조합 단계 수(절댓값).
+	 *
+	 * 판정이 낼 수 있는 최대 이동은 1 이다 — {@link #shiftCombIndexByLevel} 이 한 칸씩만 옮기고,
+	 * 복귀수위 되돌림({@code seoul.level-return.enabled})을 끈 뒤로는 한 슬롯에 한 번만 호출되기 때문이다.
+	 * 그보다 큰 값이 나왔다면 목표 조합이 현장 실측과 동떨어진 것이다
+	 * (예: {@link #resolveBaseCombIndex} 가 실측 조회 실패로 최소대수 조합에 폴백한 경우).
+	 *
+	 * 목록에 없는 대수는 가장 가까운 단계로 스냅해서 센다.
+	 *
+	 * @return 단계 차이. 목록을 못 구하면(단계가 2개 미만) −1 — 호출부가 판단 보류로 처리한다
+	 */
+	public int combStepDistance(int pump_grp, double fromLv, double toLv) {
+		List<Double> steps = combLevelSteps(pump_grp);
+		if (steps.size() < 2) return -1;
+		return Math.abs(nearestStepIndex(steps, toLv) - nearestStepIndex(steps, fromLv));
+	}
+
+	/** 대수 목록에서 lv 에 가장 가까운 단계의 인덱스. 목록은 비어있지 않다고 가정한다. */
+	private int nearestStepIndex(List<Double> steps, double lv) {
+		int best = 0;
+		double bestDiff = Double.MAX_VALUE;
+		for (int i = 0; i < steps.size(); i++) {
+			double d = Math.abs(steps.get(i) - lv);
+			if (d < bestDiff) { bestDiff = d; best = i; }
+		}
+		return best;
+	}
+
 	/** [Seoul/Dev] 최소 대수 조합의 인덱스(#1). 활성 0개 fallback 의 H 처리용. */
 	private int minLevelCombIndex(List<HashMap<String, Object>> collectData) {
 		if (collectData == null || collectData.isEmpty()) return -1;
@@ -7178,51 +7422,6 @@ public class DrvnConfig {
 	 *   2) TB_WPP_TAG_CODE(FUNC_TYP='CTRL_LOCK_MIN') 레거시 전역 설정
 	 *   3) 하드코딩 30 — DB 조회 실패/미설정 시. 0 을 쓰면 대기 없이 즉시 복귀가 되어 위험하다.
 	 */
-	/**
-	 * 마지막 제어명령 <b>발사</b> 시각. 복귀 체크 대기의 기준점이다.
-	 *
-	 * 판정 시각(TB_CTR_LEVEL_RETURN.START_TIME)이 아니라 발사 시각을 쓰는 이유: 이탈 추천이 나도
-	 * 발사는 30분 throttle(checkControlLockStatus)에 밀려 더 늦을 수 있다. 판정 시각을 기준으로 하면
-	 * 펌프가 실제로 움직인 뒤 대기가 얼마 안 지나 복귀 판정이 통과해 버린다.
-	 *
-	 * 소스는 PumpService.checkControlLockStatus 와 동일하게 두 곳을 보고 더 늦은 쪽을 쓴다:
-	 *   1) TB_MNL_CHN_LOG (PUMP_GRP 별 제어 로그, 분 단위)
-	 *   2) TB_HMI_CTR_TAG MAX(RGSTR_TIME) — 실제 명령 발사의 단일 진실 원천(초 단위, 멀티 인스턴스 대응)
-	 *
-	 * 반환값은 <b>10분 판정 격자로 내림</b>한다. 판정은 10분 경계에서만 돌고 경과 계산 기준 시각도
-	 * 항상 `:00` 초인데, 발사는 판정보다 몇 초~1분 뒤라 그대로 비교하면 60분 주기에서 59분이 나와
-	 * 되돌림이 한 슬롯(10분) 밀린다. 격자로 내리면 "정확히 N번째 슬롯에 열린다"가 성립한다.
-	 * (판정 직후 발사이므로 내림 오차는 초 단위다. 폴링 경로로 늦게 쏜 경우 최대 9분 관대해진다)
-	 *
-	 * @return 격자 정렬된 발사 시각. 두 소스 모두 없거나 조회 실패면 null
-	 *         (호출부는 제어주기 대기를 걸지 않는다 — 반영을 기다릴 제어가 없다는 뜻이므로)
-	 */
-	private LocalDateTime lastDispatchTime(int pumpGrp) {
-		LocalDateTime latest = null;
-		try {
-			HashMap<String, Object> param = new HashMap<>();
-			param.put("pump_grp", pumpGrp);
-			String s = drvnMapper.selectLastCtrlTime(param);
-			if (s != null && !s.isEmpty()) {
-				latest = LocalDateTime.parse(s, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
-			}
-		} catch (Exception e) {
-			logger.warn("[SEOUL/RETURN] TB_MNL_CHN_LOG 발사시각 조회/파싱 실패 pump_grp={}: {}", pumpGrp, e.getMessage());
-		}
-		try {
-			String s = drvnMapper.selectLastHmiCtrTime();
-			if (s != null && !s.isEmpty()) {
-				LocalDateTime hmi = LocalDateTime.parse(s, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-				if (latest == null || hmi.isAfter(latest)) latest = hmi;
-			}
-		} catch (Exception e) {
-			logger.warn("[SEOUL/RETURN] TB_HMI_CTR_TAG 발사시각 조회/파싱 실패: {}", e.getMessage());
-		}
-		if (latest == null) return null;
-		// 10분 판정 격자로 내림 (12:40:25 → 12:40:00)
-		return latest.withMinute((latest.getMinute() / 10) * 10).withSecond(0).withNano(0);
-	}
-
 	private int controlCycleMinutes() {
 		try {
 			Integer v = drvnMapper.selectCtrlCycleMin();
@@ -7261,22 +7460,21 @@ public class DrvnConfig {
 	 * 복귀 체크와 이탈 체크는 배타가 아니라 <b>순차 합성</b>이다 — 둘 다 매 슬롯 수행한다:
 	 *
 	 * <pre>
-	 *   ① 복귀 체크 (대기 상태가 있을 때만)
-	 *      0) 제어주기 대기: 마지막 제어명령 <b>발사 시각</b>부터 tb_ctr_cycle.LOCK_MIN 분이
-	 *         지나지 않았으면 복귀 체크를 건너뛴다(대기 유지). 이탈 체크는 그대로 진행한다.
-	 *         대기는 '제어 후 대기' 뿐이다 — 발사 기록이 없으면 대기 없이 복귀 체크로 넘어간다.
+	 *   ① 복귀 체크 (발사된 대기가 있을 때만)
+	 *      0) 제어주기 대기: 그 대기를 만든 제어의 <b>발사 시각</b>(DISPATCH_TIME)부터
+	 *         tb_ctr_cycle.LOCK_MIN 분이 지나지 않았으면 복귀 체크를 건너뛴다(대기 유지).
+	 *         이탈 체크는 그대로 진행한다.
 	 *      제어의 원인이 된 배수지(TRIGGER_STATIONS)가 복귀수위 도달?
-	 *        도달  → returnDelta = ∓1 (UP 대기면 −1, DOWN 대기면 +1), 대기 상태 삭제
+	 *        도달  → returnDelta = ∓1 (UP 대기면 −1, DOWN 대기면 +1), 그 슬롯을 RETURNED_SLOT 으로 표시
 	 *        미달  → returnDelta = 0, 대기 유지
 	 *      확인 대상은 원인 지점뿐이다 — 원인이 둘이면 둘 다 보고, 원인이 아닌 지점은 보지 않는다.
 	 *      원인 지점을 못 읽으면(채택 수조 0개) '미달' 로 처리해 대기를 유지한다.
+	 *      이미 RETURNED_SLOT 이 이 슬롯으로 찍혀 있으면 그대로 ∓1 을 재현한다(재계산 일치).
 	 *   ② 이탈 체크
 	 *      현재 수위로 하한/상한 이탈 판정 → deviationDelta = ±1 또는 0.
 	 *      단 <b>제어주기 안에서는 방향 무관 전면 억제</b>한다 → 유지 조합만 생성.
 	 *      그 구간에는 발사 throttle 도 같은 LOCK_MIN 으로 잠겨 있어 어떤 추천도 나가지 못하므로,
 	 *      증감을 산출하면 화면·팝업에 발사되지 않을 감량/증량이 계속 뜨는 혼란만 남는다.
-	 *      억제 시 대기 상태를 교체하지 않는다 — START_TIME 갱신은 주기 리셋이라 억제가 무한히 이어진다.
-	 *      주기를 통과한 뒤 이탈이 있으면 대기 상태를 그 이탈로 새로 기록(①에서 삭제했더라도 교체된다).
 	 *   ③ 조합 적용 (호출부)
 	 *      실측 조합 → returnDelta 적용 → <b>그 조합에서</b> deviationDelta 적용 → 최종 발사.
 	 *      ①의 되돌린 조합은 중간 결과로만 쓰이고 그대로 발사되지 않는다.
@@ -7286,38 +7484,62 @@ public class DrvnConfig {
 	 * 복귀 −1 + 하한 이탈 +1 처럼 상쇄되면 조합은 실측 그대로 유지된다.
 	 *
 	 * 되돌림은 '그 시점 실측 조합 기준 ∓1단계' 다 — 이탈 시점 조합을 저장해 강제 복귀하지 않는다.
-	 * 대기 중 추가 이탈로 여러 단계 움직였어도 복귀 시 1단계만 되돌리고 상태를 해제한다
+	 * 대기 중 추가 이탈로 여러 단계 움직였어도 복귀 시 1단계만 되돌리고 대기를 종료한다
 	 * (누적을 세면 복귀수위가 실질 이탈 기준이 되어 정책 자체가 바뀐다).
 	 *
+	 * <h3>이 메서드는 DB 를 쓰지 않는다 (2026-08-10 개정)</h3>
+	 * 판정은 <b>(슬롯, DB 상태)의 순수 함수</b>여야 한다. 종전에는 여기서 직접
+	 * upsert/delete 를 해서, 같은 슬롯을 다시 계산하면 다른 답이 나왔다:
+	 *   - 배치는 한 사이클에 insertPumpComb 을 여러 번 호출한다(슬롯 5 × 스레드 2 관측).
+	 *     1회차가 대기를 소비하면 2회차부터 복귀가 사라진다.
+	 *   - 제어사유 팝업도 같은 판정을 재계산하는데, 배치가 이미 상태를 바꾼 뒤라
+	 *     "배치는 −2, 팝업은 0" 처럼 화면과 실제 발사가 갈렸다(2026-08-10 15:10 슬롯).
+	 * 이제 전이 '의도' 만 반환하고, 실제 write 는 호출부가 배치 루프 밖에서 1회 수행한다.
+	 * 새 대기의 확정(DISPATCHED='Y')은 판정이 아니라 <b>실제 발사</b> 시점에 일어난다
+	 * (PumpService.devInsertHmiTagFromLatestPumpYn). 발사하지 않은 이탈은 되돌릴 대상이 아니다.
+	 *
 	 * @param pumpGrp   펌프 그룹
-	 * @param dateTime  판정 대상 시각 (PRDCT_TIME) — 상태 START_TIME 으로 기록
+	 * @param dateTime  판정 대상 슬롯 (PRDCT_TIME)
 	 * @param actComb   이탈 시점 실측 조합 문자열(진단용, 제어 판단 미사용). null 허용
-	 * @param persist   true = 상태 기록/삭제 수행(insertPumpComb),
-	 *                  false = 읽기만(제어사유 팝업 — 조회 API 가 상태를 바꾸면 안 된다)
 	 * @return { returnDelta, deviationDelta, delta(=두 값의 합, 로그/표시용), reason,
 	 *           pending:String|null(대기 방향 UP/DOWN), pendingTriggers, returned:Boolean,
-	 *           cycleWait:String|null(제어주기 대기 진행률 — 발사 후 대기 중일 때만) }
+	 *           cycleWait:String|null(제어주기 대기 진행률 — 발사 후 대기 중일 때만),
+	 *           slot:String(판정 슬롯),
+	 *           returnCommitSlot:String|null — 값이 있으면 그 START_SLOT 행에 "이 슬롯에 복귀 적용" 기록,
+	 *           openDirection/openTriggers/openComb/openReason — openDirection 이 있으면 새 대기 개시 }
+	 *         두 전이는 동시에 날 수 있다(복귀 −1 직후 반대쪽 이탈로 새 대기 개시).
 	 *         조합 적용은 delta 합이 아니라 returnDelta → deviationDelta 순차 적용이어야 한다
 	 *         ({@link #shiftCombIndexByLevel} 은 한 단계씩만 이동한다).
+	 *         전이 적용은 {@link #commitLevelReturnTransition}.
 	 */
 	private HashMap<String, Object> resolveLevelWithReturn(int pumpGrp, LocalDateTime dateTime,
-			double[] gnLv, double[] baFrontLv, double[] baRearLv, String actComb, boolean persist) {
+			double[] gnLv, double[] baFrontLv, double[] baRearLv, String actComb) {
 		HashMap<String, Object> judge = evaluateLevelCondition(gnLv, baFrontLv, baRearLv);
 		int deviationDelta  = (int) judge.get("delta");
 		String devReason    = (String) judge.get("reason");
 		String triggers     = (String) judge.get("triggers");
 
+		String slotStr = dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+
 		HashMap<String, Object> out = new HashMap<>();
 		out.put("returned", Boolean.FALSE);
 		out.put("pending", null);
 		out.put("pendingTriggers", null);
+		out.put("slot", slotStr);
+		out.put("returnCommitSlot", null);
+		out.put("openDirection", null);
 
+		// 이 슬롯 시점에 유효한 대기 1건. 발사된(DISPATCHED='Y') 행만 대상이다 —
+		// 발사하지 않은 이탈은 되돌릴 제어가 없으므로 복귀 판정에 들어가지 않는다.
 		HashMap<String, Object> state;
 		try {
-			state = drvnMapper.selectLevelReturnState(pumpGrp);
+			HashMap<String, Object> q = new HashMap<>();
+			q.put("pumpGrp", pumpGrp);
+			q.put("slot", slotStr);
+			state = drvnMapper.selectLevelReturnStateAt(q);
 		} catch (Exception e) {
 			// 상태 테이블 조회 실패 시 복귀 기능만 비활성 — 이탈 판정은 그대로 살린다.
-			logger.warn("[SEOUL/RETURN] 대기 상태 조회 실패 pump_grp={}: {}", pumpGrp, e.getMessage());
+			logger.warn("[SEOUL/RETURN] 대기 상태 조회 실패 pump_grp={} slot={}: {}", pumpGrp, slotStr, e.getMessage());
 			state = null;
 		}
 
@@ -7328,23 +7550,33 @@ public class DrvnConfig {
 		String pendingTrg = null;
 		// 제어주기 대기 중일 때 그 대기의 방향(UP/DOWN). 이탈 체크에서 '같은 방향 억제' 판단에 쓴다.
 		String cycleWaitDir = null;
-		if (state != null) {
+		// 복귀 되돌림 on/off. false 면 ① 블록만 통째로 건너뛴다(아래 참고).
+		boolean levelReturnOn = isSeoulLevelReturnEnabled();
+		// 이미 이 슬롯에 복귀 되돌림이 확정돼 있으면(RETURNED_SLOT == 이 슬롯) 그대로 재현한다.
+		// 제어주기 게이트도 다시 보지 않는다 — 한 번 확정된 슬롯의 판정은 바뀌면 안 된다.
+		// 이것이 "같은 슬롯이면 몇 번을 계산해도 같은 답" 을 보장하는 지점이다.
+		// 복귀 OFF 면 과거 확정 행도 재현하지 않는다 — 재계산 일치는 '현재 플래그 상태' 기준으로만 성립한다.
+		boolean alreadyReturned = levelReturnOn && state != null
+				&& slotStr.equals(String.valueOf(state.get("RETURNED_SLOT")));
+
+		if (state != null && !alreadyReturned) {
 			// 제어주기(tb_ctr_cycle.LOCK_MIN) 대기 — 제어명령을 <b>발사한 시점</b>부터 이 시간이
 			// 지나기 전에는 복귀 체크를 하지 않는다. 정지/기동이 현장 수위에 반영되기 전에 판정하면
 			// 아직 움직이지 않은 수위로 되돌림이 나가 제어가 진동한다.
 			//
-			// 대기는 오직 '제어 후 대기' 다. 기준은 언제나 마지막 발사 시각이며 판정 시각(START_TIME)
-			// 기준 대기는 두지 않는다:
-			//   - 발사 기록이 없으면 → 반영을 기다릴 제어 자체가 없다. 대기 없이 복귀 체크로 넘어간다.
-			//   - 마지막 발사가 START_TIME 보다 이전이어도 → 그 발사 시각 그대로 센다. 선후를 따져
-			//     '미발사' 로 막으면, AI 추천 모드처럼 발사가 나지 않는 운용에서 대기가 영구히 풀리지
-			//     않는다(억제 구간에는 이탈 UPSERT 도 건너뛰어 START_TIME 이 고정되고, 증감 추천이
-			//     안 나오니 승인할 변경도 없어 발사 → 대기 해제 경로가 스스로 닫힌다).
+			// 기준은 그 대기를 만든 제어의 발사 시각(DISPATCH_TIME) 이다. 행 자신이 발사 시각을
+			// 들고 있으므로 TB_MNL_CHN_LOG / TB_HMI_CTR_TAG 를 뒤질 필요가 없다.
+			// 대기 행은 DISPATCHED='Y' 일 때만 조회되므로 DISPATCH_TIME 은 원칙적으로 non-null 이다
+			// (마이그레이션 등으로 비어 있으면 게이트를 걸지 않고 복귀 체크로 넘어간다).
 			int cycleMin = controlCycleMinutes();
 			// 비교 기준을 '실제 시각' 으로 통일한다. dateTime 은 PRDCT_TIME(= 실행 + 10분)
 			// 이므로 −PRDCT_OFFSET_MIN 해서 발사 시각(실제 시각)과 같은 축에 놓는다.
 			LocalDateTime nowReal = dateTime.minusMinutes(PRDCT_OFFSET_MIN);
-			LocalDateTime dispatched = lastDispatchTime(pumpGrp);
+			// 발사 시각은 10분 판정 격자로 내려서 비교한다. 판정은 10분 경계에서만 돌아 nowReal 은 항상
+			// `:00` 초인데 발사는 판정보다 몇 초~1분 뒤라, 그대로 비교하면 30분 주기에서 29분이 나와
+			// 되돌림이 한 슬롯(10분) 밀린다. 격자로 내리면 "정확히 N번째 슬롯에 열린다"가 성립한다.
+			// (판정 직후 발사이므로 내림 오차는 초 단위다. 폴링 경로로 늦게 쏜 경우 최대 9분 관대해진다)
+			LocalDateTime dispatched = floorToSlot(parseSlot(state.get("DISPATCH_TIME")));
 
 			long elapsedMin = (dispatched == null) ? -1 : Duration.between(dispatched, nowReal).toMinutes();
 			if (dispatched != null && elapsedMin < cycleMin) {
@@ -7359,6 +7591,15 @@ public class DrvnConfig {
 				out.put("cycleWait", prog);
 				state = null;   // 아래 복귀 판정 블록을 건너뛰게 한다
 			}
+		}
+		if (!levelReturnOn) {
+			// 복귀 되돌림만 끈다. cycleWaitDir 는 바로 위 게이트에서 이미 정해졌고 그대로 유지되므로
+			// '제어주기 내 이탈 억제'(②)와 새 대기 개시(openDirection)는 계속 동작한다.
+			// 대기 행·발사 표시가 살아 있어야 제어주기 게이트의 기준(DISPATCH_TIME)이 성립하기 때문에
+			// 상태 테이블 자체는 건드리지 않는다.
+			// 제어주기 대기 중이면 그 사유가 더 구체적이므로 덮어쓰지 않는다.
+			if (cycleWaitDir == null) returnReason = "복귀 OFF (seoul.level-return.enabled=false)";
+			state = null;
 		}
 		if (state != null) {
 			// 확인 대상은 '제어의 원인이 된 배수지'(TRIGGER_STATIONS) 뿐이다. 원인이 둘이면 둘 다 본다.
@@ -7389,20 +7630,23 @@ public class DrvnConfig {
 						.append(" ? ").append(hit);
 			}
 
-			if (allReached && detail.length() > 0) {
+			if (alreadyReturned) {
+				// 이 슬롯에 되돌림이 이미 확정된 행이다(RETURNED_SLOT == 이 슬롯).
+				// 수위를 다시 평가하지 않고 그대로 재현한다 — 확정된 슬롯의 판정은 바뀌면 안 된다.
+				// 늦게 도착한 실측이나 목표수위 수정으로 재평가 결과가 달라져도 화면과 발사는 일치해야 한다.
+				returnDelta  = up ? -1 : +1;
+				returnReason = "복귀수위 도달(확정 재현) (" + detail + ") → " + direction + " 되돌림 "
+						+ (returnDelta > 0 ? "+1" : "−1");
+				out.put("returned", Boolean.TRUE);
+			} else if (allReached && detail.length() > 0) {
 				returnDelta  = up ? -1 : +1;
 				returnReason = "복귀수위 도달 (" + detail + ") → " + direction + " 되돌림 "
 						+ (returnDelta > 0 ? "+1" : "−1");
 				out.put("returned", Boolean.TRUE);
-				if (persist) {
-					try {
-						drvnMapper.deleteLevelReturnState(pumpGrp);
-					} catch (Exception e) {
-						logger.warn("[SEOUL/RETURN] 대기 상태 삭제 실패 pump_grp={}: {}", pumpGrp, e.getMessage());
-					}
-				}
+				// 전이 의도만 남긴다 — 실제 기록은 호출부가 배치 루프 밖에서 1회 수행한다.
+				out.put("returnCommitSlot", String.valueOf(state.get("START_SLOT")));
 			} else {
-				// 미도달 → 대기 유지. 상태는 그대로 보존한다(지우면 되돌림이 영구 누락).
+				// 미도달 → 대기 유지. 행은 그대로 보존한다(지우면 되돌림이 영구 누락).
 				returnReason = "복귀수위 대기 (" + direction + ": " + detail + ")";
 				pendingDir = direction;
 				pendingTrg = pendTrg;
@@ -7410,8 +7654,8 @@ public class DrvnConfig {
 		}
 
 		// === ② 이탈 체크 — 항상 수행. 복귀 만족 여부와 무관하다 ===
-		// 이탈이 있으면 대기 상태를 그 이탈로 기록한다. ①에서 삭제했더라도 여기서 새로 교체된다
-		// (복귀로 되돌린 뒤 곧바로 다시 이탈한 상황 → 새 이탈이 새 대기 상태가 되는 것이 맞다).
+		// 이탈이 있으면 새 대기를 개시한다. ①에서 되돌림이 확정됐어도 마찬가지다
+		// (복귀로 되돌린 뒤 곧바로 다시 이탈한 상황 → 새 이탈이 새 대기가 되는 것이 맞다).
 		// 제어주기 안에서는 이탈 판정을 방향 무관 전면 억제한다 → 유지 조합만 생성.
 		// 근거: 판정 게이트와 발사 throttle 이 같은 LOCK_MIN 을 쓰므로 이 구간에는 어떤 추천을 내도
 		// 발사되지 않는다(AI 자동·AI 추천·수동이 TB_MNL_CHN_LOG 단일 락을 공유). 발사되지도 않을
@@ -7421,26 +7665,18 @@ public class DrvnConfig {
 		if (deviationDelta != 0 && cycleWaitDir != null) {
 			devReason = devReason + " [제어주기 내 이탈 억제 → 유지]";
 			deviationDelta = 0;
-			// 대기 상태를 교체하지 않는다 — START_TIME 을 갱신하면 제어주기가 리셋되어
+			// 새 대기를 열지 않는다 — 새 START_SLOT 이 생기면 제어주기가 리셋되어
 			// 억제가 무한히 이어지고 복귀 체크도 영구히 열리지 않는다.
 		}
 
 		if (deviationDelta != 0) {
 			String direction = (deviationDelta > 0) ? "UP" : "DOWN";
-			if (persist) {
-				try {
-					HashMap<String, Object> param = new HashMap<>();
-					param.put("pumpGrp", pumpGrp);
-					param.put("direction", direction);
-					param.put("triggerStations", triggers);
-					param.put("startTime", dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
-					param.put("startComb", actComb);
-					param.put("startReason", devReason);
-					drvnMapper.upsertLevelReturnState(param);
-				} catch (Exception e) {
-					logger.warn("[SEOUL/RETURN] 대기 상태 기록 실패 pump_grp={}: {}", pumpGrp, e.getMessage());
-				}
-			}
+			// 전이 의도만 남긴다. 실제 기록은 호출부(배치 루프 밖)가 1회 수행하고,
+			// DISPATCHED='N' 으로 시작해 실제 발사가 나야 복귀 대상이 된다.
+			out.put("openDirection", direction);
+			out.put("openTriggers", triggers);
+			out.put("openComb", actComb);
+			out.put("openReason", devReason);
 			pendingDir = direction;
 			pendingTrg = triggers;
 		}
@@ -7452,6 +7688,112 @@ public class DrvnConfig {
 		out.put("delta", returnDelta + deviationDelta);   // 로그·표시용 합계. 조합 적용은 순차로 한다
 		out.put("reason", "복귀[" + returnReason + "] + 이탈[" + devReason + "]");
 		return out;
+	}
+
+	/** "yyyy-MM-dd HH:mm[:ss]" 문자열(또는 null)을 LocalDateTime 으로. 파싱 실패는 null. */
+	private LocalDateTime parseSlot(Object raw) {
+		if (raw == null) return null;
+		String s = String.valueOf(raw).trim();
+		if (s.isEmpty() || "null".equals(s)) return null;
+		try {
+			if (s.length() >= 19) {
+				return LocalDateTime.parse(s.substring(0, 19), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+			}
+			return LocalDateTime.parse(s.substring(0, 16), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+		} catch (Exception e) {
+			logger.warn("[SEOUL/RETURN] 시각 파싱 실패 raw={}: {}", s, e.getMessage());
+			return null;
+		}
+	}
+
+	/**
+	 * 10분 판정 격자로 내림 (12:40:25 → 12:40:00). null 은 그대로 null.
+	 * 판정은 10분 경계에서만 돌므로 경과 계산에 쓰는 시각은 같은 격자에 놓여야 한다.
+	 */
+	private LocalDateTime floorToSlot(LocalDateTime t) {
+		if (t == null) return null;
+		return t.withMinute((t.getMinute() / 10) * 10).withSecond(0).withNano(0);
+	}
+
+	/**
+	 * [Seoul/Dev] {@link #resolveLevelWithReturn} 이 낸 상태 전이 의도를 실제로 기록한다.
+	 *
+	 * <b>반드시 배치 루프 밖에서 슬롯당 1회만</b> 호출한다. 루프(setInsertPumpComn 의 i=−4~0,
+	 * 게다가 2스레드 동시 실행 관측) 안에서 쓰면 1회차가 바꾼 상태를 2회차가 읽어
+	 * 회차마다 다른 판정이 나온다 — 이번 사고(2026-08-10 15:10 slot delta=-2)의 구조적 원인이다.
+	 *
+	 * 두 전이는 동시에 날 수 있고, 순서가 중요하다:
+	 *   1) RETURN — 복귀가 적용된 슬롯을 기존 행에 표시(DELETE 하지 않는다. 지우면 재계산이 깨진다)
+	 *   2) OPEN   — 새 이탈 대기를 DISPATCHED='N' 으로 개시. 실제 발사가 나야 'Y' 가 된다
+	 *      ({@code PumpService.devInsertHmiTagFromLatestPumpYn} → {@code markLevelReturnDispatched})
+	 *
+	 * 둘 다 멱등하다 — 같은 슬롯으로 여러 번 불려도 결과가 같다.
+	 *
+	 * @param pumpGrp 펌프 그룹
+	 * @param judge   resolveLevelWithReturn 반환 맵 (null 이면 아무 것도 하지 않음)
+	 */
+	private void commitLevelReturnTransition(int pumpGrp, HashMap<String, Object> judge) {
+		if (judge == null) return;
+		String slot = (String) judge.get("slot");
+		if (slot == null) return;
+
+		Object commitStart = judge.get("returnCommitSlot");
+		if (commitStart != null) {
+			try {
+				HashMap<String, Object> p = new HashMap<>();
+				p.put("pumpGrp", pumpGrp);
+				p.put("startSlot", String.valueOf(commitStart));
+				p.put("returnedSlot", slot);
+				drvnMapper.markLevelReturnReturned(p);
+			} catch (Exception e) {
+				logger.warn("[SEOUL/RETURN] 복귀 적용 표시 실패 pump_grp={} startSlot={} slot={}: {}",
+						pumpGrp, commitStart, slot, e.getMessage());
+			}
+		}
+
+		Object openDir = judge.get("openDirection");
+		if (openDir != null) {
+			try {
+				HashMap<String, Object> p = new HashMap<>();
+				p.put("pumpGrp", pumpGrp);
+				p.put("startSlot", slot);
+				p.put("direction", String.valueOf(openDir));
+				p.put("triggerStations", judge.get("openTriggers"));
+				p.put("startComb", judge.get("openComb"));
+				p.put("startReason", judge.get("openReason"));
+				drvnMapper.openLevelReturnState(p);
+
+				// 발사가 계속 막히면 슬롯마다 'N' 행이 쌓인다 — 판정에는 영향 없지만(복귀 체크는 'Y' 만
+				// 본다) 테이블을 읽는 사람에게 "대기가 여러 건" 으로 보이므로 방금 것만 남긴다.
+				HashMap<String, Object> sweep = new HashMap<>();
+				sweep.put("pumpGrp", pumpGrp);
+				sweep.put("keepSlot", slot);
+				drvnMapper.supersedeUndispatchedLevelReturn(sweep);
+			} catch (Exception e) {
+				logger.warn("[SEOUL/RETURN] 대기 개시 기록 실패 pump_grp={} slot={}: {}",
+						pumpGrp, slot, e.getMessage());
+			}
+		}
+	}
+
+	/**
+	 * [Seoul/Dev] 현재 유효한 제어 판단 슬롯 (= 발사가 참조하는 TB_CTR_PUMPYN_RST 최신 RGSTR_TIME).
+	 *
+	 * 배치·발사·제어알람·제어사유 팝업이 <b>모두 이 슬롯</b>을 봐야 제어 판단이 하나로 모인다.
+	 * 종전에는 팝업만 산포도(preScatterData) 마지막 예측 시각을 기준으로 삼아 한 슬롯(10분)
+	 * 어긋났고, 정시 경계에서는 목표수위 시간대까지 갈렸다(hours = 슬롯 − 10분의 hour).
+	 *
+	 * now() 로 계산하지 않는 이유: 예측이 늦어 배치가 스킵되면 적재가 없는 슬롯을 판정하게 된다.
+	 *
+	 * @return 판정 슬롯. 적재된 슬롯이 없거나 조회 실패면 null (호출부가 폴백)
+	 */
+	private LocalDateTime currentControlSlot(int pumpGrp) {
+		try {
+			return parseSlot(drvnMapper.selectCurrentControlSlot(pumpGrp));
+		} catch (Exception e) {
+			logger.warn("[SEOUL] 현재 제어 슬롯 조회 실패 pump_grp={}: {}", pumpGrp, e.getMessage());
+			return null;
+		}
 	}
 
 	/** 목표수위 행에서 상/하한 선택. USER 값 우선, 없으면 기본값. */

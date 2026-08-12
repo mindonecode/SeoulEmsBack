@@ -41,6 +41,11 @@ public class PumpService {
     @Autowired
     private kr.co.mindone.ems.common.CommonMapper commonMapper;
 
+    // 조합 대수(가중치 합)·단계 목록 산출용. DrvnConfig 도 PumpService 를 들고 있어 순환이라 @Lazy.
+    @Autowired
+    @org.springframework.context.annotation.Lazy
+    private kr.co.mindone.ems.drvn.DrvnConfig drvnConfig;
+
     @Autowired
     private KafkaProperties kafkaProperties;
 
@@ -110,6 +115,20 @@ public class PumpService {
      */
     @Value("${seoul.control.preoff.delay.minutes:3}")
     private int preOffDelayMinutes;
+
+    /**
+     * [Seoul/Dev] 자동·추천 발사 1회에 허용하는 최대 조합 단계 이동. 기본 1.
+     *
+     * 수위조건 판정은 구조상 1단계만 낸다(shiftCombIndexByLevel 1회). 그보다 큰 이동이 계산됐다면
+     * 목표 조합이 현장 실측과 어긋난 것이므로 발사하지 않는다 — 예: resolveBaseCombIndex 가
+     * 실측 조합 조회 실패로 '최소대수 조합' 에 폴백하면, 판정이 유지(0)여도 목표가 현장과 몇 단계씩
+     * 벌어져 대량 정지가 나간다. 보정하지 않고 <b>거르는</b> 이유는 다음 슬롯에 실측이 정상화되면
+     * 저절로 올바른 판정이 나오기 때문이다. 0 이하면 가드 off.
+     *
+     * 수동 API(DrvnController.pumpManualOper*)는 이 경로를 타지 않아 영향받지 않는다.
+     */
+    @Value("${seoul.control.max-step:1}")
+    private int controlMaxStep;
 
     /**
      * SchedulerConfig 의 taskScheduler 빈 (ThreadPoolTaskScheduler, poolSize=5).
@@ -2986,11 +3005,13 @@ public class PumpService {
         // 집합 자체를 들고 있는다 — 발사 알림(팝업·음성)은 조합 전체가 아니라 이 '변화분' 을 읽는다.
         java.util.TreeSet<Integer> toStop = new java.util.TreeSet<>();
         java.util.TreeSet<Integer> toStart = new java.util.TreeSet<>();
+        java.util.TreeSet<Integer> targetOnSet = new java.util.TreeSet<>();
         for (HashMap<String, Object> row : target) {
             if (row == null || row.get("PUMP_IDX") == null) continue;
             int pumpIdx = Integer.parseInt(row.get("PUMP_IDX").toString());
             boolean targetOn = "1".equals(String.valueOf(row.get("PUMP_YN")));
             boolean nowOn = running.contains(pumpIdx);
+            if (targetOn) targetOnSet.add(pumpIdx);
             if (nowOn && !targetOn) toStop.add(pumpIdx);
             if (!nowOn && targetOn) toStart.add(pumpIdx);
         }
@@ -3000,6 +3021,40 @@ public class PumpService {
         if (!hasStop && !hasStart) {
             System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: no change (current == target) PUMP_GRP=" + pumpGrp);
             return 0;
+        }
+
+        // [Seoul/Dev] 단계 상한 가드 — 한 번 제어에 조합 2단계 이상 이동은 발사하지 않는다.
+        //
+        // 판정은 구조상 1단계만 낸다(shiftCombIndexByLevel 1회). 그보다 큰 이동이 나왔다면
+        // 목표 조합이 현장 실측과 어긋난 것이고, 여기서 걸러내지 않으면 diff 만큼 그대로 나간다.
+        // 대표 경로: resolveBaseCombIndex 가 실측 조합 조회 실패로 '최소대수 조합' 에 폴백하면
+        // 판정이 유지(0)여도 목표가 현장과 몇 단계씩 벌어진다(그 경우 이탈 delta 가 0 이라
+        // TB_CTR_LEVEL_RETURN 대기 행도 안 열려 제어주기 억제조차 걸리지 않는다).
+        //
+        // 막기만 하고 보정하지 않는다 — 다음 슬롯에 실측이 정상화되면 올바른 판정이 다시 나온다.
+        // 판단 재료를 못 구하면(대수 목록 2개 미만) 발사하지 않는다. checkControlLockStatus 와 같은
+        // fail-closed 방침이다. 수동 API(pumpManualOper*)는 이 함수를 타지 않아 영향받지 않는다.
+        if (controlMaxStep > 0 && ("dev".equals(wpp_code) || "seoul".equals(wpp_code))) {
+            double curLv = drvnConfig.pumpCombLevel(pumpGrp, running);
+            double tgtLv = drvnConfig.pumpCombLevel(pumpGrp, targetOnSet);
+            if (curLv <= 0) {
+                // 실측 ON 펌프가 하나도 없다 — 전 펌프 정지(비상)이거나 PMB 실측 결손이다.
+                // 어느 쪽이든 자동제어가 정지 상태에서 최소조합(서울 3대)을 한 번에 올릴 일은 아니다.
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: STEP GUARD 실측 가동 없음"
+                        + " (running=" + running + ") → skip. PUMP_GRP=" + pumpGrp
+                        + ", target=" + targetOnSet + "(" + tgtLv + "대)");
+                return 0;
+            }
+            int steps = drvnConfig.combStepDistance(pumpGrp, curLv, tgtLv);
+            if (steps < 0 || steps > controlMaxStep) {
+                System.out.println("[DEV] devInsertHmiTagFromLatestPumpYn: STEP GUARD steps=" + steps
+                        + " > max=" + controlMaxStep + " → skip. PUMP_GRP=" + pumpGrp
+                        + ", 실측=" + running + "(" + curLv + "대)"
+                        + ", 목표=" + targetOnSet + "(" + tgtLv + "대)"
+                        + ", 단계목록=" + drvnConfig.combLevelSteps(pumpGrp)
+                        + (steps < 0 ? " [단계목록 확보 실패 → fail-closed]" : ""));
+                return 0;
+            }
         }
 
         int actions = 0;
@@ -3050,7 +3105,34 @@ public class PumpService {
                 if (n > 0) recordDispatchEvt(pumpGrp, 2, "RUN", startSnapshot, triggerSrc);
             }
         }
+
+        // [Seoul/Dev] 수위조건 복귀 대기 '발사 확정'.
+        // 대기는 이탈 '판정' 시점에 DISPATCHED='N' 으로 열리고, 실제로 명령이 나간 여기서만 'Y' 가 된다.
+        // 복귀 체크는 'Y' 인 행만 보므로 발사되지 않은 이탈은 되돌릴 대상이 되지 않는다 —
+        // "하지 않은 제어는 되돌리지 않는다"(2026-08-10 15:10 슬롯 근거 없는 2단계 감량의 원인).
+        // 이 함수는 ai_auto(배치·폴링)와 ai_command(운전원 승인) 모든 발사 경로의 단일 관문이라
+        // 여기 한 곳이면 전부 커버된다. 판정 내용은 알 필요 없이 "방금 명령이 나갔다" 만 알리면 된다.
+        if (actions > 0) {
+            markLevelReturnDispatched(pumpGrp);
+        }
         return actions;
+    }
+
+    /**
+     * [Seoul/Dev] 아직 발사되지 않은 복귀 대기 1건을 발사 확정(DISPATCHED='Y') 으로 올린다.
+     * 실패는 무시한다 — 발사 자체를 되돌릴 이유가 되지 않는다(다만 WARN 은 남긴다:
+     * 확정이 누락되면 그 이탈은 복귀 대상에서 빠져 되돌림이 영구 누락된다).
+     */
+    private void markLevelReturnDispatched(int pumpGrp) {
+        try {
+            HashMap<String, Object> p = new HashMap<>();
+            p.put("pumpGrp", pumpGrp);
+            p.put("dispatchTime", nowStringDateReal());
+            drvnMapper.markLevelReturnDispatched(p);
+        } catch (Exception e) {
+            System.out.println("[SEOUL/RETURN] 발사 확정 기록 실패(무시) PUMP_GRP=" + pumpGrp
+                    + " err=" + e.getMessage());
+        }
     }
 
     /**

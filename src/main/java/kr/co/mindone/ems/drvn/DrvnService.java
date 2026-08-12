@@ -363,26 +363,35 @@ public class DrvnService {
 	}
 
 	/**
-	 * 수위조건 복귀수위 되돌림 대기 상태 조회 (TB_CTR_LEVEL_RETURN).
+	 * 수위조건 복귀수위 되돌림 대기 조회 (TB_CTR_LEVEL_RETURN, 종료되지 않은 최신 1건).
 	 * 화면·운영에서 "왜 제어주기 대기가 걸려 있나" 를 확인하는 용도.
+	 *
+	 * DISPATCHED 를 함께 본다: 'N' 이면 이탈 판정은 났지만 실제 발사가 없어 복귀 대상이 아니다
+	 * (발사 차단·제어락 구간에서 정상적으로 생기는 상태다. 되돌림은 발사된 제어에만 적용된다).
+	 *
 	 * @param pumpGrp 펌프 그룹
-	 * @return PUMP_GRP, DIRECTION, TRIGGER_STATIONS, START_TIME. 대기 없으면 null
+	 * @return PUMP_GRP, DIRECTION, TRIGGER_STATIONS, DISPATCHED, START_SLOT, DISPATCH_TIME,
+	 *         START_COMB, START_REASON. 대기 없으면 null
 	 */
 	public HashMap<String, Object> selectLevelReturnState(int pumpGrp) {
-		return drvnMapper.selectLevelReturnState(pumpGrp);
+		return drvnMapper.selectActiveLevelReturnState(pumpGrp);
 	}
 
 	/**
-	 * 되돌림 대기 상태 수동 해제 (TB_CTR_LEVEL_RETURN 삭제).
-	 * 평시에는 복귀수위 도달 시 배치가 스스로 지운다(DrvnConfig.resolveLevelWithReturn).
+	 * 되돌림 대기 수동 해제 — <b>되돌림을 발생시키지 않고</b> 대기만 폐기한다.
+	 * 평시에는 복귀수위 도달 시 배치가 스스로 종료한다(DrvnConfig.commitLevelReturnTransition).
 	 * 대기가 비정상적으로 남아 이탈 판정이 계속 억제될 때 DB 직접 접속 없이 풀기 위한 통로다.
-	 * 지운 뒤 이탈이 여전하면 다음 10분 슬롯에 새 START_TIME 으로 다시 기록된다.
+	 * 폐기 후 이탈이 여전하면 다음 10분 슬롯에 새 START_SLOT 으로 다시 기록된다.
+	 *
+	 * 행을 DELETE 하지 않고 RETURNED_SLOT 을 채워 비활성화한다 — 지우면 그 슬롯의 판정을
+	 * 재계산할 수 없어 화면과 실제 발사가 갈린다(tb_ctr_level_return.sql 주석 참고).
+	 *
 	 * @param pumpGrp 펌프 그룹
-	 * @return 삭제 직전 상태(없었으면 null) — 무엇을 지웠는지 호출부가 확인할 수 있게 반환한다
+	 * @return 폐기 직전 상태(없었으면 null) — 무엇을 풀었는지 호출부가 확인할 수 있게 반환한다
 	 */
 	public HashMap<String, Object> deleteLevelReturnState(int pumpGrp) {
-		HashMap<String, Object> before = drvnMapper.selectLevelReturnState(pumpGrp);
-		drvnMapper.deleteLevelReturnState(pumpGrp);
+		HashMap<String, Object> before = drvnMapper.selectActiveLevelReturnState(pumpGrp);
+		drvnMapper.discardLevelReturnState(pumpGrp);
 		return before;
 	}
 
