@@ -498,31 +498,138 @@
 		) m ON m.TAG = t.TAG AND m.HOURS = t.HOURS AND m.MX_MDFCN = t.MDFCN_DT
 	</select>
 
-	<!-- ===== 수위조건 복귀수위 되돌림 대기 상태 (TB_CTR_LEVEL_RETURN, 그룹당 1행) ===== -->
-	<select id="selectLevelReturnState" parameterType="int" resultType="hashMap">
-		SELECT PUMP_GRP, DIRECTION, TRIGGER_STATIONS,
-		       DATE_FORMAT(START_TIME, '%Y-%m-%d %H:%i') AS START_TIME
+	<!-- ===== 수위조건 복귀수위 되돌림 대기 이력 (TB_CTR_LEVEL_RETURN, 그룹 × 시작슬롯) =====
+	     설계 원칙은 tb_ctr_level_return.sql 헤더 주석 참고:
+	       ① 복귀 판정은 '발사 기준' — DISPATCHED='Y' 인 행만 본다
+	       ② 상태를 소비하지 않는다 — 복귀 적용 시 DELETE 대신 RETURNED_SLOT 을 채운다
+	     둘 다 "판정은 (슬롯, DB 상태)의 순수 함수" 를 만들기 위한 것이다. 그래야 배치가
+	     한 사이클에 여러 번 계산하든, 제어사유 팝업이 나중에 재계산하든 같은 답이 나온다. -->
+
+	<!--
+	  슬롯 기준 대기 행 조회. 이 슬롯(#{slot}) 시점에 '유효한' 대기 1건을 돌려준다.
+	    RETURNED_SLOT = slot            → 그 슬롯에 복귀 되돌림이 적용된 행 (재계산 시 −1/+1 재현)
+	    RETURNED_SLOT IS NULL 또는 > slot → 아직 대기 중
+	    RETURNED_SLOT < slot            → 이미 소진 → 조회되지 않음
+	  START_SLOT < slot 조건: 이탈이 난 그 슬롯 자체에서는 복귀를 따지지 않는다(같은 슬롯 자기참조 방지).
+	-->
+	<select id="selectLevelReturnStateAt" parameterType="hashmap" resultType="hashMap">
+		SELECT PUMP_GRP, DIRECTION, TRIGGER_STATIONS, DISPATCHED,
+		       DATE_FORMAT(START_SLOT,    '%Y-%m-%d %H:%i') AS START_SLOT,
+		       DATE_FORMAT(DISPATCH_TIME, '%Y-%m-%d %H:%i') AS DISPATCH_TIME,
+		       DATE_FORMAT(RETURNED_SLOT, '%Y-%m-%d %H:%i') AS RETURNED_SLOT
 		FROM TB_CTR_LEVEL_RETURN
 		WHERE PUMP_GRP = #{pumpGrp}
+		  AND DISPATCHED = 'Y'
+		  AND START_SLOT &lt; #{slot}
+		  AND (RETURNED_SLOT IS NULL OR RETURNED_SLOT &gt;= #{slot})
+		ORDER BY START_SLOT DESC
+		LIMIT 1
 	</select>
 
-	<insert id="upsertLevelReturnState" parameterType="hashmap">
-		<!-- 새 이탈이 나면 기존 대기 상태를 교체한다(새 이탈 우선 정책). -->
+	<!--
+	  이탈 대기 개시. DISPATCHED='N' 으로 시작한다 — 실제 발사가 나야 복귀 대상이 된다.
+	  PK 가 (PUMP_GRP, START_SLOT) 이므로 같은 슬롯을 여러 번 계산해도 1행이다(멱등).
+	  이미 발사된(DISPATCHED='Y') 행은 건드리지 않는다 — 재계산이 발사 사실을 지우면 안 된다.
+	-->
+	<insert id="openLevelReturnState" parameterType="hashmap">
 		INSERT INTO TB_CTR_LEVEL_RETURN
-			(PUMP_GRP, DIRECTION, TRIGGER_STATIONS, START_TIME, START_COMB, START_REASON)
+			(PUMP_GRP, START_SLOT, DIRECTION, TRIGGER_STATIONS, DISPATCHED, START_COMB, START_REASON)
 		VALUES
-			(#{pumpGrp}, #{direction}, #{triggerStations}, #{startTime}, #{startComb}, #{startReason})
+			(#{pumpGrp}, #{startSlot}, #{direction}, #{triggerStations}, 'N', #{startComb}, #{startReason})
 		ON DUPLICATE KEY UPDATE
-			DIRECTION        = VALUES(DIRECTION),
-			TRIGGER_STATIONS = VALUES(TRIGGER_STATIONS),
-			START_TIME       = VALUES(START_TIME),
-			START_COMB       = VALUES(START_COMB),
-			START_REASON     = VALUES(START_REASON)
+			DIRECTION        = IF(DISPATCHED = 'Y', DIRECTION,        VALUES(DIRECTION)),
+			TRIGGER_STATIONS = IF(DISPATCHED = 'Y', TRIGGER_STATIONS, VALUES(TRIGGER_STATIONS)),
+			START_COMB       = IF(DISPATCHED = 'Y', START_COMB,       VALUES(START_COMB)),
+			START_REASON     = IF(DISPATCHED = 'Y', START_REASON,     VALUES(START_REASON))
 	</insert>
 
-	<delete id="deleteLevelReturnState" parameterType="int">
-		DELETE FROM TB_CTR_LEVEL_RETURN WHERE PUMP_GRP = #{pumpGrp}
-	</delete>
+	<!--
+	  미발사 대기 정리. 방금 개시한 슬롯(#{keepSlot}) 외의 DISPATCHED='N' 행을 폐기한다.
+	  이탈이 지속되는데 발사가 계속 막히면(제어락·dispatch.enabled=false·AI 추천 모드) 슬롯마다
+	  'N' 행이 하나씩 쌓인다. 판정에는 영향이 없지만(복귀 체크는 'Y' 만 본다) 테이블을 읽는 사람에게
+	  "대기가 여러 건" 으로 보이므로 살아 있는 미발사 대기는 항상 1건으로 유지한다.
+	  RETURNED_SLOT = START_SLOT 은 '되돌림 없이 폐기' 를 뜻한다(discardLevelReturnState 주석 참고).
+	-->
+	<update id="supersedeUndispatchedLevelReturn" parameterType="hashmap">
+		UPDATE TB_CTR_LEVEL_RETURN
+		   SET RETURNED_SLOT = START_SLOT
+		 WHERE PUMP_GRP = #{pumpGrp}
+		   AND DISPATCHED = 'N'
+		   AND RETURNED_SLOT IS NULL
+		   AND START_SLOT &lt;&gt; #{keepSlot}
+	</update>
+
+	<!--
+	  발사 확정. 아직 발사되지 않은 가장 최근 대기 1건을 'Y' 로 올린다.
+	  호출부(PumpService.devInsertHmiTagFromLatestPumpYn)는 판정 내용을 알 필요가 없다 —
+	  "이 그룹에 방금 제어명령이 나갔다" 는 사실만 전달하면 된다.
+	  발사 경로(ai_auto / ai_command)가 모두 그 함수를 지나므로 여기 한 곳이면 전부 커버된다.
+	-->
+	<update id="markLevelReturnDispatched" parameterType="hashmap">
+		UPDATE TB_CTR_LEVEL_RETURN
+		   SET DISPATCHED = 'Y',
+		       DISPATCH_TIME = #{dispatchTime}
+		 WHERE PUMP_GRP = #{pumpGrp}
+		   AND DISPATCHED = 'N'
+		   AND RETURNED_SLOT IS NULL
+		 ORDER BY START_SLOT DESC
+		 LIMIT 1
+	</update>
+
+	<!--
+	  복귀 되돌림 적용 표시. DELETE 하지 않는다 — 지우면 같은 슬롯 재계산 시 답이 달라진다.
+	  이미 채워져 있으면 덮어쓰지 않는다(먼저 확정된 슬롯이 진실).
+	-->
+	<update id="markLevelReturnReturned" parameterType="hashmap">
+		UPDATE TB_CTR_LEVEL_RETURN
+		   SET RETURNED_SLOT = #{returnedSlot}
+		 WHERE PUMP_GRP = #{pumpGrp}
+		   AND START_SLOT = #{startSlot}
+		   AND RETURNED_SLOT IS NULL
+	</update>
+
+	<!--
+	  운영 확인용 — 아직 종료되지 않은(RETURNED_SLOT IS NULL) 최신 대기 1건.
+	  DISPATCHED 를 함께 내려준다: 'N' 이면 "이탈 판정은 났지만 발사되지 않아 복귀 대상이 아님" 이라는
+	  진단 정보다(발사 차단/제어락 구간에서 정상적으로 생기는 상태).
+	-->
+	<select id="selectActiveLevelReturnState" parameterType="int" resultType="hashMap">
+		SELECT PUMP_GRP, DIRECTION, TRIGGER_STATIONS, DISPATCHED,
+		       DATE_FORMAT(START_SLOT,    '%Y-%m-%d %H:%i') AS START_SLOT,
+		       DATE_FORMAT(DISPATCH_TIME, '%Y-%m-%d %H:%i') AS DISPATCH_TIME,
+		       START_COMB, START_REASON
+		FROM TB_CTR_LEVEL_RETURN
+		WHERE PUMP_GRP = #{pumpGrp}
+		  AND RETURNED_SLOT IS NULL
+		ORDER BY START_SLOT DESC
+		LIMIT 1
+	</select>
+
+	<!--
+	  운영 수동 해제 — 되돌림을 발생시키지 않고 대기만 폐기한다.
+	  RETURNED_SLOT 을 START_SLOT 으로 채우는 이유: 조회 조건이 RETURNED_SLOT >= slot 이고
+	  START_SLOT < slot 이므로, 이 값이면 어떤 미래 슬롯에서도 조회되지 않고
+	  'RETURNED_SLOT == slot' 재현 경로에도 걸리지 않는다 → 되돌림 ∓1 이 나가지 않는다.
+	  DELETE 하지 않는 이유는 판정 재현 가능성과 사후 추적 — tb_ctr_level_return.sql 주석 참고.
+	-->
+	<update id="discardLevelReturnState" parameterType="int">
+		UPDATE TB_CTR_LEVEL_RETURN
+		   SET RETURNED_SLOT = START_SLOT
+		 WHERE PUMP_GRP = #{pumpGrp}
+		   AND RETURNED_SLOT IS NULL
+	</update>
+
+	<!--
+	  현재 유효한 제어 판단 슬롯 = 발사가 실제로 참조하는 슬롯
+	  (PumpMapper.selectLatestPumpYnByGrp 가 고르는 것과 같은 RGSTR_TIME).
+	  배치·발사·제어알람·제어사유 팝업이 전부 이 슬롯을 봐야 판단이 갈리지 않는다.
+	  now() 기반으로 계산하지 않는 이유: 예측이 늦어 배치가 스킵되면 적재가 없는 슬롯을 판정하게 된다.
+	-->
+	<select id="selectCurrentControlSlot" parameterType="int" resultType="string">
+		SELECT DATE_FORMAT(MAX(RGSTR_TIME), '%Y-%m-%d %H:%i')
+		FROM TB_CTR_PUMPYN_RST
+		WHERE PUMP_GRP = #{pumpGrp}
+	</select>
 
 	<!--
 	  임의 horizon(분) 예측 조회. prdctFlowPressure 의 일반화 버전.
