@@ -85,6 +85,8 @@ public class DrvnService {
 	private String pumpDstrbId;
 	@Value("${dstrb.prdct.pumpPwrTag}")
 	private String pumpPwrTag;
+	@Value("${dstrb.prdct.pumpActivePwrTag}")
+	private String pumpActivePwrTag;
 	@Value("${dstrb.prdct.pwrCal.calVal}")
 	private String prdctPwrCalVal;
 	@Value("${dstrb.prdct.dstrbId}")
@@ -114,6 +116,8 @@ public class DrvnService {
 	private LinkedHashMap<Integer, HashMap<String, String>> pumpDstrbIdMap;
 	// 계통별 펌프 IDX → IWH 적산 태그명. key: PUMP_IDX(문자열), value: 태그명
 	private LinkedHashMap<Integer, LinkedHashMap<String, String>> pumpPwrTagMap;
+	// 계통별 펌프 IDX → IKW 유효전력(순시 kW) 태그명. key: PUMP_IDX(문자열), value: 태그명
+	private LinkedHashMap<Integer, LinkedHashMap<String, String>> pumpActivePwrTagMap;
 	private HashMap<String, List<String>> dstrbIdMap;
 	@Getter
 	private HashMap<Integer, HashMap<String, List<String>>> headLossFlowIdMap;
@@ -156,6 +160,7 @@ public class DrvnService {
 		pumpDstrbIdMap = gson.fromJson(pumpDstrbId, linkedStrType);
 		Type linkedPwrType = new TypeToken<LinkedHashMap<Integer, LinkedHashMap<String, String>>>(){}.getType();
 		pumpPwrTagMap = gson.fromJson(pumpPwrTag, linkedPwrType);
+		pumpActivePwrTagMap = gson.fromJson(pumpActivePwrTag, linkedPwrType);
 		dstrbIdMap = gson.fromJson(dstrbId, strArrType);
 		headLossFlowIdMap = gson.fromJson(headLossFlow, arrType);
 		headLossGrpMap = gson.fromJson(headLossGrp, arrType);
@@ -6080,16 +6085,17 @@ public class DrvnService {
 
 	/**
 	 * 전력 원단위 + 유량 차트 데이터.
-	 * - 과거: t-6h ~ t 의 1분 단위 raw 시점 (총 361 row). 보조 prev 로 t-6h-1min 1점을 추가 조회.
-	 * - 예측: t+1h, t+2h, t+3h, t+6h (4 row, 정시 기준).
-	 * - 인접 시점 간 차분으로 구간 사용량 산출. Δh 는 (cur−prev) 분/60.
-	 * - 전력: pumpPwrTagMap[pumpGrp] 의 PUMP_IDX → IWH 태그 매핑에서, cur 시점 가동 펌프의 IWH 차분만 합산
+	 * - 과거: t-24h ~ t 의 1분 단위 raw 시점.
+	 * - 예측: t+10min, t+1h, t+2h, t+3h, t+6h (5 row, t0 기준).
+	 * - 전력: pumpActivePwrTagMap[pumpGrp] 의 PUMP_IDX → IKW 태그 매핑에서, 해당 시점 가동 펌프의
+	 *   IKW(순시 유효전력, kW) 값만 합산. 적산(IWH) 태그가 아니므로 직전 시점 차분을 하지 않는다.
 	 *   - 실측 가동: TB_RAWDATA + PMB_TAG (시점별, 누락 분은 직전 분 LOCF)
 	 *   - 예측 가동: TB_CTR_PUMPYN_RST 의 가장 최근 RGSTR_TIME 행 (미래 시점 전체에 동일 적용)
 	 * - 유량: pumpDstrbIdMap[pumpGrp].flow (UFR 순시값, m³/h)
-	 * - 원단위 = 구간 전력(kWh) / (UFR(m³/h) × Δh) = kWh/m³  (flow ≥ MIN_FLOW_M3H 인 경우만 계산)
+	 * - 원단위 = 전력(kW) / UFR(m³/h) = kWh/m³  (flow ≥ MIN_FLOW_M3H 인 경우만 계산)
+	 *   순시값끼리의 나눗셈이라 시간 폭(Δh)이 약분되어 별도 환산이 필요 없다.
 	 * @param pumpGrp 펌프 계통
-	 * @return [{ts, pwrInterval, flow, pwrUnit, deltaHour, isPredict, runningPumps}]
+	 * @return [{ts, pwr, flow, pwrUnit, isPredict, runningPumps}]
 	 */
 	public List<HashMap<String, Object>> selectPwrUnitChartData(int pumpGrp) {
 		return selectPwrUnitChartData(pumpGrp, null);
@@ -6099,10 +6105,10 @@ public class DrvnService {
 
 	public List<HashMap<String, Object>> selectPwrUnitChartData(int pumpGrp, String nowOverride) {
 		List<HashMap<String, Object>> result = new ArrayList<>();
-		LinkedHashMap<String, String> idxToTag = pumpPwrTagMap == null ? null : pumpPwrTagMap.get(pumpGrp);
+		LinkedHashMap<String, String> idxToTag = pumpActivePwrTagMap == null ? null : pumpActivePwrTagMap.get(pumpGrp);
 		HashMap<String, String> dstrbMap = pumpDstrbIdMap == null ? null : pumpDstrbIdMap.get(pumpGrp);
 		if (idxToTag == null || idxToTag.isEmpty() || dstrbMap == null || dstrbMap.get("flow") == null) {
-			log.warn("selectPwrUnitChartData: pumpPwrTagMap 또는 pumpDstrbIdMap 미설정. pumpGrp={}", pumpGrp);
+			log.warn("selectPwrUnitChartData: pumpActivePwrTagMap 또는 pumpDstrbIdMap 미설정. pumpGrp={}", pumpGrp);
 			return result;
 		}
 		String flowTag = dstrbMap.get("flow");
@@ -6128,12 +6134,13 @@ public class DrvnService {
 		// 예: 14:30~14:39 → t0 = 14:30, 14:55 → t0 = 14:50.
 		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
 
-		// 실측 시점: [now-24h-1min: 보조 prev, 결과 미포함] + now-24h ~ now (1분 간격).
+		// 실측 시점: now-24h ~ now (1분 간격).
 		// t0 가 아니라 now(분 단위) 까지 가져와 차트가 현재 시각 1분까지 표시되도록 함.
 		// (수위 차트와 동일하게 24h 윈도우. 유량 W1/W2 비교 라인도 이 범위 + 미래 6h 까지 표시.)
-		LocalDateTime auxStart = now.minusHours(24).minusMinutes(1);
+		// IKW 순시값을 쓰므로 차분용 보조 prev 시점(now-24h-1min)은 더 이상 조회하지 않는다.
+		LocalDateTime rawStart = now.minusHours(24);
 		List<LocalDateTime> rawTimes = new ArrayList<>();
-		for (LocalDateTime t = auxStart; !t.isAfter(now); t = t.plusMinutes(1)) {
+		for (LocalDateTime t = rawStart; !t.isAfter(now); t = t.plusMinutes(1)) {
 			rawTimes.add(t);
 		}
 		// 예측 시점: t+10min, t+1h, t+2h, t+3h, t+6h (5점, t0 분 단위 기준)
@@ -6289,8 +6296,7 @@ public class DrvnService {
 		allTimes.addAll(rawTimes);
 		allTimes.addAll(prdctTimes);
 
-		// 시점별 가동 펌프 IWH 합산. 누락 분(rawRunningByTs 에 키 없음)은 직전 분의 running set 을 carry-forward.
-		Map<String, Double> iwhSumByTs = new LinkedHashMap<>();
+		// 시점별 가동 펌프 집합. 누락 분(rawRunningByTs 에 키 없음)은 직전 분의 running set 을 carry-forward.
 		Map<String, Set<String>> runningByTs = new LinkedHashMap<>();
 		Set<String> lastRawRunning = Collections.emptySet();
 		for (LocalDateTime t : allTimes) {
@@ -6309,68 +6315,44 @@ public class DrvnService {
 				running = lastRawRunning;
 			}
 			runningByTs.put(tsKey, running);
-
-			Map<String, Double> tagMap = tsTagValue.get(tsKey);
-			Double sum = null;
-			if (tagMap != null) {
-				double s = 0;
-				int hit = 0;
-				for (Map.Entry<String, String> e : idxToTag.entrySet()) {
-					String pumpIdxStr = e.getKey();
-					String iwhTag = e.getValue();
-					if (!running.contains(pumpIdxStr)) continue;
-					Double v = tagMap.get(iwhTag);
-					if (v != null) { s += v; hit++; }
-				}
-				if (hit > 0) sum = s;
-			}
-			iwhSumByTs.put(tsKey, sum);
 		}
 
-		// 시점별 row 빌드. allTimes[0] (t-6h-1min) 은 보조 prev 전용이라 결과에 포함하지 않는다.
-		// 따라서 t-6h(첫 표시 시점) 부터 prev 가 항상 존재하여 pwrInterval/pwrUnit 산출 가능.
+		// 시점별 row 빌드. IKW 는 순시값이라 직전 시점 차분 없이 그 시점 값을 그대로 합산한다.
+		// (정지 펌프도 IKW 가 0 으로 들어오지만, 결측/노이즈 방지를 위해 가동 펌프 필터는 유지.)
 		for (int i = 0; i < allTimes.size(); i++) {
-			if (i == 0) continue; // 보조 prev 시점은 skip
 			LocalDateTime cur = allTimes.get(i);
-			LocalDateTime prev = allTimes.get(i - 1);
 			String curKey = cur.format(shortFmt);
-			String prevKey = prev.format(shortFmt);
 
 			Set<String> running = runningByTs.getOrDefault(curKey, Collections.emptySet());
 			Map<String, Double> curTagMap = tsTagValue.get(curKey);
-			Map<String, Double> prevTagMap = tsTagValue.get(prevKey);
 
-			Double pwrInterval = null;
-			Double deltaH = ChronoUnit.MINUTES.between(prev, cur) / 60.0;
-			if (curTagMap != null && prevTagMap != null) {
+			Double pwr = null;
+			if (curTagMap != null) {
 				double s = 0;
 				int hit = 0;
 				for (Map.Entry<String, String> e : idxToTag.entrySet()) {
 					if (!running.contains(e.getKey())) continue;
-					Double cv = curTagMap.get(e.getValue());
-					Double pv = prevTagMap.get(e.getValue());
-					if (cv == null || pv == null) continue;
-					double diff = cv - pv;
-					if (diff < 0) diff = 0;
-					s += diff;
+					Double v = curTagMap.get(e.getValue());
+					if (v == null) continue;
+					if (v < 0) v = 0.0;
+					s += v;
 					hit++;
 				}
-				if (hit > 0) pwrInterval = s;
+				if (hit > 0) pwr = s;
 			}
 
 			Double flow = curTagMap == null ? null : curTagMap.get(flowTag);
 			Double pwrUnit = null;
-			// 분 단위에서 flow 가 매우 작으면 pwrUnit 가 폭주 → 임계값(MIN_FLOW_M3H) 이상일 때만 산출
-			if (pwrInterval != null && flow != null && flow >= MIN_FLOW_M3H && deltaH != null && deltaH > 0) {
-				pwrUnit = pwrInterval / (flow * deltaH);
+			// kW / (m³/h) = kWh/m³ (시간 폭이 약분). flow 가 매우 작으면 폭주 → 임계값 이상일 때만 산출.
+			if (pwr != null && flow != null && flow >= MIN_FLOW_M3H) {
+				pwrUnit = pwr / flow;
 			}
 
 			HashMap<String, Object> row = new HashMap<>();
 			row.put("ts", curKey);
-			row.put("pwrInterval", pwrInterval);
+			row.put("pwr", pwr);
 			row.put("flow", flow);
 			row.put("pwrUnit", pwrUnit);
-			row.put("deltaHour", deltaH);
 			row.put("isPredict", cur.isAfter(now));   // now(분 단위) 이후가 예측. 실측 1분 단위 그래프 표시 보장.
 			row.put("flowPrdct", flowPrdctHistByTs.get(curKey));   // 과거 10분 경계의 horizon 예측값 (그 외 null). 미래는 flow 가 곧 예측.
 			row.put("flowW1", flowW1ByTs.get(curKey));             // 1일 전 같은 시각 실측 (W1 비교 라인 — 키 이름 호환 유지).
