@@ -736,10 +736,10 @@ public class DrvnController extends BaseController {
 	}
 
 	/**
-	 * [GET] 전력 원단위 + 유량 차트 데이터 (정시 기준, t-6h ~ t+6h, 9개 시점).
+	 * [GET] 전력 원단위 + 유량 차트 데이터 (실측 1분 단위 t-24h ~ t + 예측 5개 시점).
 	 * @param pump_grp 펌프 계통
 	 * @param nowDateTime (옵션) "yyyy-MM-dd HH:mm" 또는 "yyyy-MM-dd HH:mm:ss" 형식. 미지정 시 현재 시각.
-	 * 응답: [{ts, pwrInterval, flow, pwrUnit, deltaHour, isPredict, runningPumps}]
+	 * 응답: [{ts, pwr, flow, pwrUnit, isPredict, runningPumps}]  (pwr = 가동 펌프 IKW 순시 합, kW)
 	 */
 	@GetMapping("/selectPwrUnitChartData/{pump_grp}")
 	public ResponseObject<List<HashMap<String, Object>>> selectPwrUnitChartData(
