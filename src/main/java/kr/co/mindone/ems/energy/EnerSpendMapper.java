@@ -174,5 +174,15 @@ public interface EnerSpendMapper {
 
 	List<HashMap<String, Object>> selectFuturePeakPredictData();
 
+	List<HashMap<String, Object>> selectFutureTotalPeakPredictData(HashMap<String, Object> map);
+
+	List<HashMap<String, Object>> selectFuturePeakPredictByHorizon(HashMap<String, Object> map);
+
+	List<HashMap<String, Object>> selectPastPeakPredict10minHorizon(HashMap<String, Object> map);
+
+	List<HashMap<String, Object>> selectPastTotalPeakPredict10minHorizon(HashMap<String, Object> map);
+
+	List<HashMap<String, Object>> selectTagSumData24H(HashMap<String, Object> map);
+
 	List<HashMap<String, Object>> selectTagData24H(HashMap<String, Object> map);
 }

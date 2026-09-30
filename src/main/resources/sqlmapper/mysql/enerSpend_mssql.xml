@@ -785,6 +785,137 @@
 			ANLY_TIME ASC
 	</select>
 
+	<!--
+	  총 전력 예측(TB_PEAK_TOTAL_PWR_PRDCT_RST) 5단계 시점(+10m/+1h/+2h/+3h/+6h) 조회.
+	  제어현황 수위 차트(selectMultiTagPrdctRange)와 같은 방식: ANLY_TIME 별로 nowDateTime 이전 최신 CNFRM_TIME 1건.
+	  - anlyTimeList: 예측 대상 시각 목록 ('yyyy-MM-dd HH:mm:00')
+	  - nowDateTime / cnfrmLowerBound: 확인시각 조회 범위
+	-->
+	<select id="selectFutureTotalPeakPredictData" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			DATE_FORMAT(t.ANLY_TIME, '%Y-%m-%d %H:%i') AS anlyTime,
+			t.PRDCT_PWR AS prdctPwr
+		FROM TB_PEAK_TOTAL_PWR_PRDCT_RST t
+		JOIN (
+			SELECT ANLY_TIME, MAX(CNFRM_TIME) AS MAX_CNFRM
+			FROM TB_PEAK_TOTAL_PWR_PRDCT_RST
+			WHERE ANLY_TIME IN
+				<foreach item="atime" collection="anlyTimeList" open="(" separator="," close=")">
+					#{atime}
+				</foreach>
+				AND CNFRM_TIME &lt;= #{nowDateTime}
+				AND CNFRM_TIME &gt;= #{cnfrmLowerBound}
+			GROUP BY ANLY_TIME
+		) m
+			ON t.ANLY_TIME = m.ANLY_TIME
+			AND t.CNFRM_TIME = m.MAX_CNFRM
+		ORDER BY t.ANLY_TIME ASC
+	</select>
+
+	<!-- 송수펌프 전력 예측(TB_PEAK_PWR_PRDCT_RST) 5단계 시점 조회. selectFutureTotalPeakPredictData 와 동일 방식. -->
+	<select id="selectFuturePeakPredictByHorizon" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			DATE_FORMAT(t.ANLY_TIME, '%Y-%m-%d %H:%i') AS anlyTime,
+			t.PRDCT_PWR AS prdctPwr
+		FROM TB_PEAK_PWR_PRDCT_RST t
+		JOIN (
+			SELECT ANLY_TIME, MAX(CNFRM_TIME) AS MAX_CNFRM
+			FROM TB_PEAK_PWR_PRDCT_RST
+			WHERE ANLY_TIME IN
+				<foreach item="atime" collection="anlyTimeList" open="(" separator="," close=")">
+					#{atime}
+				</foreach>
+				AND CNFRM_TIME &lt;= #{nowDateTime}
+				AND CNFRM_TIME &gt;= #{cnfrmLowerBound}
+			GROUP BY ANLY_TIME
+		) m
+			ON t.ANLY_TIME = m.ANLY_TIME
+			AND t.CNFRM_TIME = m.MAX_CNFRM
+		ORDER BY t.ANLY_TIME ASC
+	</select>
+
+	<!--
+	  송수펌프 전력 과거 10분 horizon 예측 (실측 구간 오버레이용).
+	  제어현황 selectMultiTagPrdct10minHorizon 과 같은 의미: 10분 경계 ANLY_TIME 마다
+	  그 시각 10분 전(CNFRM_TIME &lt;= ANLY_TIME - 10분)까지 확정된 최신 예측 1건.
+	-->
+	<select id="selectPastPeakPredict10minHorizon" parameterType="hashMap" resultType="hashMap">
+		WITH ranked_prediction AS (
+			SELECT
+				ANLY_TIME,
+				PRDCT_PWR,
+				ROW_NUMBER() OVER (
+					PARTITION BY ANLY_TIME
+					ORDER BY CNFRM_TIME DESC
+				) AS rn
+			FROM
+				TB_PEAK_PWR_PRDCT_RST
+			WHERE
+				ANLY_TIME &gt;= #{startDate}
+				AND ANLY_TIME &lt;= #{endDate}
+				AND MINUTE(ANLY_TIME) % 10 = 0
+				AND CNFRM_TIME &lt;= DATE_SUB(ANLY_TIME, INTERVAL 10 MINUTE)
+		)
+		SELECT
+			DATE_FORMAT(ANLY_TIME, '%Y-%m-%d %H:%i') AS anlyTime,
+			PRDCT_PWR AS prdctPwr
+		FROM
+			ranked_prediction
+		WHERE
+			rn = 1
+		ORDER BY
+			ANLY_TIME ASC
+	</select>
+
+	<!-- 총 전력 과거 10분 horizon 예측 (TB_PEAK_TOTAL_PWR_PRDCT_RST). selectPastPeakPredict10minHorizon 과 동일 방식. -->
+	<select id="selectPastTotalPeakPredict10minHorizon" parameterType="hashMap" resultType="hashMap">
+		WITH ranked_prediction AS (
+			SELECT
+				ANLY_TIME,
+				PRDCT_PWR,
+				ROW_NUMBER() OVER (
+					PARTITION BY ANLY_TIME
+					ORDER BY CNFRM_TIME DESC
+				) AS rn
+			FROM
+				TB_PEAK_TOTAL_PWR_PRDCT_RST
+			WHERE
+				ANLY_TIME &gt;= #{startDate}
+				AND ANLY_TIME &lt;= #{endDate}
+				AND MINUTE(ANLY_TIME) % 10 = 0
+				AND CNFRM_TIME &lt;= DATE_SUB(ANLY_TIME, INTERVAL 10 MINUTE)
+		)
+		SELECT
+			DATE_FORMAT(ANLY_TIME, '%Y-%m-%d %H:%i') AS anlyTime,
+			PRDCT_PWR AS prdctPwr
+		FROM
+			ranked_prediction
+		WHERE
+			rn = 1
+		ORDER BY
+			ANLY_TIME ASC
+	</select>
+
+	<!-- 여러 태그의 최근 24시간 1분 값을 시각별로 합산 (송수펌프 전력 실측 = 송수동 PWI 태그 합). -->
+	<select id="selectTagSumData24H" parameterType="hashMap" resultType="hashMap">
+		SELECT
+			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') AS TS,
+			ROUND(SUM(VALUE), 2) AS VALUE
+		FROM
+			TB_RAWDATA
+		WHERE
+			TAGNAME IN
+				<foreach item="tag" collection="tagIds" open="(" separator="," close=")">
+					#{tag}
+				</foreach>
+			AND TS &gt;= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+			AND TS &lt;= NOW()
+		GROUP BY
+			TS
+		ORDER BY
+			TS ASC
+	</select>
+
 	<select id="selectTagData24H" parameterType="hashMap" resultType="hashMap">
 		SELECT
 			DATE_FORMAT(TS, '%Y-%m-%d %H:%i') AS TS,

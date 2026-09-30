@@ -16,11 +16,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.function.Function;
 
 @Service
 public class EnerSpendService {
@@ -210,6 +212,74 @@ public class EnerSpendService {
 	}
 
 	/**
+	 * 예측 5단계 시점(+10m/+1h/+2h/+3h/+6h) 조회. 제어현황 수위 차트(DrvnService.selectWaterLevel)와 같은 기준.
+	 * t0 배치가 아직 적재 전이면 직전 10분 배치(t0-10분 기준)의 now 이후 시점으로 fallback.
+	 * @param query 대상 예측 테이블 조회 매퍼 (anlyTimeList / nowDateTime / cnfrmLowerBound 파라미터)
+	 */
+	private List<HashMap<String, Object>> selectPredictByHorizon(
+			Function<HashMap<String, Object>, List<HashMap<String, Object>>> query) {
+		DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:00");
+		LocalDateTime now = LocalDateTime.now().withSecond(0).withNano(0);
+		LocalDateTime t0 = now.withMinute((now.getMinute() / 10) * 10);
+
+		HashMap<String, Object> param = new HashMap<>();
+		param.put("nowDateTime", now.format(fmt));
+		param.put("cnfrmLowerBound", now.minusDays(2).format(fmt));
+		param.put("anlyTimeList", buildHorizonTimes(t0, now, fmt));
+		List<HashMap<String, Object>> rows = query.apply(param);
+
+		if (rows == null || rows.isEmpty()) {
+			List<String> fallbackTimes = buildHorizonTimes(t0.minusMinutes(10), now, fmt);
+			if (!fallbackTimes.isEmpty()) {
+				param.put("anlyTimeList", fallbackTimes);
+				rows = query.apply(param);
+			}
+		}
+		return rows == null ? new ArrayList<>() : rows;
+	}
+
+	/**
+	 * 조회 행의 시각/값을 차트 X/Y 목록에 추가합니다. 시각이 없는 행은 건너뛰고, 값은 소수 둘째 자리 반올림.
+	 */
+	private void appendChartPoints(List<HashMap<String, Object>> rows, String tsKey, String valueKey,
+			List<String> chartX, List<Double> chartY) {
+		if (rows == null) {
+			return;
+		}
+		for (HashMap<String, Object> row : rows) {
+			if (row == null || row.get(tsKey) == null) {
+				continue;
+			}
+
+			Object valueObj = row.get(valueKey);
+			double value = 0.0;
+			if (valueObj instanceof Number) {
+				value = ((Number) valueObj).doubleValue();
+			} else if (valueObj != null) {
+				String valueText = valueObj.toString().trim();
+				if (!valueText.isEmpty() && !"-".equals(valueText)) {
+					value = Double.parseDouble(valueText);
+				}
+			}
+			chartX.add(row.get(tsKey).toString());
+			chartY.add(Math.round(value * 100d) / 100d);
+		}
+	}
+
+	private List<String> buildHorizonTimes(LocalDateTime base, LocalDateTime now, DateTimeFormatter fmt) {
+		List<String> times = new ArrayList<>();
+		for (LocalDateTime cand : Arrays.asList(
+				base.plusMinutes(10),
+				base.plusHours(1),
+				base.plusHours(2),
+				base.plusHours(3),
+				base.plusHours(6))) {
+			if (cand.isAfter(now)) times.add(cand.format(fmt));
+		}
+		return times;
+	}
+
+	/**
 	 * 전력 피크 분석 종합 데이터 조회
 	 * @return 
 	 */
@@ -245,6 +315,8 @@ public class EnerSpendService {
 		List<Double> predictionChartY = new ArrayList<>();
 		List<String> totalPowerChartX = new ArrayList<>();
 		List<Double> totalPowerChartY = new ArrayList<>();
+		List<String> totalPowerPredictChartX = new ArrayList<>();
+		List<Double> totalPowerPredictChartY = new ArrayList<>();
 		String peakRemainTime = "-";
 		Integer peakRemainMinutes = null;
 
@@ -302,6 +374,19 @@ public class EnerSpendService {
 			totalPowerChartY.add(Math.round(historyValue * 100d) / 100d);
 		}
 
+		// 1-2. 같은 차트의 총 전력 예측(TB_PEAK_TOTAL_PWR_PRDCT_RST). 상단 송수펌프 차트와 동일 기준:
+		//      과거 24h 는 10분마다 10분 horizon 예측, 미래는 t0(10분 내림) 기준 +10m/+1h/+2h/+3h/+6h.
+		LocalDateTime chartNow = LocalDateTime.now().withSecond(0).withNano(0);
+		LocalDateTime chartT0 = chartNow.withMinute((chartNow.getMinute() / 10) * 10);
+		DateTimeFormatter chartFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:00");
+		HashMap<String, Object> pastPredictParam = new HashMap<>();
+		pastPredictParam.put("startDate", chartT0.minusHours(24).format(chartFmt));
+		pastPredictParam.put("endDate", chartT0.format(chartFmt));
+		appendChartPoints(enerSpendMapper.selectPastTotalPeakPredict10minHorizon(pastPredictParam), "anlyTime", "prdctPwr",
+				totalPowerPredictChartX, totalPowerPredictChartY);
+		appendChartPoints(selectPredictByHorizon(enerSpendMapper::selectFutureTotalPeakPredictData), "anlyTime", "prdctPwr",
+				totalPowerPredictChartX, totalPowerPredictChartY);
+
 		// 2. 송수동 모니터링 대상 태그들을 가져와 최신값을 모두 더해 송수펌프 순시 전력을 계산합니다.
 		HashMap<String, Object> peakTagParam = new HashMap<>();
 		peakTagParam.put("clsfc", "송수동");
@@ -319,6 +404,16 @@ public class EnerSpendService {
 			if (!pwiTag.isEmpty()) {
 				pumpTagIds.add(pwiTag);
 			}
+		}
+
+		// 2-1. 상단 차트 실측: 송수동 PWI 태그들의 최근 24시간 1분 합산값.
+		List<String> pumpPowerChartX = new ArrayList<>();
+		List<Double> pumpPowerChartY = new ArrayList<>();
+		if (!pumpTagIds.isEmpty()) {
+			HashMap<String, Object> pumpHistoryParam = new HashMap<>();
+			pumpHistoryParam.put("tagIds", pumpTagIds);
+			appendChartPoints(enerSpendMapper.selectTagSumData24H(pumpHistoryParam), "TS", "VALUE",
+					pumpPowerChartX, pumpPowerChartY);
 		}
 
 		double pumpPwi = 0.0;
@@ -395,25 +490,8 @@ public class EnerSpendService {
 				continue;
 			}
 
-			Object anlyTimeObj = futurePeakRow.get("anlyTime");
-			Object prdctPwrObj = futurePeakRow.get("prdctPwr");
 			Object peakYnObj = futurePeakRow.get("peakYn");
 			Object remainMinutesObj = futurePeakRow.get("remainMinutes");
-
-			if (anlyTimeObj != null) {
-				predictionChartX.add(anlyTimeObj.toString());
-			}
-
-			double prdctPwr = 0.0;
-			if (prdctPwrObj instanceof Number) {
-				prdctPwr = ((Number) prdctPwrObj).doubleValue();
-			} else if (prdctPwrObj != null) {
-				String prdctPwrText = prdctPwrObj.toString().trim();
-				if (!prdctPwrText.isEmpty()) {
-					prdctPwr = Double.parseDouble(prdctPwrText);
-				}
-			}
-			predictionChartY.add(Math.round(prdctPwr * 100d) / 100d);
 
 			if (!"Y".equals(String.valueOf(peakYnObj)) || peakRemainMinutes != null) {
 				continue;
@@ -437,6 +515,12 @@ public class EnerSpendService {
 			}
 		}
 
+		// 5-1. 상단 차트 예측: 과거 24h 는 10분마다 10분 horizon 예측, 미래는 +10m/+1h/+2h/+3h/+6h (1-2 와 같은 조회 범위).
+		appendChartPoints(enerSpendMapper.selectPastPeakPredict10minHorizon(pastPredictParam), "anlyTime", "prdctPwr",
+				predictionChartX, predictionChartY);
+		appendChartPoints(selectPredictByHorizon(enerSpendMapper::selectFuturePeakPredictByHorizon), "anlyTime", "prdctPwr",
+				predictionChartX, predictionChartY);
+
 		resultMap.put("allPwi", Math.round(allPwi * 100d) / 100d);
 		resultMap.put("pumpPwi", Math.round(pumpPwi * 100d) / 100d);
 		resultMap.put("goalPeak", Math.round(goalPeak * 100d) / 100d);
@@ -447,6 +531,10 @@ public class EnerSpendService {
 		resultMap.put("predictionChartY", predictionChartY);
 		resultMap.put("totalPowerChartX", totalPowerChartX);
 		resultMap.put("totalPowerChartY", totalPowerChartY);
+		resultMap.put("pumpPowerChartX", pumpPowerChartX);
+		resultMap.put("pumpPowerChartY", pumpPowerChartY);
+		resultMap.put("totalPowerPredictChartX", totalPowerPredictChartX);
+		resultMap.put("totalPowerPredictChartY", totalPowerPredictChartY);
 		resultMap.put("ym", ym);
 		resultMap.put("baseTag", totalPowerTag);
 		resultMap.put("ts", ts);
